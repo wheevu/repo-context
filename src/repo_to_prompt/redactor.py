@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -120,7 +121,7 @@ class RedactionConfig:
     structure_safe_redaction: bool = True
 
     @classmethod
-    def from_dict(cls, data: dict) -> RedactionConfig:
+    def from_dict(cls, data: dict[str, Any]) -> RedactionConfig:
         """Create RedactionConfig from a dictionary (e.g., from config file)."""
         config = cls()
 

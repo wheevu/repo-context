@@ -10,6 +10,7 @@ import contextlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from .config import Chunk, FileInfo, OutputMode, ScanStats
 from .ranker import FileRanker
@@ -351,7 +352,7 @@ class ReportRenderer:
     def __init__(
         self,
         stats: ScanStats,
-        config: dict,
+        config: dict[str, Any],
         output_files: list[str],
         include_timestamp: bool = True,
         files: list[FileInfo] | None = None,
@@ -375,9 +376,9 @@ class ReportRenderer:
         self.files = files or []
         self.schema_version = REPORT_SCHEMA_VERSION
 
-    def render(self) -> dict:
+    def render(self) -> dict[str, Any]:
         """Render the report as a dictionary."""
-        report = {
+        report: dict[str, Any] = {
             "schema_version": self.schema_version,
         }
         if self.include_timestamp:
@@ -465,7 +466,7 @@ def write_outputs(
     context_pack: str,
     chunks: list[Chunk],
     stats: ScanStats,
-    config: dict,
+    config: dict[str, Any],
     include_timestamp: bool = True,
     files: list[FileInfo] | None = None,
 ) -> list[str]:

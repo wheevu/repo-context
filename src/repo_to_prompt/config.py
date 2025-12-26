@@ -10,6 +10,7 @@ import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 # Current report schema version
 REPORT_SCHEMA_VERSION = "1.0.0"
@@ -332,7 +333,7 @@ class FileInfo:
             or "documentation/" in self.relative_path.lower()
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
             "id": self.id,
@@ -360,7 +361,7 @@ class Chunk:
     tags: list[str] = field(default_factory=list)
     token_estimate: int = 0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
             "id": self.id,
@@ -393,11 +394,11 @@ class ScanStats:
     processing_time_seconds: float = 0.0
     top_ignored_patterns: dict[str, int] = field(default_factory=dict)
     languages_detected: dict[str, int] = field(default_factory=dict)
-    dropped_files: list[dict] = field(default_factory=list)  # Files dropped from budget
+    dropped_files: list[dict[str, Any]] = field(default_factory=list)  # Files dropped from budget
     redaction_counts: dict[str, int] = field(default_factory=dict)  # Redaction stats
-    top_ranked_files: list[dict] = field(default_factory=list)  # Top N files by priority
+    top_ranked_files: list[dict[str, Any]] = field(default_factory=list)  # Top N files by priority
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization.
 
         Output is deterministic: all dicts are sorted by key for stable JSON.

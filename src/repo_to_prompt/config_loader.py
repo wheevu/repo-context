@@ -214,13 +214,13 @@ def _parse_toml(path: Path) -> dict[str, Any]:
         )
 
     with open(path, "rb") as f:
-        data = tomllib.load(f)
+        data: dict[str, Any] = tomllib.load(f)
 
     # Support both flat and nested [repo-to-prompt] section
-    if "repo-to-prompt" in data:
-        return data["repo-to-prompt"]
-    if "r2p" in data:
-        return data["r2p"]
+    if "repo-to-prompt" in data and isinstance(data["repo-to-prompt"], dict):
+        return dict(data["repo-to-prompt"])
+    if "r2p" in data and isinstance(data["r2p"], dict):
+        return dict(data["r2p"])
     return data
 
 
@@ -232,16 +232,18 @@ def _parse_yaml(path: Path) -> dict[str, Any]:
         )
 
     with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+        raw_data = yaml.safe_load(f)
 
-    if not isinstance(data, dict):
+    if not isinstance(raw_data, dict):
         return {}
 
+    data: dict[str, Any] = dict(raw_data)
+
     # Support both flat and nested section
-    if "repo-to-prompt" in data:
-        return data["repo-to-prompt"]
-    if "r2p" in data:
-        return data["r2p"]
+    if "repo-to-prompt" in data and isinstance(data["repo-to-prompt"], dict):
+        return dict(data["repo-to-prompt"])
+    if "r2p" in data and isinstance(data["r2p"], dict):
+        return dict(data["r2p"])
     return data
 
 

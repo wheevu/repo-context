@@ -11,6 +11,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from rich.console import Console
@@ -114,7 +115,7 @@ def clone_github_repo(
 
     try:
         # Clone options
-        clone_kwargs: dict = {"depth": 1} if shallow and ref is None else {}
+        clone_kwargs: dict[str, Any] = {"depth": 1} if shallow and ref is None else {}
 
         if ref:
             # For specific refs, we need to clone without depth first
@@ -263,6 +264,8 @@ class RepoContext:
         )
         return self._repo_path
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: Any
+    ) -> None:
         if self._is_temp and self._repo_path is not None:
             cleanup_temp_repo(self._repo_path.parent)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 from collections import defaultdict
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import NamedTuple
@@ -43,7 +43,7 @@ class FileCache:
     Cache keys are based on (path, mtime_ns, size) for freshness detection.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._binary_cache: dict[FileCacheKey, bool] = {}
         self._minified_cache: dict[FileCacheKey, bool] = {}
         self._token_cache: dict[FileCacheKey, int] = {}
@@ -515,7 +515,9 @@ class FileScanner:
             sorted(self._ignored_pattern_counts.items(), key=lambda x: (-x[1], x[0]))
         )
 
-    def scan_concurrent(self, progress_callback: callable | None = None) -> list[FileInfo]:
+    def scan_concurrent(
+        self, progress_callback: Callable[[int, int], None] | None = None
+    ) -> list[FileInfo]:
         """
         Scan the repository using concurrent file I/O.
 
@@ -576,7 +578,7 @@ class FileScanner:
 
         def check_file(
             idx: int, file_path: Path, rel_path: str, size: int
-        ) -> tuple[int, tuple[Path, str, int] | None]:
+        ) -> tuple[int, tuple[Path, str, int] | None, str | None]:
             """Check a single file for binary/minified status."""
             # Check if binary (with caching)
             is_binary = None

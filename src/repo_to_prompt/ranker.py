@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 from .config import (
     IMPORTANT_CONFIG_FILES,
@@ -100,7 +101,7 @@ class FileRanker:
         self._entrypoint_candidates: set[str] = set()  # Raw candidates from manifests
         self._entrypoints: set[str] = set()  # Validated entrypoints
         self._detected_languages: set[str] = set()
-        self._manifest_info: dict = {}
+        self._manifest_info: dict[str, Any] = {}
         self._scanned_files: set[str] = scanned_files or set()
 
         # Merge custom weights with defaults
@@ -375,7 +376,7 @@ class FileRanker:
         """Get detected programming languages."""
         return self._detected_languages.copy()
 
-    def get_manifest_info(self) -> dict:
+    def get_manifest_info(self) -> dict[str, Any]:
         """Get information extracted from manifests."""
         return self._manifest_info.copy()
 

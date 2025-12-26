@@ -2,7 +2,7 @@
 
 Convert repositories into LLM-friendly context packs for prompting and RAG.
 
-*Because LLMs are smart… but they still can’t read your repo through vibes.* 🙎🏻‍♂️
+_Because LLMs are smart… but they still can’t read your repo through vibes._ 🙎🏻‍♂️
 
 [![CI](https://github.com/wheevu/repo-to-prompt/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wheevu/repo-to-prompt/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -19,6 +19,8 @@ If you’ve ever pasted a whole repository into a prompt and immediately regrett
 - **Smart File Ranking**: Prioritizes READMEs, configs, entrypoints over tests and generated files
 - **Language-Aware Chunking**: Uses code structure (functions, classes) for Python, JS/TS, Go, Java, Rust
 - **Advanced Secret Redaction**: 25+ patterns, entropy-based detection, paranoid mode, and allowlists
+- **Structure-Safe Redaction**: Redaction never breaks code syntax (AST-validated for Python)
+- **UTF-8 Encoding**: Proper handling of emojis, smart quotes, and international characters
 - **Configuration Files**: Project-level config via `repo-to-prompt.toml` or `.r2p.yml`
 - **Gitignore Respect**: Honors `.gitignore` patterns using Git as source of truth
 - **GitHub Support**: Clone and process remote repositories directly
@@ -108,38 +110,38 @@ repo-to-prompt export [OPTIONS]
 
 #### Input Options
 
-| Option | Short | Description |
-| ------ | ----- | ----------- |
-| `--path PATH` | `-p` | Local path to the repository |
-| `--repo URL` | `-r` | GitHub repository URL |
-| `--ref REF` | | Git ref (branch/tag/SHA) for GitHub repos |
+| Option        | Short | Description                               |
+| ------------- | ----- | ----------------------------------------- |
+| `--path PATH` | `-p`  | Local path to the repository              |
+| `--repo URL`  | `-r`  | GitHub repository URL                     |
+| `--ref REF`   |       | Git ref (branch/tag/SHA) for GitHub repos |
 
 #### Filter Options
 
-| Option | Short | Default | Description |
-| ------ | ----- | ------- | ----------- |
-| `--include-ext EXT` | `-i` | (many) | Comma-separated extensions to include |
-| `--exclude-glob GLOB` | `-e` | (many) | Comma-separated glob patterns to exclude |
-| `--max-file-bytes N` | | 1048576 | Max size per file (1 MB) |
-| `--max-total-bytes N` | | 20000000 | Max total export size (20 MB) |
-| `--no-gitignore` | | false | Don't respect .gitignore files |
+| Option                | Short | Default  | Description                              |
+| --------------------- | ----- | -------- | ---------------------------------------- |
+| `--include-ext EXT`   | `-i`  | (many)   | Comma-separated extensions to include    |
+| `--exclude-glob GLOB` | `-e`  | (many)   | Comma-separated glob patterns to exclude |
+| `--max-file-bytes N`  |       | 1048576  | Max size per file (1 MB)                 |
+| `--max-total-bytes N` |       | 20000000 | Max total export size (20 MB)            |
+| `--no-gitignore`      |       | false    | Don't respect .gitignore files           |
 
 #### Chunking Options
 
-| Option | Default | Description |
-| ------ | ------- | ----------- |
-| `--chunk-tokens N` | 800 | Target tokens per chunk |
-| `--chunk-overlap N` | 120 | Token overlap between chunks |
-| `--min-chunk-tokens N` | 200 | Minimum chunk size; smaller chunks are coalesced (`0` disables) |
+| Option                 | Default | Description                                                     |
+| ---------------------- | ------- | --------------------------------------------------------------- |
+| `--chunk-tokens N`     | 800     | Target tokens per chunk                                         |
+| `--chunk-overlap N`    | 120     | Token overlap between chunks                                    |
+| `--min-chunk-tokens N` | 200     | Minimum chunk size; smaller chunks are coalesced (`0` disables) |
 
 #### Output Options
 
-| Option | Short | Default | Description |
-| ------ | ----- | ------- | ----------- |
-| `--mode MODE` | `-m` | both | Output mode: `prompt`, `rag`, or `both` |
-| `--output-dir DIR` | `-o` | ./out | Base output directory (outputs go into `DIR/<repo-name>/`) |
-| `--tree-depth N` | | 4 | Max depth for directory tree |
-| `--no-redact` | | false | Disable secret redaction |
+| Option             | Short | Default | Description                                                |
+| ------------------ | ----- | ------- | ---------------------------------------------------------- |
+| `--mode MODE`      | `-m`  | both    | Output mode: `prompt`, `rag`, or `both`                    |
+| `--output-dir DIR` | `-o`  | ./out   | Base output directory (outputs go into `DIR/<repo-name>/`) |
+| `--tree-depth N`   |       | 4       | Max depth for directory tree                               |
+| `--no-redact`      |       | false   | Disable secret redaction                                   |
 
 ### Command: `info`
 
@@ -151,12 +153,12 @@ repo-to-prompt info PATH [OPTIONS]
 
 `info` uses the same scanner as `export`, so you can pass filters for consistent statistics:
 
-| Option | Short | Default | Description |
-| ------ | ----- | ------- | ----------- |
-| `--include-ext EXT` | `-i` | (all) | Comma-separated extensions to include |
-| `--exclude-glob GLOB` | `-e` | (none) | Comma-separated glob patterns to exclude |
-| `--max-file-bytes N` | | 1048576 | Max size per file (1 MB) |
-| `--no-gitignore` | | false | Don't respect .gitignore files |
+| Option                | Short | Default | Description                              |
+| --------------------- | ----- | ------- | ---------------------------------------- |
+| `--include-ext EXT`   | `-i`  | (all)   | Comma-separated extensions to include    |
+| `--exclude-glob GLOB` | `-e`  | (none)  | Comma-separated glob patterns to exclude |
+| `--max-file-bytes N`  |       | 1048576 | Max size per file (1 MB)                 |
+| `--no-gitignore`      |       | false   | Don't respect .gitignore files           |
 
 ## Examples
 
@@ -248,6 +250,7 @@ Example:
 **Languages:** python (35), markdown (8), yaml (2)
 
 **Entrypoints:**
+
 - `src/my_project/cli.py`
 - `src/my_project/__main__.py`
 
@@ -298,8 +301,18 @@ Processing statistics and file manifest:
     "chunk_tokens": 800
   },
   "files": [
-    {"id": "a1b2c3d4e5f67890", "path": "README.md", "priority": 1.0, "tokens": 450},
-    {"id": "b2c3d4e5f6789012", "path": "src/main.py", "priority": 0.85, "tokens": 320}
+    {
+      "id": "a1b2c3d4e5f67890",
+      "path": "README.md",
+      "priority": 1.0,
+      "tokens": 450
+    },
+    {
+      "id": "b2c3d4e5f6789012",
+      "path": "src/main.py",
+      "priority": 0.85,
+      "tokens": 320
+    }
   ],
   "output_files": ["context_pack.md", "chunks.jsonl", "report.json"]
 }
@@ -312,7 +325,7 @@ By default, `repo-to-prompt` detects and redacts common secrets:
 ### Built-in Patterns (25+)
 
 - AWS access keys and secret keys
-- GitHub tokens (ghp_, gho_, ghu_, ghr_)
+- GitHub tokens (ghp*, gho*, ghu*, ghr*)
 - GitLab tokens
 - Slack tokens and webhooks
 - Stripe API keys
@@ -377,25 +390,35 @@ For maximum security, paranoid mode redacts any long alphanumeric string:
 TOKEN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"  # Redacted
 ```
 
-Safe files (*.md, *.json, *.lock) are excluded from paranoid mode to prevent false positives.
+Safe files (_.md, _.json, \*.lock) are excluded from paranoid mode to prevent false positives.
+
+### Structure-Safe Redaction
+
+For source code files, redaction is designed to **never break code syntax**:
+
+- **Python files**: Redaction patterns are AST-validated. If replacing a secret would break Python syntax, the original code is preserved instead.
+- **Other source files**: Inline replacement within string literals preserves code structure.
+- **Config/doc files**: Standard inline redaction is applied.
+
+This ensures that code blocks in the generated context pack remain syntactically valid and can be safely used in prompts without introducing parse errors.
 
 ## File Priority Ranking
 
 Files are ranked by importance (highest to lowest):
 
-| Priority | Category | Examples |
-| -------- | -------- | -------- |
-| 1.00 | README | README.md, README.rst |
-| 0.95 | Main docs | CONTRIBUTING.md, CHANGELOG.md |
-| 0.90 | Config | pyproject.toml, package.json, Dockerfile |
-| 0.85 | Entrypoints | main.py, index.js, cli.py |
-| 0.80 | API definitions | types.ts, models.py, schema.graphql |
-| 0.75 | Core source | src/**, lib/** |
-| 0.60 | Examples | examples/**, samples/** |
-| 0.50 | Tests | tests/**, *_test.py |
-| 0.20 | Generated | *.min.js, auto-generated |
-| 0.15 | Lock files | package-lock.json, poetry.lock |
-| 0.10 | Vendored | vendor/**, node_modules/** |
+| Priority | Category        | Examples                                 |
+| -------- | --------------- | ---------------------------------------- |
+| 1.00     | README          | README.md, README.rst                    |
+| 0.95     | Main docs       | CONTRIBUTING.md, CHANGELOG.md            |
+| 0.90     | Config          | pyproject.toml, package.json, Dockerfile |
+| 0.85     | Entrypoints     | main.py, index.js, cli.py                |
+| 0.80     | API definitions | types.ts, models.py, schema.graphql      |
+| 0.75     | Core source     | src/**, lib/**                           |
+| 0.60     | Examples        | examples/**, samples/**                  |
+| 0.50     | Tests           | tests/\*_, _\_test.py                    |
+| 0.20     | Generated       | \*.min.js, auto-generated                |
+| 0.15     | Lock files      | package-lock.json, poetry.lock           |
+| 0.10     | Vendored        | vendor/**, node_modules/**               |
 
 Custom weights can be configured in your config file (see [Configuration Files](#configuration-files)).
 

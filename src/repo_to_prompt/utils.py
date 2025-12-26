@@ -51,6 +51,14 @@ def stable_hash(content: str, path: str, start_line: int, end_line: int) -> str:
 def detect_encoding(file_path: Path, sample_size: int = 8192) -> str:
     """
     Detect the encoding of a file.
+    
+    Strategy:
+    1. Check for BOM markers first
+    2. Try UTF-8 (most common for modern source files)
+    3. Fall back to chardet only if UTF-8 fails
+    
+    This approach prevents chardet from incorrectly detecting UTF-8 files
+    as Latin-1 or Windows-1252, which causes mojibake.
 
     Args:
         file_path: Path to the file
@@ -66,13 +74,23 @@ def detect_encoding(file_path: Path, sample_size: int = 8192) -> str:
         if not sample:
             return "utf-8"
 
-        # Check for BOM
+        # Check for BOM markers first (most reliable)
         if sample.startswith(b"\xef\xbb\xbf"):
             return "utf-8-sig"
-        if sample.startswith(b"\xff\xfe") or sample.startswith(b"\xfe\xff"):
-            return "utf-16"
+        if sample.startswith(b"\xff\xfe"):
+            return "utf-16-le"
+        if sample.startswith(b"\xfe\xff"):
+            return "utf-16-be"
 
-        # Use chardet for detection
+        # Try UTF-8 first - most source files are UTF-8
+        # If the content decodes cleanly as UTF-8, use it
+        try:
+            sample.decode("utf-8")
+            return "utf-8"
+        except UnicodeDecodeError:
+            pass
+
+        # Fall back to chardet for non-UTF-8 files
         result = chardet.detect(sample)
         encoding = result.get("encoding")
 
@@ -127,6 +145,14 @@ def read_file_safe(
 ) -> tuple[str, str]:
     """
     Safely read a file with encoding detection and error handling.
+    
+    Strategy:
+    1. If encoding specified, use it
+    2. Otherwise, try UTF-8 first (most common for source files)
+    3. If UTF-8 fails with errors, detect encoding and retry
+    4. Always use errors="replace" to avoid crashes
+    
+    This ensures UTF-8 files with emojis/smart quotes are read correctly.
 
     Args:
         file_path: Path to the file
@@ -136,15 +162,36 @@ def read_file_safe(
     Returns:
         Tuple of (content, encoding_used)
     """
-    if encoding is None:
-        encoding = detect_encoding(file_path)
-
+    # If encoding specified, use it directly
+    if encoding is not None:
+        try:
+            with open(file_path, encoding=encoding, errors="replace") as f:
+                content = f.read(max_bytes) if max_bytes is not None else f.read()
+            return content, encoding
+        except LookupError:
+            # Unknown encoding, fall through to auto-detect
+            pass
+    
+    # Try UTF-8 first (strict mode to detect issues)
     try:
-        with open(file_path, encoding=encoding, errors="replace") as f:
+        with open(file_path, encoding="utf-8", errors="strict") as f:
             content = f.read(max_bytes) if max_bytes is not None else f.read()
-        return content, encoding
+        return content, "utf-8"
+    except UnicodeDecodeError:
+        # UTF-8 failed, try detecting encoding
+        pass
     except Exception:
-        # Last resort: try utf-8 with replace
+        # Other error (file not found, permission, etc.)
+        pass
+    
+    # Fall back to encoding detection
+    detected = detect_encoding(file_path)
+    try:
+        with open(file_path, encoding=detected, errors="replace") as f:
+            content = f.read(max_bytes) if max_bytes is not None else f.read()
+        return content, detected
+    except Exception:
+        # Last resort: UTF-8 with replacement
         try:
             with open(file_path, encoding="utf-8", errors="replace") as f:
                 content = f.read(max_bytes) if max_bytes is not None else f.read()

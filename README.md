@@ -134,7 +134,7 @@ repo-to-prompt export [OPTIONS]
 | Option | Short | Default | Description |
 | ------ | ----- | ------- | ----------- |
 | `--mode MODE` | `-m` | both | Output mode: `prompt`, `rag`, or `both` |
-| `--output-dir DIR` | `-o` | ./out | Output directory |
+| `--output-dir DIR` | `-o` | ./out | Base output directory (outputs go into `DIR/<repo-name>/`) |
 | `--tree-depth N` | | 4 | Max depth for directory tree |
 | `--no-redact` | | false | Disable secret redaction |
 
@@ -164,9 +164,9 @@ repo-to-prompt info PATH [OPTIONS]
 repo-to-prompt export -p .
 
 # Output:
-# ./out/context_pack.md  - Markdown context pack
-# ./out/chunks.jsonl     - JSONL chunks for RAG
-# ./out/report.json      - Processing statistics
+# ./out/<repo-name>/context_pack.md  - Markdown context pack
+# ./out/<repo-name>/chunks.jsonl     - JSONL chunks for RAG
+# ./out/<repo-name>/report.json      - Processing statistics
 ```
 
 ### 2. GitHub Repository Export
@@ -215,6 +215,8 @@ repo-to-prompt export -p ./repo --no-redact
 ```
 
 ## Output Structure
+
+Outputs are written to `--output-dir/<repo-name>/`.
 
 ### context_pack.md
 

@@ -33,6 +33,18 @@ app = typer.Typer(
 console = Console()
 
 
+def get_repo_output_dir(base_output_dir: Path, repo_root: Path) -> Path:
+    """Return an output directory namespaced by repository name.
+
+    If the provided base directory already ends with the repo name, it is returned
+    unchanged to avoid double-nesting.
+    """
+    repo_dir_name = repo_root.name
+    if base_output_dir.name == repo_dir_name:
+        return base_output_dir
+    return base_output_dir / repo_dir_name
+
+
 def version_callback(value: bool) -> None:
     """Print version and exit."""
     if value:
@@ -311,8 +323,9 @@ def export(
                 stats.processing_time_seconds = elapsed
 
                 # Write outputs
+                repo_output_dir = get_repo_output_dir(output_dir, repo_path)
                 output_files = write_outputs(
-                    output_dir=output_dir,
+                    output_dir=repo_output_dir,
                     mode=mode,
                     context_pack=context_pack,
                     chunks=all_chunks,

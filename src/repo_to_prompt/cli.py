@@ -309,14 +309,16 @@ def export(
     start_time = time.time()
 
     try:
-        # Fetch repository
+        # Fetch repository and keep it alive for the entire export.
+        # NOTE: For --repo, RepoContext clones into a temporary directory and cleans it up
+        # on exit. The full export pipeline must run inside this context.
         with create_spinner_progress() as progress:
-
+            task = None
             if repo:
                 task = progress.add_task("Fetching repository...", total=None)
 
             with RepoContext(path=path, repo_url=repo, ref=ref) as repo_path:
-                if repo:
+                if task is not None:
                     progress.update(task, description="[green]✓[/green] Repository fetched")
 
                 # Load config file (searches repo root for config if not specified)
@@ -363,234 +365,235 @@ def export(
                 m_ranking_weights = merged["ranking_weights"]
                 m_redaction_config = merged.get("redaction_config", {})
 
-        # Phase 1: Scan repository (with progress bar)
-        console.print("[cyan]Scanning repository...[/cyan]")
-        
-        scanner = FileScanner(
-            root_path=repo_path,
-            include_extensions=m_include_extensions,
-            exclude_globs=m_exclude_globs,
-            max_file_bytes=m_max_file_bytes,
-            respect_gitignore=m_respect_gitignore,
-            follow_symlinks=m_follow_symlinks,
-            skip_minified=m_skip_minified,
-        )
-        
-        files = list(scanner.scan())
-        stats = scanner.stats
-
-        if not files:
-            console.print("[yellow]Warning: No files found matching criteria.[/yellow]")
-            raise typer.Exit(0)
-
-        console.print(f"[green]✓[/green] Found {len(files)} files ({stats.files_scanned} scanned)")
-
-        # Phase 2: Rank files (with progress)
-        with create_spinner_progress() as progress:
-            task = progress.add_task("Ranking files by importance...", total=None)
-            scanned_paths = {f.relative_path for f in files}
-            ranker = FileRanker(
-                repo_path,
-                scanned_files=scanned_paths,
-                weights=m_ranking_weights.to_dict() if hasattr(m_ranking_weights, 'to_dict') else None,
-            )
-            files = ranker.rank_files(files)
-            progress.update(task, description="[green]✓[/green] Files ranked")
-
-        # Create redactor with advanced config
-        redaction_config = RedactionConfig.from_dict(m_redaction_config) if m_redaction_config else None
-        redactor = create_redactor(enabled=m_redact_secrets, config=redaction_config)
-
-        # Phase 3: Chunk files (with detailed progress bar)
-        console.print("[cyan]Chunking content...[/cyan]")
-        all_chunks = []
-        total_bytes = 0
-        total_tokens = 0
-        files_processed = []
-        dropped_files = []
-
-        with create_progress() as progress:
-            chunk_task = progress.add_task(
-                "Processing files",
-                total=len(files),
-            )
-
-            for idx, file_info in enumerate(files):
-                progress.update(
-                    chunk_task,
-                    completed=idx,
-                    description=f"Chunking {file_info.relative_path[:40]}...",
+                # Phase 1: Scan repository (with progress bar)
+                console.print("[cyan]Scanning repository...[/cyan]")
+                
+                scanner = FileScanner(
+                    root_path=repo_path,
+                    include_extensions=m_include_extensions,
+                    exclude_globs=m_exclude_globs,
+                    max_file_bytes=m_max_file_bytes,
+                    respect_gitignore=m_respect_gitignore,
+                    follow_symlinks=m_follow_symlinks,
+                    skip_minified=m_skip_minified,
                 )
                 
-                # Check total bytes limit
-                if total_bytes >= m_max_total_bytes:
-                    console.print(
-                        f"[yellow]Reached max total bytes limit ({m_max_total_bytes:,})[/yellow]"
+                files = list(scanner.scan())
+                stats = scanner.stats
+
+                if not files:
+                    console.print("[yellow]Warning: No files found matching criteria.[/yellow]")
+                    raise typer.Exit(0)
+
+                console.print(f"[green]✓[/green] Found {len(files)} files ({stats.files_scanned} scanned)")
+
+                # Phase 2: Rank files (with progress)
+                with create_spinner_progress() as progress:
+                    task = progress.add_task("Ranking files by importance...", total=None)
+                    scanned_paths = {f.relative_path for f in files}
+                    ranker = FileRanker(
+                        repo_path,
+                        scanned_files=scanned_paths,
+                        weights=m_ranking_weights.to_dict() if hasattr(m_ranking_weights, 'to_dict') else None,
                     )
-                    # Track remaining files as dropped
-                    for remaining in files[idx:]:
-                        dropped_files.append({
-                            "path": remaining.relative_path,
-                            "reason": "bytes_limit",
-                            "priority": round(remaining.priority, 3),
-                        })
-                    stats.files_dropped_budget = len(dropped_files)
-                    break
+                    files = ranker.rank_files(files)
+                    progress.update(task, description="[green]✓[/green] Files ranked")
 
-                try:
-                    # Set current file for redactor allowlist matching
-                    redactor.set_current_file(file_info.path)
-                    
-                    file_chunks = chunk_file(
-                        file_info=file_info,
-                        max_tokens=m_chunk_tokens,
-                        overlap_tokens=m_chunk_overlap,
-                        redactor=redactor,
+                # Create redactor with advanced config
+                redaction_config = (
+                    RedactionConfig.from_dict(m_redaction_config) if m_redaction_config else None
+                )
+                redactor = create_redactor(enabled=m_redact_secrets, config=redaction_config)
+
+                # Phase 3: Chunk files (with detailed progress bar)
+                console.print("[cyan]Chunking content...[/cyan]")
+                all_chunks = []
+                total_bytes = 0
+                total_tokens = 0
+                files_processed = []
+                dropped_files = []
+
+                with create_progress() as progress:
+                    chunk_task = progress.add_task(
+                        "Processing files",
+                        total=len(files),
                     )
-                    
-                    # Calculate token estimate for this file
-                    file_tokens = sum(c.token_estimate for c in file_chunks)
-                    file_info.token_estimate = file_tokens
-                    
-                    # Check token budget (if set)
-                    if m_max_tokens and total_tokens + file_tokens > m_max_tokens:
-                        # Track this file as dropped due to budget
-                        dropped_files.append({
-                            "path": file_info.relative_path,
-                            "reason": "token_budget",
-                            "priority": round(file_info.priority, 3),
-                            "tokens": file_tokens,
-                        })
-                        continue
-                    
-                    all_chunks.extend(file_chunks)
-                    total_bytes += file_info.size_bytes
-                    total_tokens += file_tokens
-                    files_processed.append(file_info)
-                    
-                except Exception as e:
-                    console.print(
-                        f"[yellow]Warning: Failed to chunk {file_info.relative_path}: {e}[/yellow]"
+
+                    for idx, file_info in enumerate(files):
+                        progress.update(
+                            chunk_task,
+                            completed=idx,
+                            description=f"Chunking {file_info.relative_path[:40]}...",
+                        )
+
+                        # Check total bytes limit
+                        if total_bytes >= m_max_total_bytes:
+                            console.print(
+                                f"[yellow]Reached max total bytes limit ({m_max_total_bytes:,})[/yellow]"
+                            )
+                            for remaining in files[idx:]:
+                                dropped_files.append(
+                                    {
+                                        "path": remaining.relative_path,
+                                        "reason": "bytes_limit",
+                                        "priority": round(remaining.priority, 3),
+                                    }
+                                )
+                            stats.files_dropped_budget = len(dropped_files)
+                            break
+
+                        try:
+                            redactor.set_current_file(file_info.path)
+
+                            file_chunks = chunk_file(
+                                file_info=file_info,
+                                max_tokens=m_chunk_tokens,
+                                overlap_tokens=m_chunk_overlap,
+                                redactor=redactor,
+                            )
+
+                            file_tokens = sum(c.token_estimate for c in file_chunks)
+                            file_info.token_estimate = file_tokens
+
+                            if m_max_tokens and total_tokens + file_tokens > m_max_tokens:
+                                dropped_files.append(
+                                    {
+                                        "path": file_info.relative_path,
+                                        "reason": "token_budget",
+                                        "priority": round(file_info.priority, 3),
+                                        "tokens": file_tokens,
+                                    }
+                                )
+                                continue
+
+                            all_chunks.extend(file_chunks)
+                            total_bytes += file_info.size_bytes
+                            total_tokens += file_tokens
+                            files_processed.append(file_info)
+                        except Exception as e:
+                            console.print(
+                                f"[yellow]Warning: Failed to chunk {file_info.relative_path}: {e}[/yellow]"
+                            )
+
+                    progress.update(
+                        chunk_task,
+                        completed=len(files),
+                        description="[green]✓[/green] Chunking complete",
                     )
-            
-            progress.update(chunk_task, completed=len(files), description="[green]✓[/green] Chunking complete")
 
-        console.print(f"[green]✓[/green] Created {len(all_chunks)} chunks from {len(files_processed)} files")
-
-        # Update stats
-        stats.total_tokens_estimated = total_tokens
-        stats.files_dropped_budget = len(dropped_files)
-        stats.dropped_files = dropped_files
-        
-        # Record top ranked files
-        stats.top_ranked_files = [
-            {"path": f.relative_path, "priority": round(f.priority, 3)}
-            for f in files_processed[:20]
-        ]
-
-        # Coalesce small chunks to reduce chunk explosion
-        if m_min_chunk_tokens > 0:
-            chunks_before = len(all_chunks)
-            all_chunks = coalesce_small_chunks(
-                all_chunks,
-                min_tokens=m_min_chunk_tokens,
-                max_tokens=m_chunk_tokens,
-            )
-            if len(all_chunks) < chunks_before:
                 console.print(
-                    f"[dim]Coalesced {chunks_before} → {len(all_chunks)} chunks[/dim]"
+                    f"[green]✓[/green] Created {len(all_chunks)} chunks from {len(files_processed)} files"
                 )
 
-        stats.chunks_created = len(all_chunks)
-        
-        # Update included files count
-        stats.files_included = len(files_processed)
+                stats.total_tokens_estimated = total_tokens
+                stats.files_dropped_budget = len(dropped_files)
+                stats.dropped_files = dropped_files
+                stats.top_ranked_files = [
+                    {"path": f.relative_path, "priority": round(f.priority, 3)}
+                    for f in files_processed[:20]
+                ]
 
-        # Phase 4: Render output (with spinner)
-        with create_spinner_progress() as progress:
-            task = progress.add_task("Rendering output...", total=None)
-            
-            context_pack = render_context_pack(
-                root_path=repo_path,
-                files=files_processed,
-                chunks=all_chunks,
-                ranker=ranker,
-                stats=stats,
-                include_timestamp=not no_timestamp,
-            )
+                if m_min_chunk_tokens > 0:
+                    chunks_before = len(all_chunks)
+                    all_chunks = coalesce_small_chunks(
+                        all_chunks,
+                        min_tokens=m_min_chunk_tokens,
+                        max_tokens=m_chunk_tokens,
+                    )
+                    if len(all_chunks) < chunks_before:
+                        console.print(
+                            f"[dim]Coalesced {chunks_before} → {len(all_chunks)} chunks[/dim]"
+                        )
 
-            # Prepare config for report (sorted keys for determinism)
-            config_dict = {
-                "chunk_overlap": m_chunk_overlap,
-                "chunk_tokens": m_chunk_tokens,
-                "exclude_globs": sorted(m_exclude_globs) if m_exclude_globs else None,
-                "follow_symlinks": m_follow_symlinks,
-                "include_extensions": sorted(m_include_extensions) if m_include_extensions else None,
-                "max_file_bytes": m_max_file_bytes,
-                "max_tokens": m_max_tokens,
-                "max_total_bytes": m_max_total_bytes,
-                "mode": m_mode.value,
-                "path": str(path) if path else None,
-                "redact_secrets": m_redact_secrets,
-                "ref": ref,
-                "repo": repo,
-                "skip_minified": m_skip_minified,
-            }
+                stats.chunks_created = len(all_chunks)
+                stats.files_included = len(files_processed)
 
-            # Calculate timing BEFORE writing outputs
-            elapsed = time.time() - start_time
-            stats.processing_time_seconds = elapsed
-            
-            # Add redaction counts to stats
-            stats.redaction_counts = redactor.get_stats()
+                # Phase 4: Render output (with spinner)
+                with create_spinner_progress() as progress:
+                    render_task = progress.add_task("Rendering output...", total=None)
+                    context_pack = render_context_pack(
+                        root_path=repo_path,
+                        files=files_processed,
+                        chunks=all_chunks,
+                        ranker=ranker,
+                        stats=stats,
+                        include_timestamp=not no_timestamp,
+                    )
+                    progress.update(render_task, description="[green]✓[/green] Output rendered")
 
-            # Write outputs
-            repo_output_dir = get_repo_output_dir(m_output_dir, repo_path)
-            output_files = write_outputs(
-                output_dir=repo_output_dir,
-                mode=m_mode,
-                context_pack=context_pack,
-                chunks=all_chunks,
-                stats=stats,
-                config=config_dict,
-                include_timestamp=not no_timestamp,
-                files=files_processed,
-            )
-            
-            progress.update(task, description="[green]✓[/green] Output written")
+                # Prepare config for report (sorted keys for determinism)
+                config_dict = {
+                    "chunk_overlap": m_chunk_overlap,
+                    "chunk_tokens": m_chunk_tokens,
+                    "exclude_globs": sorted(m_exclude_globs) if m_exclude_globs else None,
+                    "follow_symlinks": m_follow_symlinks,
+                    "include_extensions": sorted(m_include_extensions) if m_include_extensions else None,
+                    "max_file_bytes": m_max_file_bytes,
+                    "max_tokens": m_max_tokens,
+                    "max_total_bytes": m_max_total_bytes,
+                    "mode": m_mode.value,
+                    "path": str(path) if path else None,
+                    "redact_secrets": m_redact_secrets,
+                    "ref": ref,
+                    "repo": repo,
+                    "skip_minified": m_skip_minified,
+                }
 
-        # Print summary (elapsed was already calculated before write_outputs)
-        console.print()
-        console.print("[bold green]✓ Export complete![/bold green]")
-        console.print()
-        console.print("[cyan]Statistics:[/cyan]")
-        console.print(f"  Files scanned: {stats.files_scanned}")
-        console.print(f"  Files included: {stats.files_included}")
-        if stats.files_dropped_budget > 0:
-            console.print(f"  Files dropped (budget): {stats.files_dropped_budget}")
-        console.print(f"  Chunks created: {stats.chunks_created}")
-        console.print(f"  Total bytes: {stats.total_bytes_included:,}")
-        console.print(f"  Total tokens: ~{stats.total_tokens_estimated:,}")
-        console.print(f"  Processing time: {stats.processing_time_seconds:.2f}s")
-        console.print()
-        console.print("[cyan]Output files:[/cyan]")
-        for f in output_files:
-            console.print(f"  {f}")
+                elapsed = time.time() - start_time
+                stats.processing_time_seconds = elapsed
+                stats.redaction_counts = redactor.get_stats()
 
-        if redactor.get_stats():
-            console.print()
-            console.print("[cyan]Redactions applied:[/cyan]")
-            for name, count in list(redactor.get_stats().items())[:5]:
-                console.print(f"  {name}: {count}")
-        
-        # Show dropped files summary if any
-        if dropped_files:
-            console.print()
-            console.print(f"[yellow]Dropped {len(dropped_files)} files due to budget constraints:[/yellow]")
-            for df in dropped_files[:5]:
-                console.print(f"  {df['path']} ({df['reason']})")
-            if len(dropped_files) > 5:
-                console.print(f"  ... and {len(dropped_files) - 5} more (see report.json)")
+                # Write outputs
+                repo_output_dir = get_repo_output_dir(m_output_dir, repo_path)
+                with create_spinner_progress() as progress:
+                    write_task = progress.add_task("Writing output files...", total=None)
+                    output_files = write_outputs(
+                        output_dir=repo_output_dir,
+                        mode=m_mode,
+                        context_pack=context_pack,
+                        chunks=all_chunks,
+                        stats=stats,
+                        config=config_dict,
+                        include_timestamp=not no_timestamp,
+                        files=files_processed,
+                    )
+                    progress.update(write_task, description="[green]✓[/green] Output written")
+
+                # Print summary
+                console.print()
+                console.print("[bold green]✓ Export complete![/bold green]")
+                console.print()
+                console.print("[cyan]Statistics:[/cyan]")
+                console.print(f"  Files scanned: {stats.files_scanned}")
+                console.print(f"  Files included: {stats.files_included}")
+                if stats.files_dropped_budget > 0:
+                    console.print(f"  Files dropped (budget): {stats.files_dropped_budget}")
+                console.print(f"  Chunks created: {stats.chunks_created}")
+                console.print(f"  Total bytes: {stats.total_bytes_included:,}")
+                console.print(f"  Total tokens: ~{stats.total_tokens_estimated:,}")
+                console.print(f"  Processing time: {stats.processing_time_seconds:.2f}s")
+                console.print()
+                console.print("[cyan]Output files:[/cyan]")
+                for f in output_files:
+                    console.print(f"  {f}")
+
+                if redactor.get_stats():
+                    console.print()
+                    console.print("[cyan]Redactions applied:[/cyan]")
+                    for name, count in list(redactor.get_stats().items())[:5]:
+                        console.print(f"  {name}: {count}")
+
+                if dropped_files:
+                    console.print()
+                    console.print(
+                        f"[yellow]Dropped {len(dropped_files)} files due to budget constraints:[/yellow]"
+                    )
+                    for df in dropped_files[:5]:
+                        console.print(f"  {df['path']} ({df['reason']})")
+                    if len(dropped_files) > 5:
+                        console.print(
+                            f"  ... and {len(dropped_files) - 5} more (see report.json)"
+                        )
 
     except FetchError as e:
         console.print(f"[red]Error fetching repository: {e}[/red]")

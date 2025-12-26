@@ -6,11 +6,9 @@ Uses Pydantic for validation and type safety.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 
 class OutputMode(str, Enum):
@@ -200,55 +198,55 @@ IMPORTANT_CONFIG_FILES: set[str] = {
 @dataclass
 class Config:
     """Main configuration for repo-to-prompt."""
-    
+
     # Input source (one must be set)
-    path: Optional[Path] = None
-    repo_url: Optional[str] = None
-    ref: Optional[str] = None  # branch/tag/sha for GitHub repos
-    
+    path: Path | None = None
+    repo_url: str | None = None
+    ref: str | None = None  # branch/tag/sha for GitHub repos
+
     # Filtering options
     include_extensions: set[str] = field(default_factory=lambda: DEFAULT_INCLUDE_EXTENSIONS.copy())
     exclude_globs: set[str] = field(default_factory=lambda: DEFAULT_EXCLUDE_GLOBS.copy())
     max_file_bytes: int = 1_048_576  # 1 MB
     max_total_bytes: int = 20_000_000  # 20 MB
     respect_gitignore: bool = True
-    
+
     # Chunking options
     chunk_tokens: int = 800
     chunk_overlap: int = 120
-    
+
     # Output options
     mode: OutputMode = OutputMode.BOTH
     output_dir: Path = field(default_factory=lambda: Path("./out"))
-    
+
     # Tree options
     tree_depth: int = 4
-    
+
     # Redaction
     redact_secrets: bool = True
-    
+
     # Entrypoints
     entrypoints_auto: bool = True
     entrypoints: list[str] = field(default_factory=list)
-    
+
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
         if self.path is None and self.repo_url is None:
             raise ValueError("Either --path or --repo must be specified")
-        
+
         if self.path is not None and self.repo_url is not None:
             raise ValueError("Cannot specify both --path and --repo")
-        
+
         if self.path is not None:
             self.path = Path(self.path).resolve()
             if not self.path.exists():
                 raise ValueError(f"Path does not exist: {self.path}")
             if not self.path.is_dir():
                 raise ValueError(f"Path is not a directory: {self.path}")
-        
+
         # Ensure output dir is absolute
         self.output_dir = Path(self.output_dir).resolve()
-        
+
         # Normalize extensions to include leading dot
         self.include_extensions = {
             ext if ext.startswith(".") else f".{ext}"
@@ -259,7 +257,7 @@ class Config:
 @dataclass
 class FileInfo:
     """Information about a scanned file."""
-    
+
     path: Path  # Absolute path
     relative_path: str  # Relative to repo root
     size_bytes: int
@@ -267,23 +265,23 @@ class FileInfo:
     language: str
     priority: float = 0.5
     tags: list[str] = field(default_factory=list)
-    
+
     @property
     def is_readme(self) -> bool:
         """Check if file is a README."""
         name_lower = self.path.name.lower()
         return name_lower.startswith("readme")
-    
+
     @property
     def is_config(self) -> bool:
         """Check if file is a config file."""
         return self.relative_path in IMPORTANT_CONFIG_FILES or self.path.name in IMPORTANT_CONFIG_FILES
-    
+
     @property
     def is_doc(self) -> bool:
         """Check if file is documentation."""
         return (
-            self.is_readme 
+            self.is_readme
             or self.extension in {".md", ".rst", ".txt", ".adoc"}
             or "docs/" in self.relative_path.lower()
             or "documentation/" in self.relative_path.lower()
@@ -293,7 +291,7 @@ class FileInfo:
 @dataclass
 class Chunk:
     """A chunk of content from a file."""
-    
+
     id: str  # Stable hash-based ID
     path: str  # Relative file path
     language: str
@@ -303,7 +301,7 @@ class Chunk:
     priority: float
     tags: list[str] = field(default_factory=list)
     token_estimate: int = 0
-    
+
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -318,10 +316,10 @@ class Chunk:
         }
 
 
-@dataclass 
+@dataclass
 class ScanStats:
     """Statistics from scanning a repository."""
-    
+
     files_scanned: int = 0
     files_included: int = 0
     files_skipped_size: int = 0
@@ -335,7 +333,7 @@ class ScanStats:
     processing_time_seconds: float = 0.0
     top_ignored_patterns: dict[str, int] = field(default_factory=dict)
     languages_detected: dict[str, int] = field(default_factory=dict)
-    
+
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -419,7 +417,7 @@ def get_language(extension: str, filename: str = "") -> str:
     ext_lower = extension.lower()
     if ext_lower in EXTENSION_TO_LANGUAGE:
         return EXTENSION_TO_LANGUAGE[ext_lower]
-    
+
     # Handle special filenames
     name_lower = filename.lower()
     if name_lower == "dockerfile":
@@ -430,5 +428,5 @@ def get_language(extension: str, filename: str = "") -> str:
         return "ruby"
     if name_lower.endswith("rc") and ext_lower == "":
         return "shell"
-    
+
     return "text"

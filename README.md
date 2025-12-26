@@ -4,7 +4,9 @@ Convert repositories into LLM-friendly context packs for prompting and RAG.
 
 *Because LLMs are smart… but they still can’t read your repo through vibes.* 🙎🏻‍♂️
 
+[![CI](https://github.com/wheevu/repo-to-prompt/actions/workflows/ci.yml/badge.svg)](https://github.com/wheevu/repo-to-prompt/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Overview
 

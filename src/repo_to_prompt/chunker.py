@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator, Optional
 
 from .config import Chunk, FileInfo
 from .redactor import Redactor
@@ -27,7 +27,7 @@ class ChunkBoundary:
 
 class BaseChunker(ABC):
     """Abstract base class for chunkers."""
-    
+
     @abstractmethod
     def chunk(
         self,
@@ -43,10 +43,10 @@ class BaseChunker(ABC):
 class LineBasedChunker(BaseChunker):
     """
     Simple line-based chunker with awareness of natural boundaries.
-    
+
     Tries to break at paragraph boundaries, blank lines, and logical divisions.
     """
-    
+
     # Patterns that indicate good break points
     BREAK_PATTERNS = [
         (re.compile(r"^\s*$"), 1.0),  # Blank lines
@@ -56,11 +56,11 @@ class LineBasedChunker(BaseChunker):
         (re.compile(r"^(\s*)\}"), 0.7),  # Closing braces
         (re.compile(r"^//|^#|^/\*"), 0.6),  # Comments
     ]
-    
+
     def find_boundaries(self, lines: list[str]) -> list[ChunkBoundary]:
         """Find potential chunk boundaries in the content."""
         boundaries = []
-        
+
         for i, line in enumerate(lines):
             for pattern, weight in self.BREAK_PATTERNS:
                 if pattern.match(line):
@@ -70,9 +70,9 @@ class LineBasedChunker(BaseChunker):
                         weight=weight,
                     ))
                     break
-        
+
         return boundaries
-    
+
     def chunk(
         self,
         file_info: FileInfo,
@@ -84,28 +84,28 @@ class LineBasedChunker(BaseChunker):
         lines = content.splitlines(keepends=True)
         if not lines:
             return
-        
+
         boundaries = self.find_boundaries(lines)
         boundary_lines = {b.line_number: b for b in boundaries}
-        
+
         # Estimate tokens per line (rough average)
         total_tokens = estimate_tokens(content)
         avg_tokens_per_line = max(1, total_tokens / len(lines)) if lines else 1
-        
+
         # Target lines per chunk
         target_lines = int(max_tokens / avg_tokens_per_line)
         overlap_lines = int(overlap_tokens / avg_tokens_per_line)
-        
+
         current_start = 0
-        
+
         while current_start < len(lines):
             # Calculate ideal end position
             ideal_end = min(current_start + target_lines, len(lines))
-            
+
             # Find best boundary near ideal end
             best_end = ideal_end
             best_boundary_weight = 0.0
-            
+
             # Look for boundaries in the last 20% of the chunk
             search_start = int(current_start + target_lines * 0.8)
             for line_num in range(search_start, min(ideal_end + 10, len(lines))):
@@ -114,15 +114,15 @@ class LineBasedChunker(BaseChunker):
                     if boundary.weight > best_boundary_weight:
                         best_boundary_weight = boundary.weight
                         best_end = line_num
-            
+
             # Ensure we make progress
             if best_end <= current_start:
                 best_end = min(current_start + target_lines, len(lines))
-            
+
             # Extract chunk content
             chunk_lines = lines[current_start:best_end]
             chunk_content = "".join(chunk_lines)
-            
+
             if chunk_content.strip():
                 chunk_id = stable_hash(
                     chunk_content,
@@ -130,7 +130,7 @@ class LineBasedChunker(BaseChunker):
                     current_start + 1,
                     best_end,
                 )
-                
+
                 yield Chunk(
                     id=chunk_id,
                     path=file_info.relative_path,
@@ -142,7 +142,7 @@ class LineBasedChunker(BaseChunker):
                     tags=file_info.tags.copy(),
                     token_estimate=estimate_tokens(chunk_content),
                 )
-            
+
             # Move to next chunk with overlap
             current_start = max(current_start + 1, best_end - overlap_lines)
 
@@ -150,12 +150,12 @@ class LineBasedChunker(BaseChunker):
 class MarkdownChunker(BaseChunker):
     """
     Markdown-aware chunker.
-    
+
     Respects heading structure and tries to keep sections together.
     """
-    
+
     HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
-    
+
     def chunk(
         self,
         file_info: FileInfo,
@@ -167,12 +167,12 @@ class MarkdownChunker(BaseChunker):
         lines = content.splitlines(keepends=True)
         if not lines:
             return
-        
+
         # Find all headings
         sections = []
         current_section_start = 0
         current_heading = ""
-        
+
         for i, line in enumerate(lines):
             match = self.HEADING_PATTERN.match(line.strip())
             if match:
@@ -185,7 +185,7 @@ class MarkdownChunker(BaseChunker):
                     ))
                 current_section_start = i
                 current_heading = match.group(2)
-        
+
         # Don't forget the last section
         if current_section_start < len(lines):
             sections.append((
@@ -193,18 +193,18 @@ class MarkdownChunker(BaseChunker):
                 len(lines),
                 current_heading,
             ))
-        
+
         # If no sections found, fall back to line-based chunking
         if not sections:
             line_chunker = LineBasedChunker()
             yield from line_chunker.chunk(file_info, content, max_tokens, overlap_tokens)
             return
-        
+
         # Process sections, combining small ones and splitting large ones
         for start, end, heading in sections:
             section_content = "".join(lines[start:end])
             section_tokens = estimate_tokens(section_content)
-            
+
             if section_tokens <= max_tokens:
                 # Section fits in one chunk
                 if section_content.strip():
@@ -214,11 +214,11 @@ class MarkdownChunker(BaseChunker):
                         start + 1,
                         end,
                     )
-                    
+
                     tags = file_info.tags.copy()
                     if heading:
                         tags.append(f"section:{heading[:30]}")
-                    
+
                     yield Chunk(
                         id=chunk_id,
                         path=file_info.relative_path,
@@ -242,7 +242,7 @@ class MarkdownChunker(BaseChunker):
                     priority=file_info.priority,
                     tags=file_info.tags.copy(),
                 )
-                
+
                 for chunk in line_chunker.chunk(
                     section_file_info,
                     section_content,
@@ -264,10 +264,10 @@ class MarkdownChunker(BaseChunker):
 class CodeChunker(BaseChunker):
     """
     Code-aware chunker using Tree-sitter when available.
-    
+
     Falls back to pattern-based chunking if Tree-sitter is not installed.
     """
-    
+
     # Patterns for detecting function/class definitions
     DEFINITION_PATTERNS = {
         "python": [
@@ -304,15 +304,15 @@ class CodeChunker(BaseChunker):
             re.compile(r"^impl\s+"),
         ],
     }
-    
+
     def find_code_boundaries(self, lines: list[str], language: str) -> list[ChunkBoundary]:
         """Find code structure boundaries."""
         boundaries = []
         patterns = self.DEFINITION_PATTERNS.get(language, [])
-        
+
         for i, line in enumerate(lines):
             stripped = line.lstrip()
-            
+
             # Check language-specific patterns
             for pattern in patterns:
                 if pattern.match(stripped):
@@ -322,7 +322,7 @@ class CodeChunker(BaseChunker):
                         weight=0.95,
                     ))
                     break
-            
+
             # Generic boundaries
             if stripped == "":
                 boundaries.append(ChunkBoundary(
@@ -336,9 +336,9 @@ class CodeChunker(BaseChunker):
                     boundary_type="comment",
                     weight=0.6,
                 ))
-        
+
         return boundaries
-    
+
     def chunk(
         self,
         file_info: FileInfo,
@@ -350,49 +350,49 @@ class CodeChunker(BaseChunker):
         lines = content.splitlines(keepends=True)
         if not lines:
             return
-        
+
         boundaries = self.find_code_boundaries(lines, file_info.language)
-        
+
         # Group boundaries by type for smarter chunking
         definition_lines = {
             b.line_number for b in boundaries
             if b.boundary_type == "definition"
         }
-        
+
         # Estimate tokens per line
         total_tokens = estimate_tokens(content)
         avg_tokens_per_line = max(1, total_tokens / len(lines)) if lines else 1
         target_lines = int(max_tokens / avg_tokens_per_line)
         overlap_lines = int(overlap_tokens / avg_tokens_per_line)
-        
+
         current_start = 0
-        
+
         while current_start < len(lines):
             ideal_end = min(current_start + target_lines, len(lines))
-            
+
             # Prefer ending at a definition boundary
             best_end = ideal_end
-            
+
             # Look ahead for definition boundaries
             for line_num in range(ideal_end, min(ideal_end + 20, len(lines))):
                 if line_num in definition_lines:
                     best_end = line_num
                     break
-            
+
             # Look back if we didn't find one ahead
             if best_end == ideal_end:
                 for line_num in range(ideal_end - 1, max(current_start, ideal_end - 30), -1):
                     if line_num in definition_lines:
                         best_end = line_num
                         break
-            
+
             # Ensure progress
             if best_end <= current_start:
                 best_end = min(current_start + target_lines, len(lines))
-            
+
             chunk_lines = lines[current_start:best_end]
             chunk_content = "".join(chunk_lines)
-            
+
             if chunk_content.strip():
                 chunk_id = stable_hash(
                     chunk_content,
@@ -400,7 +400,7 @@ class CodeChunker(BaseChunker):
                     current_start + 1,
                     best_end,
                 )
-                
+
                 yield Chunk(
                     id=chunk_id,
                     path=file_info.relative_path,
@@ -412,22 +412,22 @@ class CodeChunker(BaseChunker):
                     tags=file_info.tags.copy(),
                     token_estimate=estimate_tokens(chunk_content),
                 )
-            
+
             current_start = max(current_start + 1, best_end - overlap_lines)
 
 
 class ChunkerFactory:
     """Factory for creating appropriate chunkers based on file type."""
-    
+
     CODE_LANGUAGES = {
         "python", "javascript", "typescript", "go", "java", "rust",
         "c", "cpp", "csharp", "ruby", "php", "swift", "kotlin", "scala",
     }
-    
+
     MARKDOWN_LANGUAGES = {
         "markdown", "restructuredtext", "asciidoc",
     }
-    
+
     @classmethod
     def get_chunker(cls, language: str) -> BaseChunker:
         """Get the appropriate chunker for a language."""
@@ -443,33 +443,33 @@ def chunk_file(
     file_info: FileInfo,
     max_tokens: int = 800,
     overlap_tokens: int = 120,
-    redactor: Optional[Redactor] = None,
+    redactor: Redactor | None = None,
 ) -> list[Chunk]:
     """
     Chunk a file into semantic pieces.
-    
+
     Args:
         file_info: Information about the file
         max_tokens: Maximum tokens per chunk
         overlap_tokens: Token overlap between chunks
         redactor: Optional redactor for secret removal
-        
+
     Returns:
         List of chunks
     """
     # Read file content
     content, _ = read_file_safe(file_info.path)
-    
+
     # Apply redaction if enabled
     if redactor:
         content = redactor.redact(content)
-    
+
     # Get appropriate chunker
     chunker = ChunkerFactory.get_chunker(file_info.language)
-    
+
     # Generate chunks
     chunks = list(chunker.chunk(file_info, content, max_tokens, overlap_tokens))
-    
+
     return chunks
 
 
@@ -480,11 +480,11 @@ def chunk_content(
     max_tokens: int = 800,
     overlap_tokens: int = 120,
     priority: float = 0.5,
-    tags: Optional[list[str]] = None,
+    tags: list[str] | None = None,
 ) -> list[Chunk]:
     """
     Chunk content string directly.
-    
+
     Useful for testing or when content is already loaded.
     """
     file_info = FileInfo(
@@ -496,7 +496,7 @@ def chunk_content(
         priority=priority,
         tags=tags or [],
     )
-    
+
     chunker = ChunkerFactory.get_chunker(language)
     return list(chunker.chunk(file_info, content, max_tokens, overlap_tokens))
 
@@ -508,54 +508,54 @@ def coalesce_small_chunks(
 ) -> list[Chunk]:
     """
     Coalesce small adjacent chunks from the same file.
-    
+
     This reduces chunk explosion by merging tiny chunks (below min_tokens)
     with their neighbors, as long as the result doesn't exceed max_tokens.
-    
+
     Args:
         chunks: List of chunks to coalesce
         min_tokens: Minimum tokens below which chunks are merged
         max_tokens: Maximum tokens for merged chunks
-        
+
     Returns:
         New list of coalesced chunks
     """
     if not chunks:
         return []
-    
+
     # Group chunks by file path to only merge within same file
     from collections import defaultdict
     by_file: dict[str, list[Chunk]] = defaultdict(list)
     for chunk in chunks:
         by_file[chunk.path].append(chunk)
-    
+
     result: list[Chunk] = []
-    
-    for path, file_chunks in by_file.items():
+
+    for _path, file_chunks in by_file.items():
         # Sort by start line to ensure correct order
         file_chunks.sort(key=lambda c: c.start_line)
-        
+
         coalesced: list[Chunk] = []
         current: Chunk | None = None
-        
+
         for chunk in file_chunks:
             if current is None:
                 current = chunk
                 continue
-            
+
             # Check if we should merge
             combined_tokens = current.token_estimate + chunk.token_estimate
             can_merge = (
                 current.token_estimate < min_tokens or chunk.token_estimate < min_tokens
             ) and combined_tokens <= max_tokens
-            
+
             # Also ensure chunks are adjacent or overlapping
             is_adjacent = chunk.start_line <= current.end_line + 1
-            
+
             if can_merge and is_adjacent:
                 # Merge chunks
                 merged_content = current.content
-                
+
                 # If there's a gap or overlap, handle it
                 if chunk.start_line > current.end_line:
                     # Small gap - just concatenate
@@ -564,8 +564,8 @@ def coalesce_small_chunks(
                     # Overlapping - need to deduplicate
                     # Split content into lines and merge
                     current_lines = current.content.splitlines(keepends=True)
-                    chunk_lines = chunk.content.splitlines(keepends=True)
-                    
+                    chunk.content.splitlines(keepends=True)
+
                     # Calculate overlap
                     overlap_start = chunk.start_line - current.start_line
                     if overlap_start < len(current_lines):
@@ -573,7 +573,7 @@ def coalesce_small_chunks(
                         merged_content = "".join(current_lines[:overlap_start]) + chunk.content
                     else:
                         merged_content = current.content + chunk.content
-                
+
                 # Create merged chunk
                 current = Chunk(
                     id=stable_hash(
@@ -595,14 +595,14 @@ def coalesce_small_chunks(
                 # Can't merge, save current and start new
                 coalesced.append(current)
                 current = chunk
-        
+
         # Don't forget the last chunk
         if current is not None:
             coalesced.append(current)
-        
+
         result.extend(coalesced)
-    
+
     # Restore original order by sorting by path then start_line
     result.sort(key=lambda c: (c.path, c.start_line))
-    
+
     return result

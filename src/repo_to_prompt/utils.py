@@ -9,10 +9,8 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-from typing import Optional
 
 import chardet
-
 
 # Try to import tiktoken for accurate token counting
 _tiktoken_encoder = None
@@ -26,12 +24,12 @@ except ImportError:
 def estimate_tokens(text: str) -> int:
     """
     Estimate the number of tokens in text.
-    
+
     Uses tiktoken if available, otherwise falls back to character-based heuristic.
     """
     if _tiktoken_encoder is not None:
         return len(_tiktoken_encoder.encode(text, disallowed_special=()))
-    
+
     # Fallback heuristic: ~4 characters per token on average
     # This is a rough approximation for English text and code
     return len(text) // 4
@@ -40,7 +38,7 @@ def estimate_tokens(text: str) -> int:
 def stable_hash(content: str, path: str, start_line: int, end_line: int) -> str:
     """
     Generate a stable hash ID for a chunk.
-    
+
     The hash is based on the content and location, ensuring deterministic IDs
     across runs for the same content.
     """
@@ -52,41 +50,41 @@ def stable_hash(content: str, path: str, start_line: int, end_line: int) -> str:
 def detect_encoding(file_path: Path, sample_size: int = 8192) -> str:
     """
     Detect the encoding of a file.
-    
+
     Args:
         file_path: Path to the file
         sample_size: Number of bytes to sample for detection
-        
+
     Returns:
         Detected encoding name (e.g., 'utf-8', 'latin-1')
     """
     try:
         with open(file_path, "rb") as f:
             sample = f.read(sample_size)
-        
+
         if not sample:
             return "utf-8"
-        
+
         # Check for BOM
         if sample.startswith(b"\xef\xbb\xbf"):
             return "utf-8-sig"
         if sample.startswith(b"\xff\xfe") or sample.startswith(b"\xfe\xff"):
             return "utf-16"
-        
+
         # Use chardet for detection
         result = chardet.detect(sample)
         encoding = result.get("encoding")
-        
+
         if encoding is None:
             return "utf-8"
-        
+
         # Normalize encoding names
         encoding = encoding.lower()
         if encoding in ("ascii", "utf-8", "utf8"):
             return "utf-8"
-        
+
         return encoding
-        
+
     except Exception:
         return "utf-8"
 
@@ -94,96 +92,90 @@ def detect_encoding(file_path: Path, sample_size: int = 8192) -> str:
 def is_binary_file(file_path: Path, sample_size: int = 8192) -> bool:
     """
     Check if a file appears to be binary.
-    
+
     Uses null byte detection and character analysis.
     """
     try:
         with open(file_path, "rb") as f:
             sample = f.read(sample_size)
-        
+
         if not sample:
             return False
-        
+
         # Check for null bytes (strong indicator of binary)
         if b"\x00" in sample:
             return True
-        
+
         # Check for high ratio of non-text bytes
         # Text files typically have >70% printable ASCII
         printable_count = sum(
             1 for b in sample
             if 32 <= b <= 126 or b in (9, 10, 13)  # printable + tab, newline, CR
         )
-        
+
         return printable_count / len(sample) < 0.70
-        
+
     except Exception:
         return True  # Assume binary if we can't read it
 
 
 def read_file_safe(
     file_path: Path,
-    max_bytes: Optional[int] = None,
-    encoding: Optional[str] = None
+    max_bytes: int | None = None,
+    encoding: str | None = None
 ) -> tuple[str, str]:
     """
     Safely read a file with encoding detection and error handling.
-    
+
     Args:
         file_path: Path to the file
         max_bytes: Maximum bytes to read (None for all)
         encoding: Encoding to use (None for auto-detect)
-        
+
     Returns:
         Tuple of (content, encoding_used)
     """
     if encoding is None:
         encoding = detect_encoding(file_path)
-    
+
     try:
-        with open(file_path, "r", encoding=encoding, errors="replace") as f:
-            if max_bytes is not None:
-                content = f.read(max_bytes)
-            else:
-                content = f.read()
+        with open(file_path, encoding=encoding, errors="replace") as f:
+            content = f.read(max_bytes) if max_bytes is not None else f.read()
         return content, encoding
-    except Exception as e:
+    except Exception:
         # Last resort: try utf-8 with replace
         try:
-            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                if max_bytes is not None:
-                    content = f.read(max_bytes)
-                else:
-                    content = f.read()
+            with open(file_path, encoding="utf-8", errors="replace") as f:
+                content = f.read(max_bytes) if max_bytes is not None else f.read()
             return content, "utf-8"
-        except Exception:
-            raise IOError(f"Failed to read file {file_path}: {e}")
+        except Exception as inner_e:
+            raise OSError(f"Failed to read file {file_path}: {inner_e}") from inner_e
 
 
 def stream_file_lines(
     file_path: Path,
-    encoding: Optional[str] = None,
+    encoding: str | None = None,
     start_line: int = 1,
-    end_line: Optional[int] = None
+    end_line: int | None = None
 ) -> list[str]:
     """
     Stream specific lines from a file without loading the entire file.
-    
+
     Args:
         file_path: Path to the file
         encoding: Encoding to use (None for auto-detect)
         start_line: First line to read (1-indexed)
         end_line: Last line to read (inclusive, None for all remaining)
-        
+
     Returns:
         List of lines in the range
     """
     if encoding is None:
         encoding = detect_encoding(file_path)
-    
+
     lines = []
     try:
-        with open(file_path, "r", encoding=encoding, errors="replace") as f:
+        with open(file_path, encoding=encoding, errors="replace") as f:
             for line_num, line in enumerate(f, start=1):
                 if line_num < start_line:
                     continue
@@ -192,7 +184,7 @@ def stream_file_lines(
                 lines.append(line)
     except Exception:
         pass
-    
+
     return lines
 
 
@@ -226,38 +218,38 @@ MINIFIED_INDICATORS = [
 def is_likely_generated(file_path: Path, content_sample: str = "") -> bool:
     """
     Check if a file appears to be generated or minified.
-    
+
     Args:
         file_path: Path to the file
         content_sample: Optional sample of file content to check
-        
+
     Returns:
         True if the file appears to be generated
     """
     name = file_path.name.lower()
-    
+
     # Check filename indicators
     for indicator in MINIFIED_INDICATORS:
         if indicator in name:
             return True
-    
+
     # Check common generated directories
     path_str = str(file_path).lower()
     if any(d in path_str for d in ["generated/", "gen/", "auto/", "build/"]):
         return True
-    
+
     # Check content for generated markers
     if content_sample:
         sample_lower = content_sample[:2000].lower()
         for pattern in GENERATED_PATTERNS:
             if pattern.search(sample_lower):
                 return True
-        
+
         # Check for extremely long lines (common in minified files)
         first_line = content_sample.split("\n")[0] if content_sample else ""
         if len(first_line) > 1000:
             return True
-    
+
     return False
 
 

@@ -18,10 +18,13 @@ If you’ve ever pasted a whole repository into a prompt and immediately regrett
 
 - **Smart File Ranking**: Prioritizes READMEs, configs, entrypoints over tests and generated files
 - **Language-Aware Chunking**: Uses code structure (functions, classes) for Python, JS/TS, Go, Java, Rust
-- **Secret Redaction**: Automatically detects and redacts API keys, tokens, and credentials
-- **Gitignore Respect**: Honors `.gitignore` patterns by default
+- **Advanced Secret Redaction**: 25+ patterns, entropy-based detection, paranoid mode, and allowlists
+- **Configuration Files**: Project-level config via `repo-to-prompt.toml` or `.r2p.yml`
+- **Gitignore Respect**: Honors `.gitignore` patterns using Git as source of truth
 - **GitHub Support**: Clone and process remote repositories directly
 - **Deterministic Output**: Stable ordering and chunk IDs for reproducible results
+- **Concurrent Scanning**: Thread pool for fast I/O on large repositories
+- **Rich Progress UI**: Beautiful progress bars during export
 - **Cross-Platform**: Works on macOS, Linux, and Windows
 
 ### Design Philosophy
@@ -262,11 +265,12 @@ JSONL file with one chunk per line:
 
 ### report.json
 
-Processing statistics:
+Processing statistics and file manifest:
 
 ```json
 {
-  "generated_at": "2024-01-15T10:30:00",
+  "schema_version": "1.0.0",
+  "generated_at": "2024-01-15T10:30:00+00:00",
   "stats": {
     "files_scanned": 150,
     "files_included": 45,
@@ -274,9 +278,13 @@ Processing statistics:
       "size": 3,
       "binary": 12,
       "extension": 85,
-      "gitignore": 5
+      "gitignore": 5,
+      "glob": 0
     },
+    "files_dropped_budget": 0,
+    "total_bytes_scanned": 1234567,
     "total_bytes_included": 234567,
+    "total_tokens_estimated": 58000,
     "chunks_created": 128,
     "processing_time_seconds": 2.34,
     "languages_detected": {
@@ -284,13 +292,24 @@ Processing statistics:
       "markdown": 8,
       "yaml": 2
     }
-  }
+  },
+  "config": {
+    "mode": "both",
+    "chunk_tokens": 800
+  },
+  "files": [
+    {"id": "a1b2c3d4e5f67890", "path": "README.md", "priority": 1.0, "tokens": 450},
+    {"id": "b2c3d4e5f6789012", "path": "src/main.py", "priority": 0.85, "tokens": 320}
+  ],
+  "output_files": ["context_pack.md", "chunks.jsonl", "report.json"]
 }
 ```
 
 ## Secret Redaction
 
 By default, `repo-to-prompt` detects and redacts common secrets:
+
+### Built-in Patterns (25+)
 
 - AWS access keys and secret keys
 - GitHub tokens (ghp_, gho_, ghu_, ghr_)
@@ -300,10 +319,65 @@ By default, `repo-to-prompt` detects and redacts common secrets:
 - Google API keys
 - JWT tokens
 - Private keys (RSA, DSA, EC, OpenSSH)
+- Authorization headers (Bearer, Basic)
 - Generic patterns (api_key, secret_key, password, etc.)
 - Connection string passwords
 
 Redacted content is replaced with descriptive placeholders like `[AWS_ACCESS_KEY_REDACTED]`.
+
+### Advanced Redaction Features
+
+Configure advanced redaction in your config file:
+
+```toml
+# repo-to-prompt.toml
+[redaction]
+# Entropy-based detection for unknown secrets
+[redaction.entropy]
+enabled = true
+threshold = 4.5  # Shannon entropy threshold (higher = more random)
+min_length = 20
+
+# Paranoid mode: redact any long base64-like string
+[redaction.paranoid]
+enabled = true
+min_length = 32
+
+# Allowlist patterns (skip redaction for these files)
+allowlist_patterns = ["*.example", "test_*.py", "docs/**"]
+
+# Allowlist specific strings (false positive prevention)
+allowlist_strings = ["test-uuid-12345", "example-api-key"]
+
+# Custom redaction rules
+[[redaction.custom_rules]]
+name = "internal_key"
+pattern = "INTERNAL_[A-Z0-9]{16}"
+replacement = "[INTERNAL_KEY_REDACTED]"
+```
+
+### Entropy Detection
+
+High-entropy strings (random-looking, likely secrets) are automatically detected:
+
+```python
+# Detected: high entropy (4.8 bits/char)
+SECRET = "xK9fP2mN7qR4sT6vW8yB3dF5gH1jL0aZ"
+
+# Not detected: low entropy, known patterns (UUIDs, hashes)
+UUID = "550e8400-e29b-41d4-a716-446655440000"
+```
+
+### Paranoid Mode
+
+For maximum security, paranoid mode redacts any long alphanumeric string:
+
+```python
+# With paranoid_mode=true, min_length=32:
+TOKEN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"  # Redacted
+```
+
+Safe files (*.md, *.json, *.lock) are excluded from paranoid mode to prevent false positives.
 
 ## File Priority Ranking
 
@@ -323,19 +397,92 @@ Files are ranked by importance (highest to lowest):
 | 0.15 | Lock files | package-lock.json, poetry.lock |
 | 0.10 | Vendored | vendor/**, node_modules/** |
 
+Custom weights can be configured in your config file (see [Configuration Files](#configuration-files)).
+
+## Configuration Files
+
+Configure `repo-to-prompt` via project-level config files. The tool searches for these files in order:
+
+1. `repo-to-prompt.toml`
+2. `.repo-to-prompt.toml`
+3. `r2p.toml`
+4. `.r2p.toml`
+5. `r2p.yml` / `.r2p.yml` / `r2p.yaml` / `.r2p.yaml`
+
+CLI flags always override config file values.
+
+### Example Configuration (TOML)
+
+```toml
+# repo-to-prompt.toml
+[repo-to-prompt]
+# File filtering
+include_extensions = [".py", ".ts", ".md"]
+exclude_globs = ["tests/**", "*.test.ts"]
+max_file_bytes = 1048576
+max_total_bytes = 20000000
+follow_symlinks = false
+skip_minified = true
+
+# Token budget (optional)
+max_tokens = 100000
+
+# Chunking
+chunk_tokens = 800
+chunk_overlap = 120
+min_chunk_tokens = 200
+
+# Output
+output_dir = "./out"
+mode = "both"  # "prompt", "rag", or "both"
+tree_depth = 4
+
+# Behavior
+respect_gitignore = true
+redact_secrets = true
+
+# Custom ranking weights (optional)
+[repo-to-prompt.ranking_weights]
+readme = 1.0
+test = 0.3  # Lower priority for tests
+generated = 0.1
+
+# Redaction settings (see Secret Redaction section)
+[repo-to-prompt.redaction]
+# ...
+```
+
+### Example Configuration (YAML)
+
+```yaml
+# .r2p.yml
+include_extensions:
+  - .py
+  - .ts
+  - .md
+max_tokens: 100000
+chunk_tokens: 800
+mode: both
+
+ranking_weights:
+  readme: 1.0
+  test: 0.3
+```
+
 ## Architecture
 
 ```text
 src/repo_to_prompt/
-├── cli.py          # CLI entry point (typer)
-├── config.py       # Configuration and data models
-├── fetcher.py      # Repository fetching (local/GitHub)
-├── scanner.py      # File discovery and filtering
-├── chunker.py      # Language-aware content chunking
-├── ranker.py       # File importance ranking
-├── renderer.py     # Output generation (MD, JSONL, JSON)
-├── redactor.py     # Secret detection and redaction
-└── utils.py        # Token estimation, hashing, encoding
+├── cli.py           # CLI entry point (typer) with rich progress UI
+├── config.py        # Configuration and data models
+├── config_loader.py # Config file loading (TOML/YAML)
+├── fetcher.py       # Repository fetching (local/GitHub)
+├── scanner.py       # File discovery with caching and concurrency
+├── chunker.py       # Language-aware content chunking
+├── ranker.py        # File importance ranking
+├── renderer.py      # Output generation (MD, JSONL, JSON)
+├── redactor.py      # Advanced secret detection and redaction
+└── utils.py         # Token estimation, hashing, encoding
 ```
 
 ## Development
@@ -368,9 +515,34 @@ pytest tests/test_chunker.py -v
 # Lint with ruff
 ruff check src tests
 
+# Format with ruff
+ruff format src tests
+
 # Type check with mypy
 mypy src
 ```
+
+### Pre-commit Hooks
+
+```bash
+# Install pre-commit hooks
+pip install pre-commit
+pre-commit install
+
+# Run all hooks manually
+pre-commit run --all-files
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Make your changes
+4. Run tests (`pytest`)
+5. Run linters (`ruff check . && mypy src`)
+6. Commit your changes (`git commit -m 'Add amazing feature'`)
+7. Push to the branch (`git push origin feature/amazing-feature`)
+8. Open a Pull Request
 
 ## License
 

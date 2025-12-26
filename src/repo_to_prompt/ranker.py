@@ -35,8 +35,8 @@ class FileRanker:
     - Generated/vendored status (deprioritized)
     """
 
-    # Priority weights for different categories
-    WEIGHTS = {
+    # Default priority weights for different categories
+    DEFAULT_WEIGHTS = {
         "readme": 1.0,
         "main_doc": 0.95,
         "config": 0.90,
@@ -80,7 +80,12 @@ class FileRanker:
         re.compile(r"^demo/"),
     ]
 
-    def __init__(self, root_path: Path, scanned_files: set[str] | None = None):
+    def __init__(
+        self,
+        root_path: Path,
+        scanned_files: set[str] | None = None,
+        weights: dict[str, float] | None = None,
+    ):
         """
         Initialize the ranker.
 
@@ -88,6 +93,8 @@ class FileRanker:
             root_path: Root path of the repository
             scanned_files: Optional set of relative file paths that were scanned.
                            Used to validate entrypoints.
+            weights: Optional custom weights for ranking categories.
+                     Overrides default weights for specified keys.
         """
         self.root_path = root_path.resolve()
         self._entrypoint_candidates: set[str] = set()  # Raw candidates from manifests
@@ -95,6 +102,13 @@ class FileRanker:
         self._detected_languages: set[str] = set()
         self._manifest_info: dict = {}
         self._scanned_files: set[str] = scanned_files or set()
+
+        # Merge custom weights with defaults
+        self.WEIGHTS = self.DEFAULT_WEIGHTS.copy()
+        if weights:
+            for key, value in weights.items():
+                if key in self.WEIGHTS and isinstance(value, (int, float)):
+                    self.WEIGHTS[key] = float(value)
 
         # Load manifest information
         self._load_manifests()

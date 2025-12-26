@@ -1,7 +1,15 @@
-"""
-CLI entry point for repo-to-prompt.
+"""Command-line interface for repo-to-prompt.
 
-Provides a command-line interface for converting repositories to LLM-friendly context packs.
+Provides commands for converting repositories into LLM-friendly context packs
+suitable for prompting and RAG (Retrieval-Augmented Generation) workflows.
+
+Commands:
+    export  Convert a repository to context pack format
+    info    Display repository analysis without exporting
+
+Configuration:
+    Supports config files: repo-to-prompt.toml, .r2p.yml, etc.
+    CLI flags override config file values.
 """
 
 from __future__ import annotations
@@ -12,25 +20,68 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TaskProgressColumn,
+    TimeElapsedColumn,
+    MofNCompleteColumn,
+)
 
 from . import __version__
 from .chunker import chunk_file, coalesce_small_chunks
 from .config import OutputMode
+from .config_loader import load_config, merge_cli_with_config
 from .fetcher import FetchError, RepoContext
 from .ranker import FileRanker
-from .redactor import create_redactor
+from .redactor import create_redactor, RedactionConfig
 from .renderer import render_context_pack, write_outputs
-from .scanner import scan_repository
+from .scanner import scan_repository, FileScanner
+from .utils import estimate_tokens
 
 # Initialize CLI app
 app = typer.Typer(
     name="repo-to-prompt",
-    help="Convert repositories into LLM-friendly context packs for prompting and RAG.",
+    help="""Convert repositories into LLM-friendly context packs.
+
+Generates Markdown context packs for prompting and JSONL chunks for RAG workflows.
+Supports local directories and GitHub repositories.
+
+Examples:
+    repo-to-prompt export --path ./my-project
+    repo-to-prompt export --repo https://github.com/owner/repo
+    repo-to-prompt info ./my-project
+""",
     add_completion=False,
+    no_args_is_help=True,
 )
 
 console = Console()
+
+
+def create_progress() -> Progress:
+    """Create a rich progress bar with file scanning columns."""
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=30),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    )
+
+
+def create_spinner_progress() -> Progress:
+    """Create a simple spinner progress for indeterminate tasks."""
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    )
 
 
 def get_repo_output_dir(base_output_dir: Path, repo_root: Path) -> Path:
@@ -75,11 +126,11 @@ def parse_globs(value: str) -> set[str]:
 
 @app.command()
 def export(
-    # Input options
+    # === Input Source (mutually exclusive) ===
     path: Path | None = typer.Option(
         None,
         "--path", "-p",
-        help="Local path to the repository.",
+        help="Local directory path to export.",
         exists=True,
         file_okay=False,
         dir_okay=True,
@@ -88,85 +139,117 @@ def export(
     repo: str | None = typer.Option(
         None,
         "--repo", "-r",
-        help="GitHub repository URL (e.g., https://github.com/owner/name).",
+        help="GitHub repository URL to clone and export.",
     ),
     ref: str | None = typer.Option(
         None,
         "--ref",
-        help="Git ref (branch, tag, or commit SHA) for GitHub repos.",
+        help="Git ref (branch/tag/SHA) when using --repo.",
     ),
 
-    # Filter options
+    # === Configuration File ===
+    config_file: Path | None = typer.Option(
+        None,
+        "--config", "-c",
+        help="Path to config file (repo-to-prompt.toml or .r2p.yml).",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+    ),
+
+    # === File Filtering ===
     include_ext: str | None = typer.Option(
         None,
         "--include-ext", "-i",
-        help="Comma-separated file extensions to include (e.g., '.py,.ts,.md').",
+        help="Include only these extensions (comma-separated, e.g., '.py,.ts').",
     ),
     exclude_glob: str | None = typer.Option(
         None,
         "--exclude-glob", "-e",
-        help="Comma-separated glob patterns to exclude (e.g., 'dist/**,build/**').",
+        help="Exclude paths matching these globs (comma-separated, e.g., 'dist/**').",
     ),
-    max_file_bytes: int = typer.Option(
-        1_048_576,
+    max_file_bytes: int | None = typer.Option(
+        None,
         "--max-file-bytes",
-        help="Maximum size in bytes for individual files (default: 1 MB).",
+        help="Skip files larger than this (bytes). [default: 1MB]",
     ),
-    max_total_bytes: int = typer.Option(
-        20_000_000,
+    max_total_bytes: int | None = typer.Option(
+        None,
         "--max-total-bytes",
-        help="Maximum total bytes to export (default: 20 MB).",
+        help="Stop after exporting this many bytes total. [default: 20MB]",
     ),
     no_gitignore: bool = typer.Option(
         False,
         "--no-gitignore",
-        help="Don't respect .gitignore files.",
+        help="Ignore .gitignore rules (include all matching files).",
+    ),
+    follow_symlinks: bool = typer.Option(
+        False,
+        "--follow-symlinks",
+        help="Follow symbolic links when scanning. [default: skip symlinks]",
+    ),
+    include_minified: bool = typer.Option(
+        False,
+        "--include-minified",
+        help="Include minified/bundled files. [default: skip]",
     ),
 
-    # Chunking options
-    chunk_tokens: int = typer.Option(
-        800,
+    # === Token Budget ===
+    max_tokens: int | None = typer.Option(
+        None,
+        "--max-tokens", "-t",
+        help="Maximum tokens in output. Packs best content under this budget.",
+    ),
+
+    # === Chunking Options ===
+    chunk_tokens: int | None = typer.Option(
+        None,
         "--chunk-tokens",
-        help="Target tokens per chunk (approximate).",
+        help="Target tokens per chunk. [default: 800]",
     ),
-    chunk_overlap: int = typer.Option(
-        120,
+    chunk_overlap: int | None = typer.Option(
+        None,
         "--chunk-overlap",
-        help="Token overlap between chunks.",
+        help="Overlap tokens between adjacent chunks. [default: 120]",
     ),
-    min_chunk_tokens: int = typer.Option(
-        200,
+    min_chunk_tokens: int | None = typer.Option(
+        None,
         "--min-chunk-tokens",
-        help="Minimum tokens per chunk. Smaller chunks are coalesced. Set to 0 to disable.",
+        help="Coalesce chunks smaller than this. Set 0 to disable. [default: 200]",
     ),
 
-    # Output options
-    mode: OutputMode = typer.Option(
-        OutputMode.BOTH,
+    # === Output Options ===
+    mode: OutputMode | None = typer.Option(
+        None,
         "--mode", "-m",
-        help="Output mode: 'prompt' (markdown only), 'rag' (JSONL only), or 'both'.",
+        help="Output format: 'prompt' (Markdown), 'rag' (JSONL), or 'both'. [default: both]",
     ),
-    output_dir: Path = typer.Option(
-        Path("./out"),
+    output_dir: Path | None = typer.Option(
+        None,
         "--output-dir", "-o",
-        help="Output directory for generated files.",
+        help="Directory for output files. [default: ./out]",
+    ),
+    no_timestamp: bool = typer.Option(
+        False,
+        "--no-timestamp",
+        help="Omit timestamps from output for reproducible diffs.",
     ),
 
-    # Tree options
-    tree_depth: int = typer.Option(
-        4,
+    # === Display Options ===
+    tree_depth: int | None = typer.Option(
+        None,
         "--tree-depth",
-        help="Maximum depth for directory tree display.",
+        help="Max depth for directory tree in output. [default: 4]",
     ),
 
-    # Redaction options
+    # === Security Options ===
     no_redact: bool = typer.Option(
         False,
         "--no-redact",
-        help="Disable secret redaction.",
+        help="Disable automatic secret/credential redaction.",
     ),
 
-    # Version
+    # === Misc ===
     version: bool = typer.Option(
         False,
         "--version", "-v",
@@ -175,25 +258,44 @@ def export(
         help="Show version and exit.",
     ),
 ) -> None:
-    """
-    Export a repository as an LLM-friendly context pack.
+    """Export a repository as an LLM-friendly context pack.
 
-    Examples:
+    Scans a local directory or GitHub repository, chunks the code files,
+    and generates output suitable for LLM prompting or RAG indexing.
 
-        # Export a local repository
-        repo-to-prompt export --path /path/to/repo
+    \b
+    CONFIGURATION:
+      Supports config files: repo-to-prompt.toml, .r2p.yml
+      CLI flags always override config file values.
 
-        # Export from GitHub
-        repo-to-prompt export --repo https://github.com/owner/repo
+    \b
+    OUTPUT FILES:
+      context_pack.md  - Markdown file with full repository context
+      chunks.jsonl     - JSONL file with chunked content for embeddings
+      report.json      - Processing statistics and configuration (versioned schema)
 
-        # Export specific branch with custom output
-        repo-to-prompt export --repo https://github.com/owner/repo --ref develop -o ./output
+    \b
+    EXAMPLES:
+      # Export a local project
+      repo-to-prompt export -p ./my-project
 
-        # Export only Python and Markdown files
-        repo-to-prompt export -p ./repo --include-ext ".py,.md"
+      # Export from GitHub
+      repo-to-prompt export -r https://github.com/owner/repo
 
-        # RAG mode only (JSONL chunks)
-        repo-to-prompt export -p ./repo --mode rag
+      # Export specific branch, Python files only
+      repo-to-prompt export -r https://github.com/owner/repo --ref main -i .py
+
+      # RAG mode only (for embedding pipelines)
+      repo-to-prompt export -p ./repo --mode rag
+
+      # Limit output to 50K tokens (best content under budget)
+      repo-to-prompt export -p ./repo --max-tokens 50000
+
+      # Use custom config file
+      repo-to-prompt export -p ./repo --config ./r2p.toml
+
+      # Reproducible output (no timestamps)
+      repo-to-prompt export -p ./repo --no-timestamp
     """
     # Validate input
     if path is None and repo is None:
@@ -206,132 +308,256 @@ def export(
 
     start_time = time.time()
 
-    # Parse filter options
-    include_extensions = parse_extensions(include_ext) if include_ext else None
-    exclude_globs = parse_globs(exclude_glob) if exclude_glob else None
-
     try:
         # Fetch repository
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
+        with create_spinner_progress() as progress:
 
             if repo:
                 task = progress.add_task("Fetching repository...", total=None)
 
             with RepoContext(path=path, repo_url=repo, ref=ref) as repo_path:
                 if repo:
-                    progress.update(task, description="Repository fetched ✓")
+                    progress.update(task, description="[green]✓[/green] Repository fetched")
 
-                # Scan repository
-                progress.add_task("Scanning files...", total=None)
+                # Load config file (searches repo root for config if not specified)
+                project_config = load_config(repo_path, config_file)
+                if project_config._config_file:
+                    console.print(f"[dim]Using config: {project_config._config_file.name}[/dim]")
 
-                files, stats = scan_repository(
-                    root_path=repo_path,
-                    include_extensions=include_extensions,
-                    exclude_globs=exclude_globs,
+                # Merge CLI args with config (CLI takes precedence)
+                merged = merge_cli_with_config(
+                    project_config,
+                    include_ext=include_ext,
+                    exclude_glob=exclude_glob,
                     max_file_bytes=max_file_bytes,
-                    respect_gitignore=not no_gitignore,
+                    max_total_bytes=max_total_bytes,
+                    max_tokens=max_tokens,
+                    follow_symlinks=follow_symlinks if follow_symlinks else None,
+                    include_minified=include_minified if include_minified else None,
+                    chunk_tokens=chunk_tokens,
+                    chunk_overlap=chunk_overlap,
+                    min_chunk_tokens=min_chunk_tokens,
+                    output_dir=output_dir,
+                    mode=mode.value if mode else None,
+                    no_gitignore=no_gitignore,
+                    no_redact=no_redact,
+                    tree_depth=tree_depth,
                 )
 
-                if not files:
-                    console.print("[yellow]Warning: No files found matching criteria.[/yellow]")
-                    raise typer.Exit(0)
+                # Extract merged values
+                m_include_extensions = merged["include_extensions"]
+                m_exclude_globs = merged["exclude_globs"]
+                m_max_file_bytes = merged["max_file_bytes"]
+                m_max_total_bytes = merged["max_total_bytes"]
+                m_max_tokens = merged["max_tokens"]
+                m_follow_symlinks = merged["follow_symlinks"]
+                m_skip_minified = merged["skip_minified"]
+                m_chunk_tokens = merged["chunk_tokens"]
+                m_chunk_overlap = merged["chunk_overlap"]
+                m_min_chunk_tokens = merged["min_chunk_tokens"]
+                m_output_dir = merged["output_dir"]
+                m_mode = OutputMode(merged["mode"])
+                m_respect_gitignore = merged["respect_gitignore"]
+                m_redact_secrets = merged["redact_secrets"]
+                m_tree_depth = merged["tree_depth"]
+                m_ranking_weights = merged["ranking_weights"]
+                m_redaction_config = merged.get("redaction_config", {})
 
-                console.print(f"[green]Found {len(files)} files to process[/green]")
+        # Phase 1: Scan repository (with progress bar)
+        console.print("[cyan]Scanning repository...[/cyan]")
+        
+        scanner = FileScanner(
+            root_path=repo_path,
+            include_extensions=m_include_extensions,
+            exclude_globs=m_exclude_globs,
+            max_file_bytes=m_max_file_bytes,
+            respect_gitignore=m_respect_gitignore,
+            follow_symlinks=m_follow_symlinks,
+            skip_minified=m_skip_minified,
+        )
+        
+        files = list(scanner.scan())
+        stats = scanner.stats
 
-                # Rank files - pass scanned file paths to validate entrypoints
-                progress.add_task("Ranking files...", total=None)
-                scanned_paths = {f.relative_path for f in files}
-                ranker = FileRanker(repo_path, scanned_files=scanned_paths)
-                files = ranker.rank_files(files)
+        if not files:
+            console.print("[yellow]Warning: No files found matching criteria.[/yellow]")
+            raise typer.Exit(0)
 
-                # Create redactor
-                redactor = create_redactor(enabled=not no_redact)
+        console.print(f"[green]✓[/green] Found {len(files)} files ({stats.files_scanned} scanned)")
 
-                # Chunk files
-                progress.add_task("Chunking content...", total=None)
-                all_chunks = []
-                total_bytes = 0
+        # Phase 2: Rank files (with progress)
+        with create_spinner_progress() as progress:
+            task = progress.add_task("Ranking files by importance...", total=None)
+            scanned_paths = {f.relative_path for f in files}
+            ranker = FileRanker(
+                repo_path,
+                scanned_files=scanned_paths,
+                weights=m_ranking_weights.to_dict() if hasattr(m_ranking_weights, 'to_dict') else None,
+            )
+            files = ranker.rank_files(files)
+            progress.update(task, description="[green]✓[/green] Files ranked")
 
-                for file_info in files:
-                    # Check total bytes limit
-                    if total_bytes >= max_total_bytes:
-                        console.print(
-                            f"[yellow]Reached max total bytes limit ({max_total_bytes:,})[/yellow]"
-                        )
-                        break
+        # Create redactor with advanced config
+        redaction_config = RedactionConfig.from_dict(m_redaction_config) if m_redaction_config else None
+        redactor = create_redactor(enabled=m_redact_secrets, config=redaction_config)
 
-                    try:
-                        file_chunks = chunk_file(
-                            file_info=file_info,
-                            max_tokens=chunk_tokens,
-                            overlap_tokens=chunk_overlap,
-                            redactor=redactor,
-                        )
-                        all_chunks.extend(file_chunks)
-                        total_bytes += file_info.size_bytes
-                    except Exception as e:
-                        console.print(
-                            f"[yellow]Warning: Failed to chunk {file_info.relative_path}: {e}[/yellow]"
-                        )
+        # Phase 3: Chunk files (with detailed progress bar)
+        console.print("[cyan]Chunking content...[/cyan]")
+        all_chunks = []
+        total_bytes = 0
+        total_tokens = 0
+        files_processed = []
+        dropped_files = []
 
-                # Coalesce small chunks to reduce chunk explosion
-                if min_chunk_tokens > 0:
-                    chunks_before = len(all_chunks)
-                    all_chunks = coalesce_small_chunks(
-                        all_chunks,
-                        min_tokens=min_chunk_tokens,
-                        max_tokens=chunk_tokens,
+        with create_progress() as progress:
+            chunk_task = progress.add_task(
+                "Processing files",
+                total=len(files),
+            )
+
+            for idx, file_info in enumerate(files):
+                progress.update(
+                    chunk_task,
+                    completed=idx,
+                    description=f"Chunking {file_info.relative_path[:40]}...",
+                )
+                
+                # Check total bytes limit
+                if total_bytes >= m_max_total_bytes:
+                    console.print(
+                        f"[yellow]Reached max total bytes limit ({m_max_total_bytes:,})[/yellow]"
                     )
-                    if len(all_chunks) < chunks_before:
-                        console.print(
-                            f"[dim]Coalesced {chunks_before} → {len(all_chunks)} chunks[/dim]"
-                        )
+                    # Track remaining files as dropped
+                    for remaining in files[idx:]:
+                        dropped_files.append({
+                            "path": remaining.relative_path,
+                            "reason": "bytes_limit",
+                            "priority": round(remaining.priority, 3),
+                        })
+                    stats.files_dropped_budget = len(dropped_files)
+                    break
 
-                stats.chunks_created = len(all_chunks)
+                try:
+                    # Set current file for redactor allowlist matching
+                    redactor.set_current_file(file_info.path)
+                    
+                    file_chunks = chunk_file(
+                        file_info=file_info,
+                        max_tokens=m_chunk_tokens,
+                        overlap_tokens=m_chunk_overlap,
+                        redactor=redactor,
+                    )
+                    
+                    # Calculate token estimate for this file
+                    file_tokens = sum(c.token_estimate for c in file_chunks)
+                    file_info.token_estimate = file_tokens
+                    
+                    # Check token budget (if set)
+                    if m_max_tokens and total_tokens + file_tokens > m_max_tokens:
+                        # Track this file as dropped due to budget
+                        dropped_files.append({
+                            "path": file_info.relative_path,
+                            "reason": "token_budget",
+                            "priority": round(file_info.priority, 3),
+                            "tokens": file_tokens,
+                        })
+                        continue
+                    
+                    all_chunks.extend(file_chunks)
+                    total_bytes += file_info.size_bytes
+                    total_tokens += file_tokens
+                    files_processed.append(file_info)
+                    
+                except Exception as e:
+                    console.print(
+                        f"[yellow]Warning: Failed to chunk {file_info.relative_path}: {e}[/yellow]"
+                    )
+            
+            progress.update(chunk_task, completed=len(files), description="[green]✓[/green] Chunking complete")
 
-                # Render context pack
-                progress.add_task("Rendering output...", total=None)
-                context_pack = render_context_pack(
-                    root_path=repo_path,
-                    files=files,
-                    chunks=all_chunks,
-                    ranker=ranker,
-                    stats=stats,
+        console.print(f"[green]✓[/green] Created {len(all_chunks)} chunks from {len(files_processed)} files")
+
+        # Update stats
+        stats.total_tokens_estimated = total_tokens
+        stats.files_dropped_budget = len(dropped_files)
+        stats.dropped_files = dropped_files
+        
+        # Record top ranked files
+        stats.top_ranked_files = [
+            {"path": f.relative_path, "priority": round(f.priority, 3)}
+            for f in files_processed[:20]
+        ]
+
+        # Coalesce small chunks to reduce chunk explosion
+        if m_min_chunk_tokens > 0:
+            chunks_before = len(all_chunks)
+            all_chunks = coalesce_small_chunks(
+                all_chunks,
+                min_tokens=m_min_chunk_tokens,
+                max_tokens=m_chunk_tokens,
+            )
+            if len(all_chunks) < chunks_before:
+                console.print(
+                    f"[dim]Coalesced {chunks_before} → {len(all_chunks)} chunks[/dim]"
                 )
 
-                # Prepare config for report
-                config_dict = {
-                    "path": str(path) if path else None,
-                    "repo": repo,
-                    "ref": ref,
-                    "include_extensions": list(include_extensions) if include_extensions else None,
-                    "exclude_globs": list(exclude_globs) if exclude_globs else None,
-                    "max_file_bytes": max_file_bytes,
-                    "max_total_bytes": max_total_bytes,
-                    "chunk_tokens": chunk_tokens,
-                    "chunk_overlap": chunk_overlap,
-                    "mode": mode.value,
-                    "redact_secrets": not no_redact,
-                }
+        stats.chunks_created = len(all_chunks)
+        
+        # Update included files count
+        stats.files_included = len(files_processed)
 
-                # Calculate timing BEFORE writing outputs
-                elapsed = time.time() - start_time
-                stats.processing_time_seconds = elapsed
+        # Phase 4: Render output (with spinner)
+        with create_spinner_progress() as progress:
+            task = progress.add_task("Rendering output...", total=None)
+            
+            context_pack = render_context_pack(
+                root_path=repo_path,
+                files=files_processed,
+                chunks=all_chunks,
+                ranker=ranker,
+                stats=stats,
+                include_timestamp=not no_timestamp,
+            )
 
-                # Write outputs
-                repo_output_dir = get_repo_output_dir(output_dir, repo_path)
-                output_files = write_outputs(
-                    output_dir=repo_output_dir,
-                    mode=mode,
-                    context_pack=context_pack,
-                    chunks=all_chunks,
-                    stats=stats,
-                    config=config_dict,
-                )
+            # Prepare config for report (sorted keys for determinism)
+            config_dict = {
+                "chunk_overlap": m_chunk_overlap,
+                "chunk_tokens": m_chunk_tokens,
+                "exclude_globs": sorted(m_exclude_globs) if m_exclude_globs else None,
+                "follow_symlinks": m_follow_symlinks,
+                "include_extensions": sorted(m_include_extensions) if m_include_extensions else None,
+                "max_file_bytes": m_max_file_bytes,
+                "max_tokens": m_max_tokens,
+                "max_total_bytes": m_max_total_bytes,
+                "mode": m_mode.value,
+                "path": str(path) if path else None,
+                "redact_secrets": m_redact_secrets,
+                "ref": ref,
+                "repo": repo,
+                "skip_minified": m_skip_minified,
+            }
+
+            # Calculate timing BEFORE writing outputs
+            elapsed = time.time() - start_time
+            stats.processing_time_seconds = elapsed
+            
+            # Add redaction counts to stats
+            stats.redaction_counts = redactor.get_stats()
+
+            # Write outputs
+            repo_output_dir = get_repo_output_dir(m_output_dir, repo_path)
+            output_files = write_outputs(
+                output_dir=repo_output_dir,
+                mode=m_mode,
+                context_pack=context_pack,
+                chunks=all_chunks,
+                stats=stats,
+                config=config_dict,
+                include_timestamp=not no_timestamp,
+                files=files_processed,
+            )
+            
+            progress.update(task, description="[green]✓[/green] Output written")
 
         # Print summary (elapsed was already calculated before write_outputs)
         console.print()
@@ -340,8 +566,11 @@ def export(
         console.print("[cyan]Statistics:[/cyan]")
         console.print(f"  Files scanned: {stats.files_scanned}")
         console.print(f"  Files included: {stats.files_included}")
+        if stats.files_dropped_budget > 0:
+            console.print(f"  Files dropped (budget): {stats.files_dropped_budget}")
         console.print(f"  Chunks created: {stats.chunks_created}")
         console.print(f"  Total bytes: {stats.total_bytes_included:,}")
+        console.print(f"  Total tokens: ~{stats.total_tokens_estimated:,}")
         console.print(f"  Processing time: {stats.processing_time_seconds:.2f}s")
         console.print()
         console.print("[cyan]Output files:[/cyan]")
@@ -353,6 +582,15 @@ def export(
             console.print("[cyan]Redactions applied:[/cyan]")
             for name, count in list(redactor.get_stats().items())[:5]:
                 console.print(f"  {name}: {count}")
+        
+        # Show dropped files summary if any
+        if dropped_files:
+            console.print()
+            console.print(f"[yellow]Dropped {len(dropped_files)} files due to budget constraints:[/yellow]")
+            for df in dropped_files[:5]:
+                console.print(f"  {df['path']} ({df['reason']})")
+            if len(dropped_files) > 5:
+                console.print(f"  ... and {len(dropped_files) - 5} more (see report.json)")
 
     except FetchError as e:
         console.print(f"[red]Error fetching repository: {e}[/red]")
@@ -369,7 +607,7 @@ def export(
 def info(
     path: Path = typer.Argument(
         ...,
-        help="Path to the repository.",
+        help="Local directory path to analyze.",
         exists=True,
         file_okay=False,
         dir_okay=True,
@@ -378,29 +616,33 @@ def info(
     include_ext: str | None = typer.Option(
         None,
         "--include-ext", "-i",
-        help="Comma-separated file extensions to include (e.g., '.py,.ts,.md').",
+        help="Include only these extensions (comma-separated).",
     ),
     exclude_glob: str | None = typer.Option(
         None,
         "--exclude-glob", "-e",
-        help="Comma-separated glob patterns to exclude (e.g., 'dist/**,build/**').",
+        help="Exclude paths matching these globs (comma-separated).",
     ),
     max_file_bytes: int = typer.Option(
         1_048_576,
         "--max-file-bytes",
-        help="Maximum size in bytes for individual files (default: 1 MB).",
+        help="Skip files larger than this (bytes). [default: 1MB]",
     ),
     no_gitignore: bool = typer.Option(
         False,
         "--no-gitignore",
-        help="Don't respect .gitignore files.",
+        help="Ignore .gitignore rules.",
     ),
 ) -> None:
-    """
-    Show information about a repository without exporting.
+    """Analyze a repository and display summary statistics.
 
-    Displays detected languages, entrypoints, and file statistics.
-    Uses the same scanning logic as 'export' for consistent results.
+    Shows detected languages, entrypoints, top files by priority,
+    and scanning statistics. Useful for previewing what 'export' will process.
+
+    \b
+    EXAMPLES:
+      repo-to-prompt info ./my-project
+      repo-to-prompt info ./my-project --include-ext .py,.ts
     """
     # Parse filter options (same as export)
     include_extensions = parse_extensions(include_ext) if include_ext else None
@@ -424,12 +666,12 @@ def info(
         # Print info
         console.print(f"\n[bold]Repository: {path.name}[/bold]\n")
 
-        # Languages
+        # Languages (sorted for determinism)
         console.print("[cyan]Languages detected:[/cyan]")
-        for lang, count in sorted(stats.languages_detected.items(), key=lambda x: -x[1]):
+        for lang, count in sorted(stats.languages_detected.items(), key=lambda x: (-x[1], x[0])):
             console.print(f"  {lang}: {count} files")
 
-        # Entrypoints
+        # Entrypoints (sorted for determinism)
         entrypoints = ranker.get_entrypoints()
         if entrypoints:
             console.print("\n[cyan]Entrypoints:[/cyan]")
@@ -459,7 +701,6 @@ def info(
 def main() -> None:
     """Entry point for the CLI."""
     app()
-
 
 if __name__ == "__main__":
     main()

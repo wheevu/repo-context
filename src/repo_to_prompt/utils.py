@@ -1,7 +1,8 @@
 """
 Utility functions for repo-to-prompt.
 
-Includes token estimation, hashing, encoding detection, and misc helpers.
+Includes token estimation, hashing, encoding detection, line ending normalization,
+and misc helpers for deterministic processing.
 """
 
 from __future__ import annotations
@@ -189,8 +190,24 @@ def stream_file_lines(
 
 
 def normalize_path(path: str) -> str:
-    """Normalize a path for consistent comparison."""
+    """Normalize a path for consistent comparison (use forward slashes)."""
     return path.replace("\\", "/")
+
+
+def normalize_line_endings(content: str) -> str:
+    """
+    Normalize line endings to LF (Unix-style).
+
+    Handles CRLF (Windows), CR (old Mac), and mixed line endings.
+
+    Args:
+        content: Text content with potentially mixed line endings
+
+    Returns:
+        Content with all line endings normalized to LF
+    """
+    # Replace CRLF first, then remaining CR
+    return content.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def truncate_string(s: str, max_length: int, suffix: str = "...") -> str:
@@ -213,6 +230,45 @@ MINIFIED_INDICATORS = [
     ".bundle.",
     ".packed.",
 ]
+
+
+def is_likely_minified(file_path: Path, max_line_length: int = 5000) -> bool:
+    """
+    Check if a file appears to be minified based on line length.
+
+    Minified files typically have extremely long lines (entire file on one line).
+    This is a quick heuristic check that reads only the first line.
+
+    Args:
+        file_path: Path to the file
+        max_line_length: Maximum line length before considering minified (default: 5000)
+
+    Returns:
+        True if the file appears to be minified
+    """
+    name = file_path.name.lower()
+
+    # Check filename indicators first (fast path)
+    for indicator in MINIFIED_INDICATORS:
+        if indicator in name:
+            return True
+
+    # Read first line to check length
+    try:
+        with open(file_path, "rb") as f:
+            # Read up to max_line_length + 1 bytes
+            chunk = f.read(max_line_length + 1)
+            if not chunk:
+                return False
+
+            # Find first newline
+            newline_pos = chunk.find(b"\n")
+            if newline_pos == -1:
+                # No newline found - if we read the full chunk, line is too long
+                return len(chunk) > max_line_length
+            return newline_pos > max_line_length
+    except (OSError, PermissionError):
+        return False
 
 
 def is_likely_generated(file_path: Path, content_sample: str = "") -> bool:

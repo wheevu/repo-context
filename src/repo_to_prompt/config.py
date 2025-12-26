@@ -6,9 +6,14 @@ Uses Pydantic for validation and type safety.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+
+
+# Current report schema version
+REPORT_SCHEMA_VERSION = "1.0.0"
 
 
 class OutputMode(str, Enum):
@@ -265,6 +270,14 @@ class FileInfo:
     language: str
     priority: float = 0.5
     tags: list[str] = field(default_factory=list)
+    token_estimate: int = 0  # Estimated tokens in file
+
+    @property
+    def id(self) -> str:
+        """Generate a stable, deterministic file ID based on path."""
+        # Use SHA256 of relative path for deterministic ID
+        hash_input = self.relative_path.encode("utf-8")
+        return hashlib.sha256(hash_input).hexdigest()[:16]
 
     @property
     def is_readme(self) -> bool:
@@ -286,6 +299,19 @@ class FileInfo:
             or "docs/" in self.relative_path.lower()
             or "documentation/" in self.relative_path.lower()
         )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "id": self.id,
+            "path": self.relative_path,
+            "extension": self.extension,
+            "language": self.language,
+            "priority": round(self.priority, 3),
+            "size_bytes": self.size_bytes,
+            "tags": sorted(self.tags),
+            "token_estimate": self.token_estimate,
+        }
 
 
 @dataclass
@@ -312,7 +338,7 @@ class Chunk:
             "end_line": self.end_line,
             "content": self.content,
             "priority": round(self.priority, 3),
-            "tags": self.tags,
+            "tags": sorted(self.tags),  # Sort for determinism
         }
 
 
@@ -327,36 +353,62 @@ class ScanStats:
     files_skipped_extension: int = 0
     files_skipped_gitignore: int = 0
     files_skipped_glob: int = 0
+    files_dropped_budget: int = 0  # Files dropped due to token budget
     total_bytes_scanned: int = 0
     total_bytes_included: int = 0
+    total_tokens_estimated: int = 0  # Total token estimate
     chunks_created: int = 0
     processing_time_seconds: float = 0.0
     top_ignored_patterns: dict[str, int] = field(default_factory=dict)
     languages_detected: dict[str, int] = field(default_factory=dict)
+    dropped_files: list[dict] = field(default_factory=list)  # Files dropped from budget
+    redaction_counts: dict[str, int] = field(default_factory=dict)  # Redaction stats
+    top_ranked_files: list[dict] = field(default_factory=list)  # Top N files by priority
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "files_scanned": self.files_scanned,
+        """Convert to dictionary for JSON serialization.
+
+        Output is deterministic: all dicts are sorted by key for stable JSON.
+        """
+        result = {
+            "chunks_created": self.chunks_created,
+            "files_dropped_budget": self.files_dropped_budget,
             "files_included": self.files_included,
+            "files_scanned": self.files_scanned,
             "files_skipped": {
-                "size": self.files_skipped_size,
                 "binary": self.files_skipped_binary,
                 "extension": self.files_skipped_extension,
                 "gitignore": self.files_skipped_gitignore,
                 "glob": self.files_skipped_glob,
+                "size": self.files_skipped_size,
             },
-            "total_bytes_scanned": self.total_bytes_scanned,
-            "total_bytes_included": self.total_bytes_included,
-            "chunks_created": self.chunks_created,
+            "languages_detected": dict(
+                sorted(self.languages_detected.items(), key=lambda x: (-x[1], x[0]))
+            ),
             "processing_time_seconds": round(self.processing_time_seconds, 3),
             "top_ignored_patterns": dict(
-                sorted(self.top_ignored_patterns.items(), key=lambda x: -x[1])[:10]
+                sorted(self.top_ignored_patterns.items(), key=lambda x: (-x[1], x[0]))[:10]
             ),
-            "languages_detected": dict(
-                sorted(self.languages_detected.items(), key=lambda x: -x[1])
-            ),
+            "total_bytes_included": self.total_bytes_included,
+            "total_bytes_scanned": self.total_bytes_scanned,
+            "total_tokens_estimated": self.total_tokens_estimated,
         }
+        
+        # Include redaction counts if any
+        if self.redaction_counts:
+            result["redaction_counts"] = dict(
+                sorted(self.redaction_counts.items(), key=lambda x: (-x[1], x[0]))
+            )
+        
+        # Include top ranked files if set
+        if self.top_ranked_files:
+            result["top_ranked_files"] = self.top_ranked_files
+        
+        # Include dropped files summary if any
+        if self.dropped_files:
+            result["dropped_files"] = self.dropped_files
+        
+        return result
 
 
 # Language detection by extension

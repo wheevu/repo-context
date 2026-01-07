@@ -118,7 +118,10 @@ class FileRanker:
         self._validate_entrypoints()
 
     def _load_manifests(self) -> None:
-        """Load information from package manifests."""
+        """Load information from common project manifests.
+
+        This is intentionally best-effort: failures should not prevent scanning/ranking.
+        """
         # Python manifests
         pyproject = self.root_path / "pyproject.toml"
         if pyproject.exists():
@@ -145,7 +148,11 @@ class FileRanker:
             self._detected_languages.add("rust")
 
     def _parse_pyproject(self, path: Path) -> None:
-        """Parse pyproject.toml for entrypoints."""
+        """Parse `pyproject.toml` for Python metadata and CLI entrypoints.
+
+        Args:
+            path: Path to the `pyproject.toml` file.
+        """
         try:
             content, _ = read_file_safe(path)
             self._detected_languages.add("python")
@@ -178,7 +185,11 @@ class FileRanker:
             pass
 
     def _parse_package_json(self, path: Path) -> None:
-        """Parse package.json for entrypoints."""
+        """Parse `package.json` for entrypoints and scripts.
+
+        Args:
+            path: Path to `package.json`.
+        """
         try:
             content, _ = read_file_safe(path)
             data = json.loads(content)
@@ -216,7 +227,11 @@ class FileRanker:
             pass
 
     def _parse_go_mod(self, path: Path) -> None:
-        """Parse go.mod for module info."""
+        """Parse `go.mod` for module info and discover Go `cmd/*/main.go` entrypoints.
+
+        Args:
+            path: Path to `go.mod`.
+        """
         try:
             content, _ = read_file_safe(path)
 
@@ -343,10 +358,16 @@ class FileRanker:
         return self.WEIGHTS["default"]
 
     def rank_files(self, files: list[FileInfo]) -> list[FileInfo]:
-        """
-        Rank a list of files by priority.
+        """Rank a list of files by priority.
 
-        Modifies files in place and returns sorted list.
+        This method mutates `files` in-place (setting `FileInfo.priority` and tags) and also
+        returns the same list sorted in descending priority order.
+
+        Args:
+            files: List of `FileInfo` objects to score and sort.
+
+        Returns:
+            The same list, sorted by `(priority desc, relative_path asc)`.
         """
         for file_info in files:
             # Read a small sample for analysis
@@ -373,15 +394,27 @@ class FileRanker:
         return files
 
     def get_detected_languages(self) -> set[str]:
-        """Get detected programming languages."""
+        """Get detected programming languages.
+
+        Returns:
+            A copy of the detected language set.
+        """
         return self._detected_languages.copy()
 
     def get_manifest_info(self) -> dict[str, Any]:
-        """Get information extracted from manifests."""
+        """Get information extracted from manifests.
+
+        Returns:
+            Copy of manifest-derived metadata (project name, scripts, etc.).
+        """
         return self._manifest_info.copy()
 
     def get_entrypoints(self) -> set[str]:
-        """Get detected entrypoint files."""
+        """Get detected entrypoint files.
+
+        Returns:
+            A copy of the validated entrypoint set (repo-relative paths).
+        """
         return self._entrypoints.copy()
 
 

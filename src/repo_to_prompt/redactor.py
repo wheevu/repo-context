@@ -28,7 +28,14 @@ from typing import Any
 
 @dataclass
 class RedactionRule:
-    """A rule for detecting and redacting secrets."""
+    """A rule for detecting and redacting secrets.
+
+    Attributes:
+        name: Human-readable identifier for the rule (used for stats/reporting).
+        pattern: Compiled regex used to detect the secret.
+        replacement: Replacement text used when redacting.
+        validator: Optional predicate used to reduce false positives.
+    """
 
     name: str
     pattern: re.Pattern[str]
@@ -122,7 +129,14 @@ class RedactionConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RedactionConfig:
-        """Create RedactionConfig from a dictionary (e.g., from config file)."""
+        """Create `RedactionConfig` from a dictionary (e.g., parsed from config file).
+
+        Args:
+            data: Mapping with optional keys like `custom_rules`, `allowlist_patterns`, etc.
+
+        Returns:
+            A `RedactionConfig` instance populated from the input data.
+        """
         config = cls()
 
         # Custom rules
@@ -438,7 +452,15 @@ SAFE_PATTERNS = [
 
 
 def is_safe_value(s: str) -> bool:
-    """Check if a string matches known safe patterns (UUIDs, hashes, etc.)."""
+    """Check whether a string matches known safe patterns (UUIDs, hashes, versions).
+
+    Args:
+        s: String to test.
+
+    Returns:
+        True if `s` looks like a common identifier/hash/version and should not be treated
+        as a secret.
+    """
     return any(pattern.match(s) for pattern in SAFE_PATTERNS)
 
 
@@ -498,11 +520,22 @@ class Redactor:
         self.redaction_counts: dict[str, int] = {}
 
     def set_current_file(self, path: Path | str | None) -> None:
-        """Set the current file being processed."""
+        """Set the current file being processed.
+
+        This influences allowlist matching and file-type-specific behavior (e.g., source-safe
+        redaction).
+
+        Args:
+            path: Current file path (or None to clear).
+        """
         self.current_file = Path(path) if path else None
 
     def _is_file_allowlisted(self) -> bool:
-        """Check if current file matches allowlist patterns."""
+        """Check whether the current file matches allowlist patterns.
+
+        Returns:
+            True if the current file should be skipped entirely for redaction.
+        """
         if not self.current_file:
             return False
 
@@ -516,7 +549,12 @@ class Redactor:
         return False
 
     def _is_file_safe(self) -> bool:
-        """Check if current file is in the safe file list (for paranoid mode)."""
+        """Check whether the current file is considered "safe" for paranoid mode.
+
+        Returns:
+            True if the file matches `safe_file_patterns` and should not have paranoid
+            redaction applied.
+        """
         if not self.current_file:
             return False
 
@@ -530,7 +568,12 @@ class Redactor:
         return False
 
     def _is_source_file(self) -> bool:
-        """Check if current file is a source code file requiring structure-safe redaction."""
+        """Check whether the current file is a source file requiring structure-safe redaction.
+
+        Returns:
+            True if structure-safe redaction is enabled and the file matches a configured
+            source pattern.
+        """
         if not self.current_file or not self.config.structure_safe_redaction:
             return False
 
@@ -544,7 +587,11 @@ class Redactor:
         return False
 
     def _get_comment_prefix(self) -> str:
-        """Get the appropriate comment prefix for the current file type."""
+        """Get the appropriate single-line comment prefix for the current file type.
+
+        Returns:
+            Comment prefix such as `"#"` or `"//"`.
+        """
         if not self.current_file:
             return "#"
 
@@ -582,15 +629,25 @@ class Redactor:
         return "#"
 
     def _is_string_allowlisted(self, s: str) -> bool:
-        """Check if a specific string is in the allowlist."""
+        """Check whether a specific string is allowlisted.
+
+        Args:
+            s: String to test.
+
+        Returns:
+            True if the string is explicitly allowlisted.
+        """
         return s in self.config.allowlist_strings
 
     def _line_has_secret(self, line: str) -> tuple[bool, str]:
         """
         Check if a line contains a secret pattern.
 
+        Args:
+            line: Line of text to test.
+
         Returns:
-            Tuple of (has_secret, rule_name)
+            Tuple `(has_secret, rule_name)` where `rule_name` is empty when no match is found.
         """
         for rule in self.patterns:
             if rule.pattern.search(line):
@@ -598,7 +655,11 @@ class Redactor:
         return False, ""
 
     def _is_python_file(self) -> bool:
-        """Check if current file is a Python file."""
+        """Check whether the current file is a Python source file.
+
+        Returns:
+            True if the current file extension is one of `.py`, `.pyi`, `.pyx`.
+        """
         if not self.current_file:
             return False
         suffix = self.current_file.suffix.lower()
@@ -622,7 +683,8 @@ class Redactor:
             content: Full file content
 
         Returns:
-            Redacted content that is guaranteed to be syntactically valid
+            Redacted content that is guaranteed to remain syntactically valid for Python,
+            and best-effort safe for other source file types.
         """
         # For Python files, use AST-aware redaction
         if self._is_python_file():
@@ -750,8 +812,8 @@ class Redactor:
             content: Python source code
 
         Returns:
-            Tuple of (redacted_content, success). If success is False,
-            the content was returned unmodified.
+            Tuple `(redacted_content, success)`. If `success` is False, the returned content
+            is the original input and no redaction was applied.
         """
         try:
             ast.parse(content)
@@ -792,6 +854,12 @@ class Redactor:
         Apply inline redaction (original behavior).
 
         Used for non-source files like configs, docs, etc.
+
+        Args:
+            content: Content to redact.
+
+        Returns:
+            Redacted content.
         """
         result = content
 
@@ -811,7 +879,14 @@ class Redactor:
         return result
 
     def _redact_entropy(self, content: str) -> str:
-        """Apply entropy-based redaction."""
+        """Apply entropy-based redaction.
+
+        Args:
+            content: Content to redact.
+
+        Returns:
+            Redacted content (or original content if entropy detection is disabled).
+        """
         if not self.config.entropy_enabled:
             return content
 
@@ -846,7 +921,14 @@ class Redactor:
         return pattern.sub(replace_high_entropy, content)
 
     def _redact_paranoid(self, content: str) -> str:
-        """Apply paranoid mode redaction."""
+        """Apply paranoid mode redaction.
+
+        Args:
+            content: Content to redact.
+
+        Returns:
+            Redacted content (or original content if paranoid mode is disabled).
+        """
         if not self.config.paranoid_mode:
             return content
 
@@ -916,7 +998,13 @@ class Redactor:
         Redact secrets from a single line.
 
         More efficient for line-by-line processing.
-        For source files, uses inline replacement (consistent with redact()).
+        For source files, uses inline replacement (consistent with `redact()`).
+
+        Args:
+            line: Input line to redact.
+
+        Returns:
+            Redacted line.
         """
         if not self.enabled:
             return line
@@ -940,7 +1028,11 @@ class Redactor:
         return result
 
     def get_stats(self) -> dict[str, int]:
-        """Get redaction statistics."""
+        """Get redaction statistics.
+
+        Returns:
+            Mapping of rule name to match/redaction count, sorted by count descending.
+        """
         return dict(sorted(self.redaction_counts.items(), key=lambda x: -x[1]))
 
     def reset_stats(self) -> None:
@@ -953,5 +1045,14 @@ def create_redactor(
     config: RedactionConfig | None = None,
     current_file: Path | str | None = None,
 ) -> Redactor:
-    """Factory function to create a redactor instance."""
+    """Create a `Redactor` instance.
+
+    Args:
+        enabled: Whether redaction is enabled.
+        config: Optional `RedactionConfig` for advanced features.
+        current_file: Optional current file path used for allowlist matching.
+
+    Returns:
+        A configured `Redactor` instance.
+    """
     return Redactor(enabled=enabled, config=config, current_file=current_file)

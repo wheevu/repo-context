@@ -26,17 +26,23 @@ class FetchError(Exception):
 
 
 def parse_github_url(url: str) -> tuple[str, str, str | None]:
-    """
-    Parse a GitHub URL into owner, repo, and optional ref.
+    """Parse a GitHub URL into `(owner, repo_name, ref)`.
 
-    Supports formats:
-    - https://github.com/owner/repo
-    - https://github.com/owner/repo.git
-    - https://github.com/owner/repo/tree/branch
-    - git@github.com:owner/repo.git
+    Supports common formats:
+    - `https://github.com/owner/repo`
+    - `https://github.com/owner/repo.git`
+    - `https://github.com/owner/repo/tree/<ref>`
+    - `git@github.com:owner/repo.git`
+
+    Args:
+        url: GitHub repository URL (HTTPS or SSH).
 
     Returns:
-        Tuple of (owner, repo_name, ref or None)
+        A tuple `(owner, repo_name, ref)` where `ref` is optional and derived from the URL
+        when present (e.g., `/tree/<ref>`).
+
+    Raises:
+        FetchError: If the URL is not a recognized GitHub repository URL.
     """
     # Handle SSH URLs
     if url.startswith("git@"):
@@ -73,17 +79,20 @@ def clone_github_repo(
     target_dir: Path | None = None,
     shallow: bool = True,
 ) -> Path:
-    """
-    Clone a GitHub repository.
+    """Clone a GitHub repository to a local directory.
 
     Args:
-        url: GitHub repository URL
-        ref: Branch, tag, or commit SHA to checkout
-        target_dir: Directory to clone into (temp dir if None)
-        shallow: Whether to do a shallow clone
+        url: GitHub repository URL (HTTPS or SSH).
+        ref: Optional branch/tag/SHA to checkout. If omitted, uses the default branch
+            (or any ref encoded in the URL).
+        target_dir: Parent directory to clone into. If None, a temporary directory is created.
+        shallow: Whether to attempt a shallow clone (`depth=1`) when possible.
 
     Returns:
-        Path to the cloned repository
+        Path to the cloned repository root directory.
+
+    Raises:
+        FetchError: If GitPython is unavailable or the clone/checkout fails.
     """
     try:
         import git
@@ -149,17 +158,16 @@ def clone_github_repo(
 
 
 def validate_local_path(path: Path) -> Path:
-    """
-    Validate and resolve a local repository path.
+    """Validate and resolve a local repository path.
 
     Args:
-        path: Path to validate
+        path: Local path to validate.
 
     Returns:
-        Resolved absolute path
+        Resolved absolute path to a readable directory.
 
     Raises:
-        FetchError: If path is invalid
+        FetchError: If the path does not exist, is not a directory, or is not readable.
     """
     resolved = path.resolve()
 
@@ -177,11 +185,16 @@ def validate_local_path(path: Path) -> Path:
 
 
 def get_repo_root(path: Path) -> Path:
-    """
-    Find the root of a git repository.
+    """Find the git repository root for a path.
 
-    Walks up the directory tree looking for .git directory.
-    Returns the input path if no .git found.
+    Walks upward until a `.git` directory is found. If none is found, returns the resolved
+    input path.
+
+    Args:
+        path: Any path inside (or near) a repository.
+
+    Returns:
+        The repository root path, or the resolved input path if no `.git` is found.
     """
     current = path.resolve()
 
@@ -200,17 +213,22 @@ def fetch_repository(
     ref: str | None = None,
     target_dir: Path | None = None,
 ) -> tuple[Path, bool]:
-    """
-    Fetch a repository from local path or GitHub URL.
+    """Fetch a repository from a local path or by cloning a GitHub URL.
+
+    Exactly one of `path` or `repo_url` must be provided.
 
     Args:
-        path: Local path to repository
-        repo_url: GitHub repository URL
-        ref: Branch/tag/SHA for GitHub repos
-        target_dir: Target directory for cloned repos
+        path: Local path to an existing repository directory.
+        repo_url: GitHub repository URL to clone.
+        ref: Optional branch/tag/SHA when cloning from GitHub.
+        target_dir: Optional target directory for clones. If None, a temp directory is used.
 
     Returns:
-        Tuple of (repo_path, is_temp) where is_temp indicates if cleanup is needed
+        Tuple `(repo_path, is_temp)` where `is_temp` indicates whether the returned repository
+        should be cleaned up by the caller.
+
+    Raises:
+        FetchError: If neither input source is provided or fetch fails.
     """
     if path is not None:
         validated_path = validate_local_path(path)
@@ -224,11 +242,10 @@ def fetch_repository(
 
 
 def cleanup_temp_repo(path: Path) -> None:
-    """
-    Clean up a temporary cloned repository.
+    """Delete a temporary clone directory.
 
     Args:
-        path: Path to the temporary repository
+        path: Path to the temporary directory to remove.
     """
     try:
         if path.exists():
@@ -249,7 +266,14 @@ class RepoContext:
         path: Path | None = None,
         repo_url: str | None = None,
         ref: str | None = None,
-    ):
+    ) -> None:
+        """Initialize the context manager.
+
+        Args:
+            path: Local repository path (mutually exclusive with `repo_url`).
+            repo_url: GitHub repository URL to clone (mutually exclusive with `path`).
+            ref: Optional git ref to checkout when cloning.
+        """
         self.path = path
         self.repo_url = repo_url
         self.ref = ref
@@ -257,6 +281,14 @@ class RepoContext:
         self._is_temp: bool = False
 
     def __enter__(self) -> Path:
+        """Enter the context, fetching the repository.
+
+        Returns:
+            The path to the fetched repository root.
+
+        Raises:
+            FetchError: If fetching fails.
+        """
         self._repo_path, self._is_temp = fetch_repository(
             path=self.path,
             repo_url=self.repo_url,
@@ -267,5 +299,6 @@ class RepoContext:
     def __exit__(
         self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: Any
     ) -> None:
+        """Exit the context and clean up any temporary clone."""
         if self._is_temp and self._repo_path is not None:
             cleanup_temp_repo(self._repo_path.parent)

@@ -10,63 +10,78 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from typing import Any
 
 import chardet
 
 # Try to import tiktoken for accurate token counting
-_tiktoken_encoder = None
+_tiktoken_encoder: Any | None = None
 try:
     import tiktoken
 
-    _tiktoken_encoder = tiktoken.get_encoding("cl100k_base")
+    try:
+        # Some environments (sandboxed CI, restricted containers) may have `tiktoken`
+        # installed but unable to initialize its resources. In that case, gracefully
+        # fall back to the heuristic estimator rather than failing at import time.
+        _tiktoken_encoder = tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        _tiktoken_encoder = None
 except ImportError:
     pass
 
 
 def estimate_tokens(text: str) -> int:
-    """
-    Estimate the number of tokens in text.
+    """Estimate token count for a string.
 
-    Uses tiktoken if available, otherwise falls back to character-based heuristic.
+    Uses `tiktoken` when available for a closer approximation to OpenAI-style tokenization;
+    otherwise falls back to a lightweight heuristic.
+
+    Args:
+        text: Input text to estimate tokens for.
+
+    Returns:
+        Estimated number of tokens in `text`.
     """
     if _tiktoken_encoder is not None:
         return len(_tiktoken_encoder.encode(text, disallowed_special=()))
 
-    # Fallback heuristic: ~4 characters per token on average
-    # This is a rough approximation for English text and code
+    # Fallback heuristic (~4 chars/token) keeps the tool usable without optional deps.
     return len(text) // 4
 
 
 def stable_hash(content: str, path: str, start_line: int, end_line: int) -> str:
-    """
-    Generate a stable hash ID for a chunk.
+    """Generate a deterministic short hash for a content chunk.
 
-    The hash is based on the content and location, ensuring deterministic IDs
-    across runs for the same content.
+    The ID is intentionally stable across runs for the same content and location so that
+    downstream pipelines (diffing, caching, embeddings) can reference chunks consistently.
+
+    Args:
+        content: Chunk content (text).
+        path: File path associated with the chunk (typically repo-relative).
+        start_line: 1-indexed start line for the chunk.
+        end_line: 1-indexed end line (inclusive) for the chunk.
+
+    Returns:
+        A short, deterministic hex string identifier.
     """
-    # Use content + location for uniqueness
+    # Include location + a capped content prefix to reduce collisions without hashing entire blobs.
     hash_input = f"{path}:{start_line}-{end_line}:{content[:1000]}"
     return hashlib.sha256(hash_input.encode("utf-8")).hexdigest()[:16]
 
 
 def detect_encoding(file_path: Path, sample_size: int = 8192) -> str:
-    """
-    Detect the encoding of a file.
+    """Detect a likely text encoding for a file.
 
-    Strategy:
-    1. Check for BOM markers first
-    2. Try UTF-8 (most common for modern source files)
-    3. Fall back to chardet only if UTF-8 fails
-
-    This approach prevents chardet from incorrectly detecting UTF-8 files
-    as Latin-1 or Windows-1252, which causes mojibake.
+    The implementation deliberately prefers UTF-8 and only uses `chardet` when strict UTF-8
+    decoding fails. This reduces false positives where UTF-8 is misdetected as Latin-1/CP1252,
+    which would produce mojibake and destabilize diffs.
 
     Args:
-        file_path: Path to the file
-        sample_size: Number of bytes to sample for detection
+        file_path: Path to the file to inspect.
+        sample_size: Number of bytes to sample from the start of the file.
 
     Returns:
-        Detected encoding name (e.g., 'utf-8', 'latin-1')
+        A normalized encoding label (e.g., `"utf-8"`, `"utf-8-sig"`, `"utf-16-le"`).
     """
     try:
         with open(file_path, "rb") as f:
@@ -110,10 +125,18 @@ def detect_encoding(file_path: Path, sample_size: int = 8192) -> str:
 
 
 def is_binary_file(file_path: Path, sample_size: int = 8192) -> bool:
-    """
-    Check if a file appears to be binary.
+    """Heuristically determine whether a file is binary.
 
-    Uses null byte detection and character analysis.
+    Uses a fast null-byte check first (strong binary signal), then falls back to a ratio of
+    printable ASCII bytes. This intentionally biases toward *treating unreadable files as
+    binary* to avoid crashing the pipeline on weird encodings or permissions.
+
+    Args:
+        file_path: Path to the file to test.
+        sample_size: Number of bytes to sample from the file start.
+
+    Returns:
+        True if the file is likely binary, otherwise False.
     """
     try:
         with open(file_path, "rb") as f:
@@ -143,24 +166,23 @@ def is_binary_file(file_path: Path, sample_size: int = 8192) -> bool:
 def read_file_safe(
     file_path: Path, max_bytes: int | None = None, encoding: str | None = None
 ) -> tuple[str, str]:
-    """
-    Safely read a file with encoding detection and error handling.
+    """Read a file robustly with encoding detection and safe error handling.
 
     Strategy:
-    1. If encoding specified, use it
-    2. Otherwise, try UTF-8 first (most common for source files)
-    3. If UTF-8 fails with errors, detect encoding and retry
-    4. Always use errors="replace" to avoid crashes
-
-    This ensures UTF-8 files with emojis/smart quotes are read correctly.
+    - If `encoding` is explicitly provided, use it.
+    - Otherwise, try strict UTF-8 first (most modern repos are UTF-8).
+    - If UTF-8 fails, detect encoding and retry using `errors="replace"` to avoid crashes.
 
     Args:
-        file_path: Path to the file
-        max_bytes: Maximum bytes to read (None for all)
-        encoding: Encoding to use (None for auto-detect)
+        file_path: Path to the file to read.
+        max_bytes: Optional maximum number of characters to read (None reads entire file).
+        encoding: Optional explicit encoding to use (None enables auto-detection).
 
     Returns:
-        Tuple of (content, encoding_used)
+        A tuple `(content, encoding_used)`.
+
+    Raises:
+        OSError: If the file cannot be read even with fallback strategies.
     """
     # If encoding specified, use it directly
     if encoding is not None:
@@ -203,17 +225,16 @@ def read_file_safe(
 def stream_file_lines(
     file_path: Path, encoding: str | None = None, start_line: int = 1, end_line: int | None = None
 ) -> list[str]:
-    """
-    Stream specific lines from a file without loading the entire file.
+    """Read a line range from a file without loading it entirely.
 
     Args:
-        file_path: Path to the file
-        encoding: Encoding to use (None for auto-detect)
-        start_line: First line to read (1-indexed)
-        end_line: Last line to read (inclusive, None for all remaining)
+        file_path: Path to the file to read.
+        encoding: Optional encoding (None triggers auto-detection).
+        start_line: 1-indexed first line to include.
+        end_line: 1-indexed last line to include (inclusive). None reads to EOF.
 
     Returns:
-        List of lines in the range
+        A list of lines (including original line endings) in the requested range.
     """
     if encoding is None:
         encoding = detect_encoding(file_path)
@@ -234,28 +255,41 @@ def stream_file_lines(
 
 
 def normalize_path(path: str) -> str:
-    """Normalize a path for consistent comparison (use forward slashes)."""
+    """Normalize a path for consistent cross-platform comparisons.
+
+    Args:
+        path: Path string that may contain platform-specific separators.
+
+    Returns:
+        Normalized path using forward slashes.
+    """
     return path.replace("\\", "/")
 
 
 def normalize_line_endings(content: str) -> str:
-    """
-    Normalize line endings to LF (Unix-style).
-
-    Handles CRLF (Windows), CR (old Mac), and mixed line endings.
+    """Normalize line endings to LF (Unix-style).
 
     Args:
-        content: Text content with potentially mixed line endings
+        content: Input text that may contain CRLF/CR/mixed endings.
 
     Returns:
-        Content with all line endings normalized to LF
+        Content with all line endings normalized to LF.
     """
-    # Replace CRLF first, then remaining CR
+    # Replace CRLF first, then remaining CR, to avoid double-transforming CRLF.
     return content.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def truncate_string(s: str, max_length: int, suffix: str = "...") -> str:
-    """Truncate a string to max length, adding suffix if truncated."""
+    """Truncate a string to a maximum length, appending a suffix if needed.
+
+    Args:
+        s: Input string.
+        max_length: Maximum length of the returned string.
+        suffix: Suffix to append when truncation occurs.
+
+    Returns:
+        The original string if it fits, otherwise a truncated version ending with `suffix`.
+    """
     if len(s) <= max_length:
         return s
     return s[: max_length - len(suffix)] + suffix
@@ -277,18 +311,17 @@ MINIFIED_INDICATORS = [
 
 
 def is_likely_minified(file_path: Path, max_line_length: int = 5000) -> bool:
-    """
-    Check if a file appears to be minified based on line length.
+    """Heuristically detect minified/bundled files by line length.
 
-    Minified files typically have extremely long lines (entire file on one line).
-    This is a quick heuristic check that reads only the first line.
+    Minified files often collapse large amounts of code into a single extremely long line.
+    This function reads only a small prefix to keep scanning fast.
 
     Args:
-        file_path: Path to the file
-        max_line_length: Maximum line length before considering minified (default: 5000)
+        file_path: Path to the file.
+        max_line_length: Threshold line length used to classify a file as minified.
 
     Returns:
-        True if the file appears to be minified
+        True if the file appears to be minified, otherwise False.
     """
     name = file_path.name.lower()
 
@@ -316,15 +349,18 @@ def is_likely_minified(file_path: Path, max_line_length: int = 5000) -> bool:
 
 
 def is_likely_generated(file_path: Path, content_sample: str = "") -> bool:
-    """
-    Check if a file appears to be generated or minified.
+    """Heuristically detect generated or machine-produced files.
+
+    Uses a combination of filename hints, directory location, and common “generated” markers
+    in the file header. The goal is to deprioritize noisy artifacts (bundles, build outputs)
+    without requiring heavyweight parsing.
 
     Args:
-        file_path: Path to the file
-        content_sample: Optional sample of file content to check
+        file_path: Path to the file.
+        content_sample: Optional content snippet used for header-marker checks.
 
     Returns:
-        True if the file appears to be generated
+        True if the file appears to be generated/minified, otherwise False.
     """
     name = file_path.name.lower()
 
@@ -354,7 +390,14 @@ def is_likely_generated(file_path: Path, content_sample: str = "") -> bool:
 
 
 def is_lock_file(file_path: Path) -> bool:
-    """Check if a file is a dependency lock file."""
+    """Check whether a path is a dependency lock file.
+
+    Args:
+        file_path: Path to check.
+
+    Returns:
+        True if the filename matches a known lock-file name.
+    """
     name = file_path.name.lower()
     return name in {
         "package-lock.json",
@@ -370,7 +413,14 @@ def is_lock_file(file_path: Path) -> bool:
 
 
 def is_vendored(file_path: Path) -> bool:
-    """Check if a file appears to be vendored/third-party."""
+    """Check whether a path likely belongs to vendored/third-party code.
+
+    Args:
+        file_path: Path to check.
+
+    Returns:
+        True if the path contains a known vendor directory segment.
+    """
     # Normalize path for cross-platform compatibility
     path_str = normalize_path(str(file_path)).lower()
     return any(

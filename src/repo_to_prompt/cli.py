@@ -60,7 +60,11 @@ console = Console()
 
 
 def create_progress() -> Progress:
-    """Create a rich progress bar with file scanning columns."""
+    """Create a Rich progress bar used for file scanning/chunking phases.
+
+    Returns:
+        A configured `rich.progress.Progress` instance.
+    """
     return Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -73,7 +77,11 @@ def create_progress() -> Progress:
 
 
 def create_spinner_progress() -> Progress:
-    """Create a simple spinner progress for indeterminate tasks."""
+    """Create a simple spinner progress UI for indeterminate tasks.
+
+    Returns:
+        A configured `rich.progress.Progress` instance.
+    """
     return Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -87,6 +95,13 @@ def get_repo_output_dir(base_output_dir: Path, repo_root: Path) -> Path:
 
     If the provided base directory already ends with the repo name, it is returned
     unchanged to avoid double-nesting.
+
+    Args:
+        base_output_dir: Base output directory (may or may not already include repo name).
+        repo_root: Repository root path.
+
+    Returns:
+        Output directory path to use for this repository.
     """
     repo_dir_name = repo_root.name
     if base_output_dir.name == repo_dir_name:
@@ -95,14 +110,28 @@ def get_repo_output_dir(base_output_dir: Path, repo_root: Path) -> Path:
 
 
 def version_callback(value: bool) -> None:
-    """Print version and exit."""
+    """Typer callback to print version and exit.
+
+    Args:
+        value: Whether the `--version` flag was provided.
+
+    Raises:
+        typer.Exit: Always exits when `value` is True.
+    """
     if value:
         console.print(f"repo-to-prompt version {__version__}")
         raise typer.Exit()
 
 
 def parse_extensions(value: str) -> set[str]:
-    """Parse comma-separated extensions."""
+    """Parse a comma-separated extension list into a normalized set.
+
+    Args:
+        value: Comma-separated extension string (e.g., ".py,.ts" or "py,ts").
+
+    Returns:
+        Set of normalized extensions with leading dots.
+    """
     if not value:
         return set()
     extensions = set()
@@ -116,7 +145,14 @@ def parse_extensions(value: str) -> set[str]:
 
 
 def parse_globs(value: str) -> set[str]:
-    """Parse comma-separated glob patterns."""
+    """Parse a comma-separated glob list into a normalized set.
+
+    Args:
+        value: Comma-separated glob patterns (e.g., "dist/**,build/**").
+
+    Returns:
+        Set of stripped glob patterns.
+    """
     if not value:
         return set()
     return {g.strip() for g in value.split(",") if g.strip()}
@@ -295,7 +331,40 @@ def export(
 
       # Reproducible output (no timestamps)
       repo-to-prompt export -p ./repo --no-timestamp
+
+    Args:
+        path: Local directory path to export (mutually exclusive with `repo`).
+        repo: GitHub repository URL to clone and export (mutually exclusive with `path`).
+        ref: Optional git ref (branch/tag/SHA) when using `repo`.
+        config_file: Optional explicit path to a config file.
+        include_ext: Optional comma-separated list of extensions to include.
+        exclude_glob: Optional comma-separated list of glob patterns to exclude.
+        max_file_bytes: Optional max file size (bytes).
+        max_total_bytes: Optional max total included bytes across all files.
+        no_gitignore: Whether to ignore `.gitignore` rules.
+        follow_symlinks: Whether to follow symlinks during scanning.
+        include_minified: Whether to include minified/bundled files.
+        max_tokens: Optional maximum token budget for the output.
+        chunk_tokens: Optional target tokens per chunk.
+        chunk_overlap: Optional token overlap between adjacent chunks.
+        min_chunk_tokens: Optional threshold below which to coalesce chunks.
+        mode: Optional output mode override (`prompt`, `rag`, `both`).
+        output_dir: Optional output directory.
+        no_timestamp: Whether to omit timestamps for reproducible output.
+        tree_depth: Optional maximum directory tree depth in rendered output.
+        no_redact: Whether to disable secret redaction.
+        version: Whether to print version and exit (handled by Typer callback).
+
+    Returns:
+        None. Output is written to files on disk.
+
+    Raises:
+        typer.Exit: On invalid arguments, empty scan results, fetch failures, or any
+            unexpected processing errors.
     """
+    # NOTE: Signature intentionally mirrors CLI flags. Keep defaults/types stable to avoid
+    # breaking Typer's option parsing and downstream keyword callers.
+
     # Validate input
     if path is None and repo is None:
         console.print("[red]Error: Either --path or --repo must be specified.[/red]")
@@ -652,6 +721,19 @@ def info(
     EXAMPLES:
       repo-to-prompt info ./my-project
       repo-to-prompt info ./my-project --include-ext .py,.ts
+
+    Args:
+        path: Local directory path to analyze.
+        include_ext: Optional comma-separated list of extensions to include.
+        exclude_glob: Optional comma-separated list of glob patterns to exclude.
+        max_file_bytes: Maximum file size to include (bytes).
+        no_gitignore: Whether to ignore `.gitignore` rules.
+
+    Returns:
+        None. Prints summary information to stdout.
+
+    Raises:
+        typer.Exit: On scanning/ranking failures.
     """
     # Parse filter options (same as export)
     include_extensions = parse_extensions(include_ext) if include_ext else None
@@ -708,7 +790,11 @@ def info(
 
 
 def main() -> None:
-    """Entry point for the CLI."""
+    """CLI entry point used by console scripts.
+
+    Returns:
+        None.
+    """
     app()
 
 

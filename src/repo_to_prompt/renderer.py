@@ -66,7 +66,11 @@ class ContextPackRenderer:
         self._doc_files = [f for f in files if f.is_doc and not f.is_readme]
 
     def render(self) -> str:
-        """Render the complete context pack."""
+        """Render the complete context pack as Markdown.
+
+        Returns:
+            Rendered Markdown string containing overview, tree, file map, and contents.
+        """
         sections = []
 
         # Header
@@ -90,7 +94,11 @@ class ContextPackRenderer:
         return "\n\n".join(filter(None, sections))
 
     def _render_header(self) -> str:
-        """Render the document header."""
+        """Render the document header.
+
+        Returns:
+            Markdown header string including repo name and optional timestamp.
+        """
         repo_name = self.root_path.name
 
         if self.include_timestamp:
@@ -105,7 +113,11 @@ class ContextPackRenderer:
 ---"""
 
     def _render_overview(self) -> str:
-        """Render the repository overview section."""
+        """Render the repository overview section.
+
+        Returns:
+            Markdown section summarizing project metadata, languages, entrypoints, and a README excerpt.
+        """
         lines = ["## 📋 Repository Overview"]
 
         # Try to extract README content for summary
@@ -178,7 +190,11 @@ class ContextPackRenderer:
         return "\n".join(lines)
 
     def _render_tree(self) -> str:
-        """Render the directory tree section."""
+        """Render the directory tree section.
+
+        Returns:
+            Markdown section containing a directory tree with important files highlighted.
+        """
         # Highlight important files
         important_files = {f.relative_path for f in self.files if f.priority >= 0.8}
 
@@ -198,7 +214,11 @@ class ContextPackRenderer:
 *⭐ = Important file*"""
 
     def _render_key_files(self) -> str:
-        """Render the key files summary section."""
+        """Render the key files summary section.
+
+        Returns:
+            Markdown section listing documentation, config, and entrypoint files.
+        """
         lines = ["## 🔑 Key Files"]
 
         # Group files by category
@@ -218,7 +238,11 @@ class ContextPackRenderer:
         return "\n".join(lines)
 
     def _render_code_map(self) -> str:
-        """Render the code map section (per-language module listing)."""
+        """Render the code map section (per-language module listing).
+
+        Returns:
+            Markdown section that groups files by language and directory.
+        """
         lines = ["## 🗺️ Code Map"]
 
         # Group files by language
@@ -257,7 +281,11 @@ class ContextPackRenderer:
         return "\n".join(lines)
 
     def _render_contents(self) -> str:
-        """Render the file contents section with chunks."""
+        """Render the file contents section with chunks.
+
+        Returns:
+            Markdown section containing chunked file contents with line citations.
+        """
         lines = ["## 📄 File Contents"]
 
         # Group chunks by file
@@ -325,14 +353,22 @@ class JSONLRenderer:
         self.chunks = chunks
 
     def render(self) -> str:
-        """Render chunks as JSONL string."""
+        """Render chunks as a JSONL string.
+
+        Returns:
+            JSONL string with one chunk dict per line.
+        """
         lines = []
         for chunk in self.chunks:
             lines.append(json.dumps(chunk.to_dict(), ensure_ascii=False))
         return "\n".join(lines)
 
     def write(self, output_path: Path) -> None:
-        """Write chunks to JSONL file."""
+        """Write chunks to a JSONL file.
+
+        Args:
+            output_path: Destination path to write.
+        """
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(output_path, "w", encoding="utf-8") as f:
@@ -377,7 +413,11 @@ class ReportRenderer:
         self.schema_version = REPORT_SCHEMA_VERSION
 
     def render(self) -> dict[str, Any]:
-        """Render the report as a dictionary."""
+        """Render the report as a dictionary.
+
+        Returns:
+            Dictionary representation of the report suitable for JSON serialization.
+        """
         report: dict[str, Any] = {
             "schema_version": self.schema_version,
         }
@@ -403,7 +443,11 @@ class ReportRenderer:
         return report
 
     def write(self, output_path: Path) -> None:
-        """Write report to JSON file."""
+        """Write report to a JSON file.
+
+        Args:
+            output_path: Destination path to write.
+        """
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(output_path, "w", encoding="utf-8") as f:

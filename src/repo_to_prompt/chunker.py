@@ -19,7 +19,13 @@ from .utils import estimate_tokens, read_file_safe, stable_hash
 
 @dataclass
 class ChunkBoundary:
-    """Represents a potential chunk boundary in source code."""
+    """Represents a potential chunk boundary within a file.
+
+    Attributes:
+        line_number: 0-indexed line number within the file content.
+        boundary_type: Category label for the boundary (e.g., "definition", "blank").
+        weight: Relative desirability of breaking at this boundary (higher is better).
+    """
 
     line_number: int
     boundary_type: str  # "function", "class", "block", "paragraph"
@@ -37,8 +43,18 @@ class BaseChunker(ABC):
         max_tokens: int,
         overlap_tokens: int,
     ) -> Generator[Chunk, None, None]:
-        """Generate chunks from file content."""
-        pass
+        """Generate chunks from file content.
+
+        Args:
+            file_info: Metadata about the file being chunked.
+            content: Full file content (already loaded and optionally redacted).
+            max_tokens: Target maximum tokens per chunk.
+            overlap_tokens: Approximate token overlap between adjacent chunks.
+
+        Yields:
+            `Chunk` objects describing contiguous regions of the input content.
+        """
+        raise NotImplementedError
 
 
 class LineBasedChunker(BaseChunker):
@@ -59,7 +75,14 @@ class LineBasedChunker(BaseChunker):
     ]
 
     def find_boundaries(self, lines: list[str]) -> list[ChunkBoundary]:
-        """Find potential chunk boundaries in the content."""
+        """Find likely chunk boundaries based on regex heuristics.
+
+        Args:
+            lines: File content split into lines (with or without line endings).
+
+        Returns:
+            A list of `ChunkBoundary` candidates with weights indicating break quality.
+        """
         boundaries = []
 
         for i, line in enumerate(lines):
@@ -83,7 +106,20 @@ class LineBasedChunker(BaseChunker):
         max_tokens: int,
         overlap_tokens: int,
     ) -> Generator[Chunk, None, None]:
-        """Generate chunks from file content."""
+        """Chunk content using a line-based strategy with soft boundary selection.
+
+        This chunker aims for deterministic, stable chunk boundaries by selecting the best
+        boundary near an "ideal" chunk end.
+
+        Args:
+            file_info: Metadata about the file being chunked.
+            content: Full content of the file.
+            max_tokens: Target maximum tokens per chunk.
+            overlap_tokens: Approximate overlap tokens between chunks.
+
+        Yields:
+            Chunks covering the file content in order.
+        """
         lines = content.splitlines(keepends=True)
         if not lines:
             return
@@ -166,7 +202,17 @@ class MarkdownChunker(BaseChunker):
         max_tokens: int,
         overlap_tokens: int,
     ) -> Generator[Chunk, None, None]:
-        """Generate chunks from markdown content."""
+        """Chunk Markdown content while respecting section headers.
+
+        Args:
+            file_info: Metadata about the file being chunked.
+            content: Markdown content to split into sections/chunks.
+            max_tokens: Target maximum tokens per chunk.
+            overlap_tokens: Approximate overlap tokens between chunks.
+
+        Yields:
+            Chunks that try to preserve heading-bounded sections.
+        """
         lines = content.splitlines(keepends=True)
         if not lines:
             return
@@ -313,7 +359,18 @@ class CodeChunker(BaseChunker):
     }
 
     def find_code_boundaries(self, lines: list[str], language: str) -> list[ChunkBoundary]:
-        """Find code structure boundaries."""
+        """Find boundaries in code based on lightweight pattern matching.
+
+        This is intentionally heuristic: it avoids requiring AST/Tree-sitter while still
+        preferring breaks near definitions.
+
+        Args:
+            lines: File content split into lines.
+            language: Normalized language label from `FileInfo.language`.
+
+        Returns:
+            A list of candidate boundaries.
+        """
         boundaries = []
         patterns = self.DEFINITION_PATTERNS.get(language, [])
 
@@ -359,7 +416,17 @@ class CodeChunker(BaseChunker):
         max_tokens: int,
         overlap_tokens: int,
     ) -> Generator[Chunk, None, None]:
-        """Generate chunks from code content."""
+        """Chunk source code, preferring breaks at definitions.
+
+        Args:
+            file_info: Metadata about the file being chunked.
+            content: File content to chunk.
+            max_tokens: Target maximum tokens per chunk.
+            overlap_tokens: Approximate overlap tokens between chunks.
+
+        Yields:
+            Chunks covering the source code in order.
+        """
         lines = content.splitlines(keepends=True)
         if not lines:
             return
@@ -454,7 +521,14 @@ class ChunkerFactory:
 
     @classmethod
     def get_chunker(cls, language: str) -> BaseChunker:
-        """Get the appropriate chunker for a language."""
+        """Select a chunker implementation based on a language label.
+
+        Args:
+            language: Normalized language label (e.g., `"python"`, `"markdown"`).
+
+        Returns:
+            A `BaseChunker` implementation.
+        """
         if language in cls.MARKDOWN_LANGUAGES:
             return MarkdownChunker()
         elif language in cls.CODE_LANGUAGES:
@@ -469,17 +543,19 @@ def chunk_file(
     overlap_tokens: int = 120,
     redactor: Redactor | None = None,
 ) -> list[Chunk]:
-    """
-    Chunk a file into semantic pieces.
+    """Chunk a file into pieces suitable for prompting and retrieval.
 
     Args:
-        file_info: Information about the file
-        max_tokens: Maximum tokens per chunk
-        overlap_tokens: Token overlap between chunks
-        redactor: Optional redactor for secret removal
+        file_info: File metadata including path, language, and ranking priority.
+        max_tokens: Target maximum tokens per chunk.
+        overlap_tokens: Approximate overlap tokens between adjacent chunks.
+        redactor: Optional redactor used to remove secrets from content prior to chunking.
 
     Returns:
-        List of chunks
+        A list of chunks produced from the file content.
+
+    Raises:
+        OSError: If the file cannot be read.
     """
     # Read file content
     content, _ = read_file_safe(file_info.path)
@@ -506,10 +582,21 @@ def chunk_content(
     priority: float = 0.5,
     tags: list[str] | None = None,
 ) -> list[Chunk]:
-    """
-    Chunk content string directly.
+    """Chunk an in-memory content string directly.
 
-    Useful for testing or when content is already loaded.
+    Useful for tests or cases where file I/O is already handled upstream.
+
+    Args:
+        content: Content to chunk.
+        path: Pseudo-path used for chunk metadata (often repo-relative).
+        language: Language label to select chunking strategy.
+        max_tokens: Target maximum tokens per chunk.
+        overlap_tokens: Approximate overlap tokens between adjacent chunks.
+        priority: Priority score to propagate into chunks.
+        tags: Optional tags to propagate into chunks.
+
+    Returns:
+        A list of chunks produced from `content`.
     """
     file_info = FileInfo(
         path=Path(path),
@@ -542,7 +629,7 @@ def coalesce_small_chunks(
         max_tokens: Maximum tokens for merged chunks
 
     Returns:
-        New list of coalesced chunks
+        New list of coalesced chunks.
     """
     if not chunks:
         return []
@@ -589,7 +676,8 @@ def coalesce_small_chunks(
                     # Overlapping - need to deduplicate
                     # Split content into lines and merge
                     current_lines = current.content.splitlines(keepends=True)
-                    chunk.content.splitlines(keepends=True)
+                    # We intentionally keep `chunk.content` as the authoritative tail; we only
+                    # need the current-lines prefix to avoid duplicating overlapped lines.
 
                     # Calculate overlap
                     overlap_start = chunk.start_line - current.start_line

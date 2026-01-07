@@ -234,7 +234,29 @@ IMPORTANT_CONFIG_FILES: set[str] = {
 
 @dataclass
 class Config:
-    """Main configuration for repo-to-prompt."""
+    """Main configuration for `repo-to-prompt`.
+
+    This model is used as a central, strongly-typed place to define defaults and validate
+    essential invariants (e.g., mutually exclusive input sources).
+
+    Attributes:
+        path: Local repository path (mutually exclusive with `repo_url`).
+        repo_url: Git repository URL (mutually exclusive with `path`).
+        ref: Optional git ref (branch/tag/SHA) to checkout when using `repo_url`.
+        include_extensions: File extensions to include in scanning.
+        exclude_globs: Glob patterns to exclude from scanning.
+        max_file_bytes: Maximum single file size to include.
+        max_total_bytes: Maximum total bytes to include across all files.
+        respect_gitignore: Whether `.gitignore` rules should be applied.
+        chunk_tokens: Target tokens per chunk.
+        chunk_overlap: Target token overlap between adjacent chunks.
+        mode: Output mode (`prompt`, `rag`, or `both`).
+        output_dir: Directory to write output files into.
+        tree_depth: Maximum directory tree depth in rendered output.
+        redact_secrets: Whether secret redaction should be applied.
+        entrypoints_auto: Whether entrypoints should be detected automatically.
+        entrypoints: Explicit entrypoints to include (if provided by user/config).
+    """
 
     # Input source (one must be set)
     path: Path | None = None
@@ -267,7 +289,12 @@ class Config:
     entrypoints: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        """Validate configuration after initialization."""
+        """Validate and normalize configuration after initialization.
+
+        Raises:
+            ValueError: If neither or both of `path` and `repo_url` are provided, or if
+                `path` does not exist / is not a directory.
+        """
         if self.path is None and self.repo_url is None:
             raise ValueError("Either --path or --repo must be specified")
 
@@ -292,7 +319,18 @@ class Config:
 
 @dataclass
 class FileInfo:
-    """Information about a scanned file."""
+    """Information about a scanned file.
+
+    Attributes:
+        path: Absolute path to the file on disk.
+        relative_path: Repository-relative path using forward slashes.
+        size_bytes: File size in bytes.
+        extension: Lowercased file extension including leading dot (e.g., `.py`).
+        language: Normalized language label used by chunking/rendering.
+        priority: Relative priority score (0.0-1.0) used for ordering output.
+        tags: Tags applied by ranker/scanner (used for rendering/filtering).
+        token_estimate: Estimated tokens for the full file (computed during chunking).
+    """
 
     path: Path  # Absolute path
     relative_path: str  # Relative to repo root
@@ -305,27 +343,43 @@ class FileInfo:
 
     @property
     def id(self) -> str:
-        """Generate a stable, deterministic file ID based on path."""
+        """Generate a stable, deterministic file ID based on the repo-relative path.
+
+        Returns:
+            A short hex string identifier.
+        """
         # Use SHA256 of relative path for deterministic ID
         hash_input = self.relative_path.encode("utf-8")
         return hashlib.sha256(hash_input).hexdigest()[:16]
 
     @property
     def is_readme(self) -> bool:
-        """Check if file is a README."""
+        """Return whether this file is a README.
+
+        Returns:
+            True if the filename starts with "readme" (case-insensitive).
+        """
         name_lower = self.path.name.lower()
         return name_lower.startswith("readme")
 
     @property
     def is_config(self) -> bool:
-        """Check if file is a config file."""
+        """Return whether this file is a high-importance config file.
+
+        Returns:
+            True if the filename or repo-relative path matches `IMPORTANT_CONFIG_FILES`.
+        """
         return (
             self.relative_path in IMPORTANT_CONFIG_FILES or self.path.name in IMPORTANT_CONFIG_FILES
         )
 
     @property
     def is_doc(self) -> bool:
-        """Check if file is documentation."""
+        """Return whether this file is considered documentation.
+
+        Returns:
+            True if the file is a README, common doc extension, or located under docs-like dirs.
+        """
         return (
             self.is_readme
             or self.extension in {".md", ".rst", ".txt", ".adoc"}
@@ -334,7 +388,11 @@ class FileInfo:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to a JSON-serializable dictionary.
+
+        Returns:
+            Dict representation with deterministic ordering of tag list.
+        """
         return {
             "id": self.id,
             "path": self.relative_path,
@@ -349,7 +407,19 @@ class FileInfo:
 
 @dataclass
 class Chunk:
-    """A chunk of content from a file."""
+    """A chunk of content from a file.
+
+    Attributes:
+        id: Stable hash-based chunk ID.
+        path: Repo-relative file path.
+        language: Normalized language label.
+        start_line: 1-indexed start line.
+        end_line: 1-indexed end line (inclusive).
+        content: Chunk content.
+        priority: Priority score inherited from file ranking.
+        tags: Tags inherited from file ranking and chunking (sorted for determinism in output).
+        token_estimate: Estimated tokens for the chunk content.
+    """
 
     id: str  # Stable hash-based ID
     path: str  # Relative file path
@@ -362,7 +432,11 @@ class Chunk:
     token_estimate: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to a JSON-serializable dictionary.
+
+        Returns:
+            Dict representation with deterministic ordering of the tag list.
+        """
         return {
             "id": self.id,
             "path": self.path,
@@ -377,7 +451,28 @@ class Chunk:
 
 @dataclass
 class ScanStats:
-    """Statistics from scanning a repository."""
+    """Statistics from scanning and processing a repository.
+
+    Attributes:
+        files_scanned: Total file paths visited during traversal.
+        files_included: Files included after filtering.
+        files_skipped_size: Files skipped due to size limit.
+        files_skipped_binary: Files skipped due to binary detection.
+        files_skipped_extension: Files skipped due to extension filtering.
+        files_skipped_gitignore: Files skipped due to `.gitignore`.
+        files_skipped_glob: Files skipped due to exclude globs / minified heuristics.
+        files_dropped_budget: Files dropped later due to token/byte budgets.
+        total_bytes_scanned: Total bytes observed during traversal.
+        total_bytes_included: Total bytes included for output.
+        total_tokens_estimated: Total estimated tokens for included content.
+        chunks_created: Number of chunks created.
+        processing_time_seconds: End-to-end processing time.
+        top_ignored_patterns: Aggregated ignore reasons/pattern counts.
+        languages_detected: Counts of detected languages among included files.
+        dropped_files: Detailed list of dropped files (for report).
+        redaction_counts: Redaction statistics (rule name -> count).
+        top_ranked_files: Summary of top-ranked files (for report).
+    """
 
     files_scanned: int = 0
     files_included: int = 0
@@ -498,7 +593,15 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
 
 
 def get_language(extension: str, filename: str = "") -> str:
-    """Get language from file extension or filename."""
+    """Get a normalized language label from a file extension or special filename.
+
+    Args:
+        extension: File extension (with or without normalization).
+        filename: Optional filename used for special cases like `Dockerfile`.
+
+    Returns:
+        A normalized language label (e.g., `"python"`, `"markdown"`, `"text"`).
+    """
     ext_lower = extension.lower()
     if ext_lower in EXTENSION_TO_LANGUAGE:
         return EXTENSION_TO_LANGUAGE[ext_lower]

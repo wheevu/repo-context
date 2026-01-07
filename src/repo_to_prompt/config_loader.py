@@ -53,7 +53,12 @@ CONFIG_FILE_NAMES = [
 
 @dataclass
 class RankingWeights:
-    """Custom ranking weights for file prioritization."""
+    """Custom ranking weights for file prioritization.
+
+    Values are intended to be floats in the range [0.0, 1.0], but the loader is permissive
+    and will coerce ints/floats from config files. Unknown keys are ignored for forwards
+    compatibility.
+    """
 
     readme: float = 1.0
     main_doc: float = 0.95
@@ -69,7 +74,11 @@ class RankingWeights:
     default: float = 0.50
 
     def to_dict(self) -> dict[str, float]:
-        """Convert to dictionary."""
+        """Convert weights to a plain dictionary.
+
+        Returns:
+            Mapping of weight category name to weight value.
+        """
         return {
             "readme": self.readme,
             "main_doc": self.main_doc,
@@ -87,7 +96,14 @@ class RankingWeights:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RankingWeights:
-        """Create from dictionary."""
+        """Create a `RankingWeights` instance from config data.
+
+        Args:
+            data: Mapping of weight names to numeric values.
+
+        Returns:
+            A `RankingWeights` instance with provided numeric fields overridden.
+        """
         weights = cls()
         for key, value in data.items():
             if hasattr(weights, key) and isinstance(value, (int, float)):
@@ -138,13 +154,24 @@ class ProjectConfig:
     _config_file: Path | None = field(default=None, repr=False)
 
     def get_redaction_config(self) -> RedactionConfig:
-        """Get the RedactionConfig object from config data."""
+        """Build a `RedactionConfig` object from stored redaction config data.
+
+        Returns:
+            A `RedactionConfig` instance.
+        """
         from repo_to_prompt.redactor import RedactionConfig
 
         return RedactionConfig.from_dict(self.redaction_config)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for serialization (sorted keys for determinism)."""
+        """Convert to a JSON-serializable dictionary.
+
+        Output is deterministic: lists are sorted and dict keys are sorted to produce stable
+        diffs and repeatable `report.json`.
+
+        Returns:
+            A dict representation of the configuration.
+        """
         result: dict[str, Any] = {}
 
         if self.include_extensions is not None:
@@ -212,7 +239,17 @@ def find_config_file(repo_root: Path) -> Path | None:
 
 
 def _parse_toml(path: Path) -> dict[str, Any]:
-    """Parse a TOML config file."""
+    """Parse a TOML config file into a dict.
+
+    Args:
+        path: Path to the TOML file.
+
+    Returns:
+        Parsed TOML data as a dictionary, with support for nested sections.
+
+    Raises:
+        ImportError: If TOML parsing support is unavailable.
+    """
     if tomllib is None:
         raise ImportError(
             "TOML support requires 'tomli' package (Python < 3.11) or Python 3.11+. "
@@ -231,7 +268,17 @@ def _parse_toml(path: Path) -> dict[str, Any]:
 
 
 def _parse_yaml(path: Path) -> dict[str, Any]:
-    """Parse a YAML config file."""
+    """Parse a YAML config file into a dict.
+
+    Args:
+        path: Path to the YAML file.
+
+    Returns:
+        Parsed YAML data as a dictionary, with support for nested sections.
+
+    Raises:
+        ImportError: If PyYAML is not installed.
+    """
     if yaml is None:
         raise ImportError(
             "YAML support requires 'pyyaml' package. Install with: pip install pyyaml"
@@ -254,7 +301,14 @@ def _parse_yaml(path: Path) -> dict[str, Any]:
 
 
 def _normalize_extensions(extensions: Any) -> set[str] | None:
-    """Normalize extension list to set with leading dots."""
+    """Normalize extension input to a set of dot-prefixed extensions.
+
+    Args:
+        extensions: Extensions from config/CLI (string, list, set, or None).
+
+    Returns:
+        A set of normalized extensions (e.g., `{".py", ".ts"}`) or None if unset/invalid.
+    """
     if extensions is None:
         return None
 
@@ -276,7 +330,14 @@ def _normalize_extensions(extensions: Any) -> set[str] | None:
 
 
 def _normalize_globs(globs: Any) -> set[str] | None:
-    """Normalize glob patterns to set."""
+    """Normalize glob input to a set of patterns.
+
+    Args:
+        globs: Globs from config/CLI (string, list, set, or None).
+
+    Returns:
+        A set of glob patterns or None if unset/invalid.
+    """
     if globs is None:
         return None
 
@@ -299,7 +360,7 @@ def load_config(repo_root: Path, config_path: Path | None = None) -> ProjectConf
         config_path: Explicit path to config file (optional)
 
     Returns:
-        ProjectConfig with loaded values (unset values remain None)
+        ProjectConfig with loaded values (unset values remain None).
     """
     if config_path is None:
         config_path = find_config_file(repo_root)
@@ -400,13 +461,28 @@ def merge_cli_with_config(
     no_redact: bool = False,
     tree_depth: int | None = None,
 ) -> dict[str, Any]:
-    """
-    Merge CLI arguments with config file values.
+    """Merge CLI arguments with config file values (CLI wins).
 
-    CLI arguments take precedence over config file values.
+    Args:
+        config: Config loaded from file (may have unset values).
+        include_ext: Comma-separated extensions from CLI (optional).
+        exclude_glob: Comma-separated exclude globs from CLI (optional).
+        max_file_bytes: CLI override for max file size (optional).
+        max_total_bytes: CLI override for max total included bytes (optional).
+        max_tokens: CLI token budget (optional).
+        follow_symlinks: CLI override for symlink traversal (optional).
+        include_minified: CLI flag controlling minified inclusion (optional).
+        chunk_tokens: CLI override for chunk size (optional).
+        chunk_overlap: CLI override for chunk overlap (optional).
+        min_chunk_tokens: CLI override for coalescing threshold (optional).
+        output_dir: CLI override for output directory (optional).
+        mode: CLI output mode override (optional).
+        no_gitignore: CLI flag to disable `.gitignore` respect.
+        no_redact: CLI flag to disable redaction.
+        tree_depth: CLI override for rendered tree depth (optional).
 
     Returns:
-        Dictionary with merged configuration values
+        Dictionary of merged configuration values used by the export pipeline.
     """
     result: dict[str, Any] = {}
 

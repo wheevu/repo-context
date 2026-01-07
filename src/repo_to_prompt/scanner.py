@@ -29,7 +29,11 @@ from .utils import is_binary_file, is_likely_minified, normalize_path
 
 
 class FileCacheKey(NamedTuple):
-    """Cache key based on path, mtime, and size."""
+    """Cache key based on path, mtime, and size.
+
+    The `(mtime_ns, size)` pair is used as a lightweight "version" to invalidate cached
+    results when the file content changes.
+    """
 
     path: str
     mtime_ns: int
@@ -50,7 +54,14 @@ class FileCache:
         self._hash_cache: dict[FileCacheKey, str] = {}
 
     def _get_key(self, path: Path) -> FileCacheKey | None:
-        """Get cache key for a file, or None if stat fails."""
+        """Build a cache key for a file.
+
+        Args:
+            path: File path to stat.
+
+        Returns:
+            A `FileCacheKey`, or None if file metadata cannot be read.
+        """
         try:
             stat = path.stat()
             return FileCacheKey(str(path), stat.st_mtime_ns, stat.st_size)
@@ -58,53 +69,101 @@ class FileCache:
             return None
 
     def get_binary(self, path: Path) -> bool | None:
-        """Get cached binary check result."""
+        """Get cached binary check result for a file.
+
+        Args:
+            path: File path to query.
+
+        Returns:
+            Cached binary classification if available, otherwise None.
+        """
         key = self._get_key(path)
         if key:
             return self._binary_cache.get(key)
         return None
 
     def set_binary(self, path: Path, is_binary: bool) -> None:
-        """Cache binary check result."""
+        """Cache binary classification for a file.
+
+        Args:
+            path: File path to cache.
+            is_binary: Whether the file is considered binary.
+        """
         key = self._get_key(path)
         if key:
             self._binary_cache[key] = is_binary
 
     def get_minified(self, path: Path) -> bool | None:
-        """Get cached minified check result."""
+        """Get cached minified check result for a file.
+
+        Args:
+            path: File path to query.
+
+        Returns:
+            Cached minified classification if available, otherwise None.
+        """
         key = self._get_key(path)
         if key:
             return self._minified_cache.get(key)
         return None
 
     def set_minified(self, path: Path, is_minified: bool) -> None:
-        """Cache minified check result."""
+        """Cache minified classification for a file.
+
+        Args:
+            path: File path to cache.
+            is_minified: Whether the file is considered minified/bundled.
+        """
         key = self._get_key(path)
         if key:
             self._minified_cache[key] = is_minified
 
     def get_tokens(self, path: Path) -> int | None:
-        """Get cached token count."""
+        """Get cached token count for a file.
+
+        Args:
+            path: File path to query.
+
+        Returns:
+            Cached token count if available, otherwise None.
+        """
         key = self._get_key(path)
         if key:
             return self._token_cache.get(key)
         return None
 
     def set_tokens(self, path: Path, tokens: int) -> None:
-        """Cache token count."""
+        """Cache token count for a file.
+
+        Args:
+            path: File path to cache.
+            tokens: Token count to store.
+        """
         key = self._get_key(path)
         if key:
             self._token_cache[key] = tokens
 
     def get_hash(self, path: Path) -> str | None:
-        """Get cached content hash."""
+        """Get cached content hash for a file.
+
+        Args:
+            path: File path to query.
+
+        Returns:
+            Cached hash if available, otherwise None.
+        """
         key = self._get_key(path)
         if key:
             return self._hash_cache.get(key)
         return None
 
     def set_hash(self, path: Path, content_hash: str) -> None:
-        """Cache content hash."""
+        """Cache content hash for a file.
+
+        Args:
+            path: File path to cache.
+            content_hash: Content hash value to store.
+        """
         key = self._get_key(path)
         if key:
             self._hash_cache[key] = content_hash
@@ -117,7 +176,11 @@ class FileCache:
         self._hash_cache.clear()
 
     def stats(self) -> dict[str, int]:
-        """Get cache statistics."""
+        """Get cache statistics.
+
+        Returns:
+            Mapping of cache name to number of stored entries.
+        """
         return {
             "binary_entries": len(self._binary_cache),
             "minified_entries": len(self._minified_cache),
@@ -131,7 +194,11 @@ _file_cache: FileCache | None = None
 
 
 def get_file_cache() -> FileCache:
-    """Get or create the global file cache."""
+    """Get or create the global file cache.
+
+    Returns:
+        The singleton `FileCache` instance.
+    """
     global _file_cache
     if _file_cache is None:
         _file_cache = FileCache()
@@ -139,7 +206,10 @@ def get_file_cache() -> FileCache:
 
 
 def clear_file_cache() -> None:
-    """Clear the global file cache."""
+    """Clear the global file cache.
+
+    This is mainly useful for tests to avoid cross-test pollution.
+    """
     global _file_cache
     if _file_cache:
         _file_cache.clear()
@@ -154,7 +224,7 @@ class GitIgnoreParser:
     This ensures correct handling of negations, directory rules, and edge cases.
     """
 
-    def __init__(self, root_path: Path, use_git_check: bool = True):
+    def __init__(self, root_path: Path, use_git_check: bool = True) -> None:
         """
         Initialize the parser.
 
@@ -171,7 +241,11 @@ class GitIgnoreParser:
         self._load_gitignores()
 
     def _is_git_repo(self) -> bool:
-        """Check if the root path is inside a git repository."""
+        """Check whether the root path appears to be inside a git repository.
+
+        Returns:
+            True if `git rev-parse --git-dir` succeeds, otherwise False.
+        """
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--git-dir"],
@@ -188,7 +262,7 @@ class GitIgnoreParser:
         Use git check-ignore to check if a file is ignored.
 
         Returns:
-            True if ignored, False if not ignored, None if git check failed
+            True if ignored, False if not ignored, or None if the git check failed.
         """
         try:
             rel_path = file_path.relative_to(self.root_path)
@@ -212,7 +286,7 @@ class GitIgnoreParser:
             return None
 
     def _load_gitignores(self) -> None:
-        """Load all .gitignore files in the repository."""
+        """Load `.gitignore` files into pathspec matchers for fallback matching."""
         # Load root .gitignore
         root_gitignore = self.root_path / ".gitignore"
         if root_gitignore.exists():
@@ -225,7 +299,12 @@ class GitIgnoreParser:
                     self._load_gitignore_file(gitignore_path, gitignore_path.parent)
 
     def _load_gitignore_file(self, gitignore_path: Path, base_path: Path) -> None:
-        """Load a single .gitignore file using pathspec with GitWildMatchPattern."""
+        """Load a single `.gitignore` file into a `pathspec.PathSpec`.
+
+        Args:
+            gitignore_path: Path to the `.gitignore` file.
+            base_path: Directory the `.gitignore` patterns apply relative to.
+        """
         try:
             with open(gitignore_path, encoding="utf-8", errors="replace") as f:
                 patterns = f.read().splitlines()
@@ -249,7 +328,7 @@ class GitIgnoreParser:
             file_path: Absolute path to the file
 
         Returns:
-            True if the file should be ignored
+            True if the file should be ignored.
         """
         file_path = file_path.resolve()
 
@@ -305,7 +384,7 @@ class FileScanner:
         max_line_length: int = 5000,
         max_workers: int | None = None,
         use_cache: bool = True,
-    ):
+    ) -> None:
         """
         Initialize the scanner.
 
@@ -359,7 +438,11 @@ class FileScanner:
         """
         Check if a path matches any exclude glob pattern using pathspec.
 
-        Returns the matching pattern or None.
+        Args:
+            rel_path: Repo-relative path to test.
+
+        Returns:
+            The matching pattern (for stats) or None if no exclude matches.
         """
         rel_path_normalized = normalize_path(rel_path)
 
@@ -375,7 +458,14 @@ class FileScanner:
         return None
 
     def _should_include_extension(self, file_path: Path) -> bool:
-        """Check if file extension should be included."""
+        """Check whether a file extension should be included.
+
+        Args:
+            file_path: Path to check.
+
+        Returns:
+            True if the file should be included based on extension/name.
+        """
         ext = file_path.suffix.lower()
         name = file_path.name.lower()
 
@@ -398,7 +488,8 @@ class FileScanner:
         """
         Scan the repository and yield file information.
 
-        Files are yielded in deterministic sorted order (by relative path).
+        Files are yielded in deterministic sorted order (by relative path). Determinism is
+        important for stable outputs and reproducible diffs.
 
         Yields:
             FileInfo objects for each included file
@@ -528,7 +619,7 @@ class FileScanner:
             progress_callback: Optional callback(current, total) for progress updates
 
         Returns:
-            List of FileInfo objects sorted by relative path
+            List of FileInfo objects sorted by relative path.
         """
         # Phase 1: Collect all candidate paths (fast, single-threaded)
         candidates: list[tuple[Path, str, int]] = []
@@ -579,7 +670,19 @@ class FileScanner:
         def check_file(
             idx: int, file_path: Path, rel_path: str, size: int
         ) -> tuple[int, tuple[Path, str, int] | None, str | None]:
-            """Check a single file for binary/minified status."""
+            """Check a single file for binary/minified status.
+
+            Args:
+                idx: Candidate index (propagated for debugging/stability).
+                file_path: Path to the file on disk.
+                rel_path: Repo-relative path string.
+                size: Size of the file in bytes.
+
+            Returns:
+                A tuple `(idx, result, skip_reason)` where:
+                - `result` is a `(file_path, rel_path, size)` tuple when included, otherwise None
+                - `skip_reason` is `"binary"`/`"minified"` when skipped, otherwise None
+            """
             # Check if binary (with caching)
             is_binary = None
             if self._cache:
@@ -816,6 +919,8 @@ def generate_tree(
             return
 
         # Filter out hidden and common ignored directories
+        # This is a *rendering* filter only; the scanner itself applies the full include/exclude
+        # rules. Tree output stays readable by skipping obvious noise directories.
         filtered_entries = []
         for entry in entries:
             if entry.name.startswith(".") and entry.name not in {".github", ".env.example"}:

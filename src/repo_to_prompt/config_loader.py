@@ -362,6 +362,8 @@ def load_config(repo_root: Path, config_path: Path | None = None) -> ProjectConf
     Returns:
         ProjectConfig with loaded values (unset values remain None).
     """
+    config_path_provided = config_path is not None
+
     if config_path is None:
         config_path = find_config_file(repo_root)
 
@@ -369,6 +371,8 @@ def load_config(repo_root: Path, config_path: Path | None = None) -> ProjectConf
         return ProjectConfig()
 
     if not config_path.exists():
+        if config_path_provided:
+            raise FileNotFoundError(f"Config file not found: {config_path}")
         return ProjectConfig()
 
     # Parse based on extension
@@ -379,9 +383,15 @@ def load_config(repo_root: Path, config_path: Path | None = None) -> ProjectConf
         elif suffix in (".yml", ".yaml"):
             data = _parse_yaml(config_path)
         else:
+            if config_path_provided:
+                raise ValueError(
+                    f"Unsupported config extension '{config_path.suffix}' for {config_path}"
+                )
             return ProjectConfig()
-    except Exception:
-        # Silently ignore parse errors - CLI will work without config
+    except Exception as exc:
+        if config_path_provided:
+            raise ValueError(f"Failed to parse config file {config_path}: {exc}") from exc
+        # Silently ignore parse errors when auto-discovering
         return ProjectConfig()
 
     # Build config object

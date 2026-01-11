@@ -39,6 +39,7 @@ class ContextPackRenderer:
         stats: ScanStats,
         max_total_tokens: int | None = None,
         include_timestamp: bool = True,
+        tree_depth: int = 4,
     ):
         """
         Initialize the renderer.
@@ -51,6 +52,7 @@ class ContextPackRenderer:
             stats: Scan statistics
             max_total_tokens: Maximum total tokens in output
             include_timestamp: Whether to include timestamps (disable for reproducible output)
+            tree_depth: Maximum depth for directory tree rendering
         """
         self.root_path = root_path
         self.files = files
@@ -59,6 +61,7 @@ class ContextPackRenderer:
         self.stats = stats
         self.max_total_tokens = max_total_tokens
         self.include_timestamp = include_timestamp
+        self.tree_depth = tree_depth
 
         # Organize files by type
         self._readme_files = [f for f in files if f.is_readme]
@@ -136,7 +139,6 @@ class ContextPackRenderer:
             lines.append(f"\n**Description:** {manifest_info['description']}")
 
         # Detected languages
-        self.ranker.get_detected_languages()
         lang_stats = self.stats.languages_detected
 
         if lang_stats:
@@ -200,7 +202,7 @@ class ContextPackRenderer:
 
         tree = generate_tree(
             self.root_path,
-            max_depth=4,
+            max_depth=self.tree_depth,
             include_files=True,
             files_to_highlight=important_files,
         )
@@ -462,6 +464,7 @@ def render_context_pack(
     stats: ScanStats,
     max_total_tokens: int | None = None,
     include_timestamp: bool = True,
+    tree_depth: int = 4,
 ) -> str:
     """
     Render a context pack as Markdown.
@@ -474,6 +477,7 @@ def render_context_pack(
         stats: Scan statistics
         max_total_tokens: Maximum total tokens
         include_timestamp: Whether to include generation timestamp
+        tree_depth: Maximum directory tree depth
 
     Returns:
         Rendered Markdown string
@@ -486,6 +490,7 @@ def render_context_pack(
         stats=stats,
         max_total_tokens=max_total_tokens,
         include_timestamp=include_timestamp,
+        tree_depth=tree_depth,
     )
     return renderer.render()
 

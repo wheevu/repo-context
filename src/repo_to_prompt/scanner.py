@@ -240,6 +240,50 @@ class GitIgnoreParser:
         # Always load pathspec as fallback
         self._load_gitignores()
 
+    @property
+    def uses_git(self) -> bool:
+        """Return whether git check-ignore is available."""
+        return self._use_git
+
+    def preload(self, file_paths: list[Path]) -> None:
+        """Batch-load gitignore status for a list of paths.
+
+        Args:
+            file_paths: File paths to check in bulk.
+        """
+        if not self._use_git or not file_paths:
+            return
+
+        rel_paths = []
+        for file_path in file_paths:
+            try:
+                rel_paths.append(str(file_path.relative_to(self.root_path)))
+            except ValueError:
+                continue
+
+        if not rel_paths:
+            return
+
+        try:
+            input_data = "\0".join(rel_paths).encode("utf-8")
+            result = subprocess.run(
+                ["git", "check-ignore", "-z", "--stdin"],
+                cwd=self.root_path,
+                input=input_data,
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode not in (0, 1):
+                return
+
+            ignored = {
+                path for path in result.stdout.decode("utf-8", errors="replace").split("\0") if path
+            }
+            for rel_path in rel_paths:
+                self._git_ignore_cache[rel_path] = rel_path in ignored
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return
+
     def _is_git_repo(self) -> bool:
         """Check whether the root path appears to be inside a git repository.
 
@@ -429,6 +473,10 @@ class FileScanner:
         self._exclude_spec = pathspec.PathSpec.from_lines(
             GitWildMatchPattern, list(self.exclude_globs)
         )
+        self._exclude_specs = {
+            pattern: pathspec.PathSpec.from_lines(GitWildMatchPattern, [pattern])
+            for pattern in sorted(self.exclude_globs)
+        }
 
         # Statistics tracking
         self.stats = ScanStats()
@@ -449,9 +497,8 @@ class FileScanner:
         # Use pathspec for matching (handles all gitignore-style patterns correctly)
         if self._exclude_spec.match_file(rel_path_normalized):
             # Find which pattern matched for statistics
-            for pattern in self.exclude_globs:
-                single_spec = pathspec.PathSpec.from_lines(GitWildMatchPattern, [pattern])
-                if single_spec.match_file(rel_path_normalized):
+            for pattern, spec in self._exclude_specs.items():
+                if spec.match_file(rel_path_normalized):
                     return pattern
             return "exclude_glob"
 
@@ -496,8 +543,12 @@ class FileScanner:
         """
         # Collect all files first, then sort for deterministic ordering
         all_files: list[tuple[Path, str]] = []
+        all_paths = list(self._walk_files())
 
-        for file_path in self._walk_files():
+        if self._gitignore and self._gitignore.uses_git:
+            self._gitignore.preload(all_paths)
+
+        for file_path in all_paths:
             self.stats.files_scanned += 1
 
             # Get relative path
@@ -623,8 +674,12 @@ class FileScanner:
         """
         # Phase 1: Collect all candidate paths (fast, single-threaded)
         candidates: list[tuple[Path, str, int]] = []
+        all_paths = list(self._walk_files())
 
-        for file_path in self._walk_files():
+        if self._gitignore and self._gitignore.uses_git:
+            self._gitignore.preload(all_paths)
+
+        for file_path in all_paths:
             self.stats.files_scanned += 1
 
             try:

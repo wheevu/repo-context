@@ -429,7 +429,7 @@ def export(
                 m_mode = OutputMode(merged["mode"])
                 m_respect_gitignore = merged["respect_gitignore"]
                 m_redact_secrets = merged["redact_secrets"]
-                _ = merged["tree_depth"]  # Used in merged config, not needed here
+                m_tree_depth = merged["tree_depth"]
                 m_ranking_weights = merged["ranking_weights"]
                 m_redaction_config = merged.get("redaction_config", {})
 
@@ -590,6 +590,7 @@ def export(
                         ranker=ranker,
                         stats=stats,
                         include_timestamp=not no_timestamp,
+                        tree_depth=m_tree_depth,
                     )
                     progress.update(render_task, description="[green]✓[/green] Output rendered")
 
@@ -611,6 +612,7 @@ def export(
                     "ref": ref,
                     "repo": repo,
                     "skip_minified": m_skip_minified,
+                    "tree_depth": m_tree_depth,
                 }
 
                 elapsed = time.time() - start_time

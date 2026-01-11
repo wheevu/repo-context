@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import math
 import re
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
@@ -151,8 +152,11 @@ class RedactionConfig:
                             replacement=rule_data.get("replacement", "[CUSTOM_REDACTED]"),
                         )
                     )
-                except re.error:
-                    pass  # Skip invalid patterns
+                except re.error as exc:
+                    warnings.warn(
+                        f"Invalid redaction regex pattern '{rule_data.get('pattern')}' ({exc})",
+                        RuntimeWarning,
+                    )
 
         # Allowlist
         config.allowlist_patterns = list(data.get("allowlist_patterns", []))

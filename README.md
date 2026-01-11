@@ -340,7 +340,7 @@ Redacted content is replaced with descriptive placeholders like `[AWS_ACCESS_KEY
 
 ### Advanced Redaction Features
 
-Configure advanced redaction in your config file:
+Configure advanced redaction in your config file (invalid custom regex patterns emit warnings):
 
 ```toml
 # repo-to-prompt.toml
@@ -433,6 +433,7 @@ Configure `repo-to-prompt` via project-level config files. The tool searches for
 5. `r2p.yml` / `.r2p.yml` / `r2p.yaml` / `.r2p.yaml`
 
 CLI flags always override config file values.
+If you pass `--config`, parse errors are reported immediately.
 
 ### Example Configuration (TOML)
 

@@ -1,8 +1,8 @@
 # repo-to-prompt
 
-Convert repositories into LLM-friendly context packs for prompting and RAG.
+Turn repositories into LLM-friendly context packs for prompting and RAG.
 
-_Because LLMs are smart… but they still can’t read your repo through vibes._ 🙎🏻‍♂️
+_Because LLMs are smart, but they still can’t read your repo on their own._
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -10,29 +10,29 @@ _Because LLMs are smart… but they still can’t read your repo through vibes._
 
 ## Overview
 
-`repo-to-prompt` is a CLI tool that transforms codebases into high-signal text bundles optimized for LLM prompting and retrieval-augmented generation (RAG). It scans your repo, ranks the “actually important” files first, chunks content into model-friendly pieces, and produces structured outputs ready for AI consumption.
+`repo-to-prompt` is a CLI that converts codebases into high-signal text bundles for LLM prompting and retrieval-augmented generation (RAG). It scans your repo, ranks the most important files, chunks content into model-friendly sizes, and exports structured outputs ready for AI workflows.
 
-If you’ve ever pasted a whole repository into a prompt and immediately regretted it: same. This tool is the fix.
+If you’ve ever pasted a whole repository into a prompt and regretted it, this is the fix.
 
 ### Key Features
 
-- **Smart File Ranking**: Prioritizes READMEs, configs, entrypoints over tests and generated files
-- **Language-Aware Chunking**: Uses code structure (functions, classes) for Python, JS/TS, Go, Java, Rust
-- **Advanced Secret Redaction**: 25+ patterns, entropy-based detection, paranoid mode, and allowlists
-- **Structure-Safe Redaction**: Redaction never breaks code syntax (AST-validated for Python)
-- **UTF-8 Encoding**: Proper handling of emojis, smart quotes, and international characters
-- **Configuration Files**: Project-level config via `repo-to-prompt.toml` or `.r2p.yml`
-- **Gitignore Respect**: Honors `.gitignore` patterns using Git as source of truth
+- **Smart File Ranking**: Prioritizes READMEs, configs, and entrypoints over tests and generated files
+- **Language-Aware Chunking**: Uses structure for Python, JS/TS, Go, Java, and Rust
+- **Advanced Secret Redaction**: 25+ patterns, entropy detection, paranoid mode, and allowlists
+- **Structure-Safe Redaction**: Redaction never breaks syntax (AST-validated for Python)
+- **UTF-8 Encoding**: Handles emojis, smart quotes, and international characters
+- **Configuration Files**: Project config via `repo-to-prompt.toml` or `.r2p.yml`
+- **Gitignore Respect**: Honors `.gitignore` using Git as source of truth
 - **GitHub Support**: Clone and process remote repositories directly
 - **Deterministic Output**: Stable ordering and chunk IDs for reproducible results
-- **Concurrent Scanning**: Thread pool for fast I/O on large repositories
-- **Rich Progress UI**: Beautiful progress bars during export
+- **Concurrent Scanning**: Thread pool for fast I/O on large repos
+- **Rich Progress UI**: Progress bars during export
 - **Cross-Platform**: Works on macOS, Linux, and Windows
 
 ### Design Philosophy
 
 - **High signal > high volume**: READMEs and entrypoints first, `node_modules` never.
-- **Deterministic**: If you run it twice, you shouldn’t get two different realities.
+- **Deterministic**: Running twice should produce the same result.
 - **Language-aware**: Code is a language; treat it like one.
 
 ## Installation
@@ -41,7 +41,7 @@ If you’ve ever pasted a whole repository into a prompt and immediately regrett
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/repo-to-prompt.git
+git clone https://github.com/wheevu/repo-to-prompt.git
 cd repo-to-prompt
 
 # Create virtual environment
@@ -57,8 +57,8 @@ pip install -e ".[all]"
 
 ### Optional Dependencies
 
-- **tiktoken**: More accurate token counting (uses OpenAI's tokenizer)
-- **tree-sitter**: Enhanced code parsing (optional; currently the chunker is pattern-based)
+- **tiktoken**: More accurate token counting (OpenAI tokenizer)
+- **tree-sitter**: Enhanced code parsing (chunker is currently pattern-based)
 
 ```bash
 pip install -e ".[tiktoken]"
@@ -96,7 +96,7 @@ repo-to-prompt export --repo https://github.com/owner/repo --ref develop
 repo-to-prompt info /path/to/your/repo
 ```
 
-Tip: `info` supports the same include/exclude knobs as `export`, so your counts don’t drift depending on which command you used.
+Tip: `info` supports the same include/exclude knobs as `export`, so counts stay consistent.
 
 ## Usage
 
@@ -400,7 +400,7 @@ For source code files, redaction is designed to **never break code syntax**:
 - **Other source files**: Inline replacement within string literals preserves code structure.
 - **Config/doc files**: Standard inline redaction is applied.
 
-This ensures that code blocks in the generated context pack remain syntactically valid and can be safely used in prompts without introducing parse errors.
+This keeps code blocks in the generated context pack syntactically valid and safe for prompts.
 
 ## File Priority Ranking
 
@@ -415,8 +415,8 @@ Files are ranked by importance (highest to lowest):
 | 0.80     | API definitions | types.ts, models.py, schema.graphql      |
 | 0.75     | Core source     | src/**, lib/**                           |
 | 0.60     | Examples        | examples/**, samples/**                  |
-| 0.50     | Tests           | tests/\*_, _\_test.py                    |
-| 0.20     | Generated       | \*.min.js, auto-generated                |
+| 0.50     | Tests           | `tests/*`, `*_test.py`                   |
+| 0.20     | Generated       | `*.min.js`, auto-generated              |
 | 0.15     | Lock files      | package-lock.json, poetry.lock           |
 | 0.10     | Vendored        | vendor/**, node_modules/**               |
 
@@ -515,7 +515,7 @@ src/repo_to_prompt/
 
 ```bash
 # Clone and install dev dependencies
-git clone https://github.com/your-org/repo-to-prompt.git
+git clone https://github.com/wheevu/repo-to-prompt.git
 cd repo-to-prompt
 pip install -e ".[dev]"
 ```

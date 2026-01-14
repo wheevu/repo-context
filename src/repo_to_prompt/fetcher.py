@@ -1,7 +1,7 @@
 """
 Repository fetcher module.
 
-Handles fetching repositories from local paths and GitHub URLs.
+Handles fetching repositories from local paths, GitHub URLs, and HuggingFace Spaces.
 """
 
 from __future__ import annotations
@@ -23,6 +23,34 @@ class FetchError(Exception):
     """Error during repository fetching."""
 
     pass
+
+
+def is_github_url(url: str) -> bool:
+    """Check if a URL is a GitHub repository URL.
+
+    Args:
+        url: URL to check.
+
+    Returns:
+        True if the URL is a GitHub URL, False otherwise.
+    """
+    if url.startswith("git@github.com:"):
+        return True
+    parsed = urlparse(url)
+    return parsed.netloc in ("github.com", "www.github.com")
+
+
+def is_huggingface_url(url: str) -> bool:
+    """Check if a URL is a HuggingFace Spaces or repository URL.
+
+    Args:
+        url: URL to check.
+
+    Returns:
+        True if the URL is a HuggingFace URL, False otherwise.
+    """
+    parsed = urlparse(url)
+    return parsed.netloc in ("huggingface.co", "hf.co", "www.huggingface.co")
 
 
 def parse_github_url(url: str) -> tuple[str, str, str | None]:
@@ -71,6 +99,151 @@ def parse_github_url(url: str) -> tuple[str, str, str | None]:
         ref = path_parts[3]
 
     return owner, repo, ref
+
+
+def parse_huggingface_url(url: str) -> tuple[str, str, str, str | None]:
+    """Parse a HuggingFace URL into `(owner, repo_name, repo_type, ref)`.
+
+    Supports common formats:
+    - `https://huggingface.co/spaces/owner/space-name`
+    - `https://hf.co/spaces/owner/space-name`
+    - `https://huggingface.co/spaces/owner/space-name/tree/<ref>`
+    - `https://huggingface.co/owner/model-name` (models)
+    - `https://huggingface.co/datasets/owner/dataset-name` (datasets)
+
+    Args:
+        url: HuggingFace repository URL.
+
+    Returns:
+        A tuple `(owner, repo_name, repo_type, ref)` where `repo_type` is one of
+        'spaces', 'models', or 'datasets', and `ref` is optional.
+
+    Raises:
+        FetchError: If the URL is not a recognized HuggingFace repository URL.
+    """
+    parsed = urlparse(url)
+    if parsed.netloc not in ("huggingface.co", "hf.co", "www.huggingface.co"):
+        raise FetchError(f"Not a HuggingFace URL: {url}")
+
+    # Split path
+    path_parts = [p for p in parsed.path.split("/") if p]
+
+    if len(path_parts) < 2:
+        raise FetchError(f"Invalid HuggingFace URL (missing owner/repo): {url}")
+
+    # Determine repo type based on URL structure
+    if path_parts[0] in ("spaces", "datasets"):
+        # Format: /spaces/owner/repo or /datasets/owner/repo
+        repo_type = path_parts[0]
+        if len(path_parts) < 3:
+            raise FetchError(f"Invalid HuggingFace URL (missing owner/repo): {url}")
+        owner = path_parts[1]
+        repo_name = path_parts[2]
+        # Check for branch/tag in URL
+        ref = None
+        if len(path_parts) >= 5 and path_parts[3] == "tree":
+            ref = path_parts[4]
+    else:
+        # Format: /owner/repo (models are the default)
+        repo_type = "models"
+        owner = path_parts[0]
+        repo_name = path_parts[1]
+        # Check for branch/tag in URL
+        ref = None
+        if len(path_parts) >= 4 and path_parts[2] == "tree":
+            ref = path_parts[3]
+
+    return owner, repo_name, repo_type, ref
+
+
+def clone_huggingface_repo(
+    url: str,
+    ref: str | None = None,
+    target_dir: Path | None = None,
+    shallow: bool = True,
+) -> Path:
+    """Clone a HuggingFace repository (Spaces, models, or datasets) to a local directory.
+
+    Args:
+        url: HuggingFace repository URL.
+        ref: Optional branch/tag/SHA to checkout. If omitted, uses the default branch
+            (or any ref encoded in the URL).
+        target_dir: Parent directory to clone into. If None, a temporary directory is created.
+        shallow: Whether to attempt a shallow clone (`depth=1`) when possible.
+
+    Returns:
+        Path to the cloned repository root directory.
+
+    Raises:
+        FetchError: If GitPython is unavailable or the clone/checkout fails.
+    """
+    try:
+        import git
+    except ImportError as exc:
+        raise FetchError(
+            "GitPython is required for HuggingFace cloning. Install with: pip install gitpython"
+        ) from exc
+
+    # Parse URL to get components
+    owner, repo_name, repo_type, url_ref = parse_huggingface_url(url)
+
+    # Use ref from URL if not explicitly provided
+    if ref is None:
+        ref = url_ref
+
+    # Build clone URL based on repo type
+    if repo_type == "spaces":
+        clone_url = f"https://huggingface.co/spaces/{owner}/{repo_name}"
+    elif repo_type == "datasets":
+        clone_url = f"https://huggingface.co/datasets/{owner}/{repo_name}"
+    else:
+        # models
+        clone_url = f"https://huggingface.co/{owner}/{repo_name}"
+
+    # Create target directory
+    if target_dir is None:
+        target_dir = Path(tempfile.mkdtemp(prefix="repo-to-prompt-"))
+    else:
+        target_dir = Path(target_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_path = target_dir / repo_name
+
+    console.print(f"[cyan]Cloning HuggingFace {repo_type}: {owner}/{repo_name}...[/cyan]")
+
+    try:
+        # Clone options
+        clone_kwargs: dict[str, Any] = {"depth": 1} if shallow and ref is None else {}
+
+        if ref:
+            # For specific refs, we need to clone without depth first
+            # then checkout the ref
+            if shallow:
+                # Try shallow clone with specific branch
+                try:
+                    repo = git.Repo.clone_from(
+                        clone_url,
+                        repo_path,
+                        branch=ref,
+                        depth=1,
+                    )
+                except git.GitCommandError:
+                    # Fall back to full clone if shallow with ref fails
+                    repo = git.Repo.clone_from(clone_url, repo_path)
+                    repo.git.checkout(ref)
+            else:
+                repo = git.Repo.clone_from(clone_url, repo_path)
+                repo.git.checkout(ref)
+        else:
+            repo = git.Repo.clone_from(clone_url, repo_path, **clone_kwargs)
+
+        console.print(f"[green]✓ Cloned to {repo_path}[/green]")
+        return repo_path
+
+    except git.GitCommandError as e:
+        raise FetchError(f"Failed to clone HuggingFace repository: {e}") from e
+    except Exception as e:
+        raise FetchError(f"Unexpected error during clone: {e}") from e
 
 
 def clone_github_repo(
@@ -213,14 +386,14 @@ def fetch_repository(
     ref: str | None = None,
     target_dir: Path | None = None,
 ) -> tuple[Path, bool]:
-    """Fetch a repository from a local path or by cloning a GitHub URL.
+    """Fetch a repository from a local path or by cloning a GitHub/HuggingFace URL.
 
     Exactly one of `path` or `repo_url` must be provided.
 
     Args:
         path: Local path to an existing repository directory.
-        repo_url: GitHub repository URL to clone.
-        ref: Optional branch/tag/SHA when cloning from GitHub.
+        repo_url: GitHub or HuggingFace repository URL to clone.
+        ref: Optional branch/tag/SHA when cloning.
         target_dir: Optional target directory for clones. If None, a temp directory is used.
 
     Returns:
@@ -228,14 +401,20 @@ def fetch_repository(
         should be cleaned up by the caller.
 
     Raises:
-        FetchError: If neither input source is provided or fetch fails.
+        FetchError: If neither input source is provided, URL is unsupported, or fetch fails.
     """
     if path is not None:
         validated_path = validate_local_path(path)
         return validated_path, False
 
     if repo_url is not None:
-        cloned_path = clone_github_repo(repo_url, ref, target_dir)
+        # Detect URL type and dispatch to appropriate clone function
+        if is_github_url(repo_url):
+            cloned_path = clone_github_repo(repo_url, ref, target_dir)
+        elif is_huggingface_url(repo_url):
+            cloned_path = clone_huggingface_repo(repo_url, ref, target_dir)
+        else:
+            raise FetchError(f"Unsupported repository URL: {repo_url}")
         return cloned_path, target_dir is None  # is_temp if no target specified
 
     raise FetchError("Either path or repo_url must be provided")

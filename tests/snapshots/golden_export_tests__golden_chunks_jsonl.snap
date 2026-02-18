@@ -1,0 +1,9 @@
+---
+source: tests/golden_export_tests.rs
+expression: normalized_chunks
+---
+{"content":"# Golden Fixture\n\nThis is a stable fixture repository for snapshot tests.\n","end_line":3,"id":"c597ac73ee70d812","lang":"markdown","path":"README.md","priority":1.0,"start_line":1,"tags":["readme"]}
+{"content":"# Guide\n\nUse `python -m app`.\n","end_line":3,"id":"e0b01c8686470906","lang":"markdown","path":"docs/guide.md","priority":0.5,"start_line":1,"tags":[]}
+{"content":"[project]\nname='golden-fixture'\n\n[project.scripts]\nfixture='src.main:main'\n","end_line":5,"id":"2c9232a1b6d22ee9","lang":"toml","path":"pyproject.toml","priority":0.9,"start_line":1,"tags":["config"]}
+{"content":"class Helper:\n    def run(self) -> None:\n        pass\n","end_line":3,"id":"d521fe2e0254311b","lang":"python","path":"src/helpers.py","priority":0.75,"start_line":1,"tags":[]}
+{"content":"def greet(name: str) -> str:\n    token = \"[REDACTED_OPENAI_KEY]\"\n    return f\"Hello {name}\"\n\n\ndef main() -> None:\n    print(greet(\"world\"))\n","end_line":7,"id":"89b33e0a79bc5f55","lang":"python","path":"src/main.py","priority":0.85,"start_line":1,"tags":["entrypoint","redacted"]}

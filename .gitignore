@@ -20,3 +20,6 @@ out/
 
 # Editors
 .vscode/
+
+# Rust
+/target

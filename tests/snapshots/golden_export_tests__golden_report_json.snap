@@ -1,0 +1,176 @@
+---
+source: tests/golden_export_tests.rs
+expression: normalized_report
+---
+{
+  "config": {
+    "chunk_overlap": 30,
+    "chunk_tokens": 220,
+    "exclude_globs": [
+      "*.bundle.js",
+      "*.egg-info/**",
+      "*.map",
+      "*.min.css",
+      "*.min.js",
+      "*.pyc",
+      "*.swo",
+      "*.swp",
+      ".DS_Store",
+      ".cache/**",
+      ".coverage",
+      ".eggs/**",
+      ".git/**",
+      ".hg/**",
+      ".idea/**",
+      ".mypy_cache/**",
+      ".nox/**",
+      ".pytest_cache/**",
+      ".ruff_cache/**",
+      ".svn/**",
+      ".tox/**",
+      ".venv/**",
+      ".vs/**",
+      ".vscode/**",
+      "Thumbs.db",
+      "__pycache__/**",
+      "_build/**",
+      "bin/**",
+      "build/**",
+      "coverage/**",
+      "dist/**",
+      "htmlcov/**",
+      "node_modules/**",
+      "obj/**",
+      "out/**",
+      "target/**",
+      "vendor/**",
+      "venv/**"
+    ],
+    "follow_symlinks": false,
+    "include_extensions": [
+      ".adoc",
+      ".bash",
+      ".c",
+      ".cc",
+      ".cfg",
+      ".cjs",
+      ".cpp",
+      ".cs",
+      ".css",
+      ".cxx",
+      ".dockerfile",
+      ".go",
+      ".graphql",
+      ".h",
+      ".hpp",
+      ".html",
+      ".ini",
+      ".java",
+      ".js",
+      ".json",
+      ".jsx",
+      ".kt",
+      ".kts",
+      ".less",
+      ".md",
+      ".mjs",
+      ".php",
+      ".proto",
+      ".py",
+      ".pyi",
+      ".pyx",
+      ".rb",
+      ".rs",
+      ".rst",
+      ".scala",
+      ".scss",
+      ".sh",
+      ".sql",
+      ".svelte",
+      ".swift",
+      ".toml",
+      ".ts",
+      ".tsx",
+      ".txt",
+      ".vue",
+      ".yaml",
+      ".yml",
+      ".zsh"
+    ],
+    "max_file_bytes": 1048576,
+    "max_tokens": 2000,
+    "max_total_bytes": 20000000,
+    "mode": "both",
+    "path": "/<FIXTURE_ROOT>",
+    "redact_secrets": true,
+    "ref": null,
+    "repo": null,
+    "skip_minified": true,
+    "tree_depth": 4
+  },
+  "files": [
+    {
+      "id": "b335630551682c19",
+      "path": "README.md",
+      "priority": 1.0,
+      "tokens": 18
+    },
+    {
+      "id": "50c86b7ed8ac2cf9",
+      "path": "pyproject.toml",
+      "priority": 0.9,
+      "tokens": 18
+    },
+    {
+      "id": "2e5ad92c43aa96cc",
+      "path": "src/main.py",
+      "priority": 0.85,
+      "tokens": 34
+    },
+    {
+      "id": "1ba52bbd54b0d0cf",
+      "path": "src/helpers.py",
+      "priority": 0.75,
+      "tokens": 13
+    },
+    {
+      "id": "07fdd026b11c494c",
+      "path": "docs/guide.md",
+      "priority": 0.5,
+      "tokens": 7
+    }
+  ],
+  "output_files": [
+    "/<OUTPUT_DIR>/chunks.jsonl",
+    "/<OUTPUT_DIR>/context_pack.md"
+  ],
+  "schema_version": "1.0.0",
+  "stats": {
+    "chunks_created": 5,
+    "files_dropped_budget": 0,
+    "files_included": 5,
+    "files_scanned": 5,
+    "files_skipped": {
+      "binary": 0,
+      "extension": 0,
+      "gitignore": 0,
+      "glob": 0,
+      "size": 0
+    },
+    "languages_detected": {
+      "markdown": 2,
+      "python": 2,
+      "toml": 1
+    },
+    "processing_time_seconds": 0.0,
+    "redacted_chunks": 1,
+    "redacted_files": 1,
+    "redaction_counts": {
+      "openai_key": 1
+    },
+    "top_ignored_patterns": {},
+    "total_bytes_included": 386,
+    "total_bytes_scanned": 386,
+    "total_tokens_estimated": 91
+  }
+}

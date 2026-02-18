@@ -6,6 +6,12 @@ use crate::utils::{estimate_tokens, stable_hash};
 
 pub struct MarkdownChunker;
 
+impl Default for MarkdownChunker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MarkdownChunker {
     pub fn new() -> Self {
         Self
@@ -31,7 +37,7 @@ impl MarkdownChunker {
             // Heading detection: must be 1-6 '#' followed by whitespace (Python line 196)
             let trimmed = line.trim_start();
             let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
-            let is_heading = if hash_count >= 1 && hash_count <= 6 {
+            let is_heading = if (1..=6).contains(&hash_count) {
                 let rest = &trimmed[hash_count..];
                 rest.starts_with(' ') || rest.starts_with('\t')
             } else {

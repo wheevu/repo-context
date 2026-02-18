@@ -1,20 +1,5 @@
 .DS_Store
 
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-*.egg-info/
-dist/
-build/
-
-# Virtual environments
-.venv/
-venv/
-
 # Tool outputs
 out/
 

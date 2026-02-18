@@ -4,7 +4,7 @@ use crate::fetch::RepoContext;
 use anyhow::{Context, Result};
 use git2::{FetchOptions, ObjectType, Repository};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn clone_repository(url: &str, ref_: Option<&str>) -> Result<RepoContext> {
@@ -54,7 +54,7 @@ fn normalize_github_url(url: &str) -> String {
 }
 
 /// Attempt a shallow clone (depth=1) targeting a specific branch name.
-fn try_shallow_clone_with_branch(url: &str, dest: &PathBuf, branch: &str) -> Result<Repository> {
+fn try_shallow_clone_with_branch(url: &str, dest: &Path, branch: &str) -> Result<Repository> {
     let mut builder = git2::build::RepoBuilder::new();
     builder.branch(branch);
 
@@ -66,7 +66,7 @@ fn try_shallow_clone_with_branch(url: &str, dest: &PathBuf, branch: &str) -> Res
 }
 
 /// Shallow clone (depth=1) the default branch.
-fn shallow_clone(url: &str, dest: &PathBuf) -> Result<Repository> {
+fn shallow_clone(url: &str, dest: &Path) -> Result<Repository> {
     let mut fo = FetchOptions::new();
     fo.depth(1);
 

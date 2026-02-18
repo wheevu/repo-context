@@ -99,6 +99,12 @@ fn build_entropy_regex(min_len: usize) -> Regex {
         .expect("valid entropy token regex")
 }
 
+impl Default for Redactor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Redactor {
     #[allow(dead_code)]
     pub fn new() -> Self {
@@ -471,8 +477,10 @@ mod tests {
         use crate::domain::{EntropyConfig, RedactionConfig};
 
         // Build a config with min_length = 30
-        let mut cfg = RedactionConfig::default();
-        cfg.entropy = EntropyConfig { enabled: true, threshold: 3.5, min_length: 30 };
+        let cfg = RedactionConfig {
+            entropy: EntropyConfig { enabled: true, threshold: 3.5, min_length: 30 },
+            ..Default::default()
+        };
 
         let redactor = Redactor::from_config(
             true,  // mode_entropy
@@ -532,9 +540,11 @@ mod tests {
     // --- Test 14: Non-Python source-safe language (JS) engages structure-safe path without AST revert ---
     #[test]
     fn test_non_python_source_safe_no_ast_revert() {
-        let mut cfg = RedactionConfig::default();
-        // Override source_safe_patterns to only include *.js for isolation
-        cfg.source_safe_patterns = vec!["*.js".to_string()];
+        let cfg = RedactionConfig {
+            // Override source_safe_patterns to only include *.js for isolation
+            source_safe_patterns: vec!["*.js".to_string()],
+            ..Default::default()
+        };
 
         let redactor = Redactor::from_config(
             false, // entropy
@@ -566,9 +576,11 @@ mod tests {
     // --- Test 15: Python AST validation reverts redaction that breaks syntax ---
     #[test]
     fn test_python_ast_validation_reverts_broken_syntax() {
-        let mut cfg = RedactionConfig::default();
-        // Ensure *.py is in source_safe_patterns
-        cfg.source_safe_patterns = vec!["*.py".to_string()];
+        let cfg = RedactionConfig {
+            // Ensure *.py is in source_safe_patterns
+            source_safe_patterns: vec!["*.py".to_string()],
+            ..Default::default()
+        };
 
         let redactor = Redactor::from_config(
             false, // entropy

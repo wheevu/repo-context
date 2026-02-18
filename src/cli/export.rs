@@ -353,7 +353,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
             .as_ref()
             .map(|p| serde_json::Value::String(p.to_string_lossy().to_string()))
             .unwrap_or(serde_json::Value::Null);
-        let mode_val = serde_json::to_value(&merged.mode)?;
+        let mode_val = serde_json::to_value(merged.mode)?;
         json!({
             "chunk_overlap":        merged.chunk_overlap,
             "chunk_tokens":         merged.chunk_tokens,

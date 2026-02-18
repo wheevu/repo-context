@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use super::utils::parse_csv;
+use crate::chunk::code_chunker::supported_tree_sitter_languages;
 use crate::rank::rank_files;
 use crate::scan::scanner::FileScanner;
 use crate::scan::tree::generate_tree;
@@ -114,6 +115,7 @@ pub fn run(args: InfoArgs) -> Result<()> {
     println!("  Files skipped (extension): {}", stats.files_skipped_extension);
     println!("  Files skipped (gitignore): {}", stats.files_skipped_gitignore);
     println!("  Total bytes: {}", format_with_commas(stats.total_bytes_included));
+    println!("  Tree-sitter languages: {}", supported_tree_sitter_languages().join(", "));
 
     // Directory tree with top-10 files highlighted
     let highlighted: HashSet<String> =

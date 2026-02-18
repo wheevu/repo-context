@@ -49,6 +49,7 @@ pub struct FileRanker {
 }
 
 impl FileRanker {
+    #[allow(dead_code)]
     pub fn new(root_path: &Path, scanned_files: HashSet<String>) -> Self {
         Self::with_weights(root_path, scanned_files, RankingWeights::default())
     }

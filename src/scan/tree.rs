@@ -41,6 +41,7 @@ pub fn generate_tree(
     Ok(lines.join("\n"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_tree(
     root_path: &Path,
     current_path: &Path,

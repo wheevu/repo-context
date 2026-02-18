@@ -76,14 +76,16 @@ mod tests {
 
     #[test]
     fn to_report_value_has_nested_files_skipped() {
-        let mut stats = ScanStats::default();
-        stats.files_scanned = 10;
-        stats.files_included = 7;
-        stats.files_skipped_binary = 1;
-        stats.files_skipped_extension = 2;
-        stats.files_skipped_gitignore = 3;
-        stats.files_skipped_glob = 4;
-        stats.files_skipped_size = 5;
+        let stats = ScanStats {
+            files_scanned: 10,
+            files_included: 7,
+            files_skipped_binary: 1,
+            files_skipped_extension: 2,
+            files_skipped_gitignore: 3,
+            files_skipped_glob: 4,
+            files_skipped_size: 5,
+            ..Default::default()
+        };
 
         let v = stats.to_report_value();
 

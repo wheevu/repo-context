@@ -28,7 +28,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Export a repository as an LLM-friendly context pack
-    Export(export::ExportArgs),
+    Export(Box<export::ExportArgs>),
 
     /// Display repository information without exporting
     Info(info::InfoArgs),
@@ -50,7 +50,7 @@ pub fn run() -> Result<()> {
         .try_init();
 
     match cli.command {
-        Commands::Export(args) => export::run(args),
+        Commands::Export(args) => export::run(*args),
         Commands::Info(args) => info::run(args),
     }
 }

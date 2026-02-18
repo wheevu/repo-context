@@ -11,6 +11,12 @@ pub fn supported_tree_sitter_languages() -> &'static [&'static str] {
     &["python", "rust", "javascript", "typescript", "go"]
 }
 
+impl Default for CodeChunker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CodeChunker {
     pub fn new() -> Self {
         Self

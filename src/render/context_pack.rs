@@ -143,6 +143,7 @@ pub fn render_context_pack(
     // Python groups into Documentation / Configuration / Entrypoints (5 per category).
     out.push_str("## 🔑 Key Files\n");
 
+    #[allow(clippy::type_complexity)]
     let categories: &[(&str, Box<dyn Fn(&&FileInfo) -> bool>)] = &[
         ("Documentation", Box::new(|f: &&FileInfo| f.is_doc)),
         ("Configuration", Box::new(|f: &&FileInfo| f.is_config)),

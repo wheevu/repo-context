@@ -5,6 +5,12 @@ use crate::utils::{estimate_tokens, stable_hash};
 
 pub struct LineChunker;
 
+impl Default for LineChunker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LineChunker {
     pub fn new() -> Self {
         Self

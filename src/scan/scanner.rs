@@ -162,11 +162,9 @@ impl FileScanner {
                 .parents(false)
                 .filter_entry(dir_filter);
             let mut count = 0usize;
-            for entry_result in raw_builder.build() {
-                if let Ok(entry) = entry_result {
-                    if !entry.path().is_dir() {
-                        count += 1;
-                    }
+            for entry in raw_builder.build().flatten() {
+                if !entry.path().is_dir() {
+                    count += 1;
                 }
             }
             count

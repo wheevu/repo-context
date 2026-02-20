@@ -270,7 +270,11 @@ fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
 
     #[cfg(windows)]
     {
-        let trimmed = decoded.strip_prefix('/').unwrap_or(&decoded);
+        let trimmed = if is_windows_drive_path(&decoded) {
+            decoded.strip_prefix('/').unwrap_or(&decoded)
+        } else {
+            &decoded
+        };
         Some(PathBuf::from(trimmed))
     }
 
@@ -278,6 +282,15 @@ fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
     {
         Some(PathBuf::from(decoded))
     }
+}
+
+#[cfg(windows)]
+fn is_windows_drive_path(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some('/'), Some(drive), Some(':')) if drive.is_ascii_alphabetic()
+    )
 }
 
 struct LspConnection {

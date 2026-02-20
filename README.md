@@ -30,6 +30,11 @@ It tries to keep the *important* stuff (READMEs, configs, entrypoints, core sour
 -   **Can clone remote repos** (GitHub / HuggingFace)
 -   **Optional secret redaction** (tokens/keys/password-y strings)
 -   **Task-aware retrieval** (`--task`) with symbol/dependency expansion
+-   **Two-phase retrieval** (BM25 + semantic rerank) with audit tags in output
+-   **Module thread stitching** with reserved token budget for related definitions/import-neighbors
+-   **PR-focused mode** (`--mode pr-context`) with Touch Points / Entrypoints / Invariants
+-   **SQLite symbol graph** export (`symbol_graph.db`) for local graph-aware workflows
+-   **Guardrails in context packs** (Claims Index + Missing Pieces heuristics)
 -   **Local index workflow** (`index` / `query`) + portable code-intel export (`codeintel`)
 
 ## Install
@@ -109,6 +114,7 @@ Outputs go to: `<output-dir>/<repo-name>/`
 -   `context_pack.md` — overview + tree + "key files" + chunked content
 -   `chunks.jsonl` — `{ id, path, lang, start_line, end_line, content, ... }`
 -   `report.json` — scan/export stats + skip reasons
+-   `symbol_graph.db` — persisted symbol/import graph (unless `--no-graph`)
 
 ## Configuration
 

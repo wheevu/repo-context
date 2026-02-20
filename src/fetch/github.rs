@@ -95,5 +95,5 @@ fn checkout_ref(repo: &Repository, reference: &str) -> Result<()> {
 fn build_temp_repo_dir() -> PathBuf {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let pid = std::process::id();
-    env::temp_dir().join(format!("repo-to-prompt-{pid}-{nanos}"))
+    env::temp_dir().join(format!("repo-context-{pid}-{nanos}"))
 }

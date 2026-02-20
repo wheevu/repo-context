@@ -437,16 +437,16 @@ mod tests {
         let tmp = TempDir::new().expect("tmp");
         fs::write(
             tmp.path().join("pyproject.toml"),
-            "[project.scripts]\nr2p='repo_to_prompt.cli:main'\n",
+            "[project.scripts]\nr2p='repo_context.cli:main'\n",
         )
         .expect("write pyproject");
-        fs::create_dir_all(tmp.path().join("repo_to_prompt")).expect("mkdir");
-        fs::write(tmp.path().join("repo_to_prompt/cli.py"), "print('x')\n").expect("write cli");
+        fs::create_dir_all(tmp.path().join("repo_context")).expect("mkdir");
+        fs::write(tmp.path().join("repo_context/cli.py"), "print('x')\n").expect("write cli");
 
-        let scanned = HashSet::from(["repo_to_prompt/cli.py".to_string()]);
+        let scanned = HashSet::from(["repo_context/cli.py".to_string()]);
         let ranker = FileRanker::new(tmp.path(), scanned);
 
-        assert!(ranker.get_entrypoints().contains("repo_to_prompt/cli.py"));
+        assert!(ranker.get_entrypoints().contains("repo_context/cli.py"));
     }
 
     #[test]

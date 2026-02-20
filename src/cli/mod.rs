@@ -1,4 +1,4 @@
-//! Command-line interface for repo-to-prompt
+//! Command-line interface for repo-context
 //!
 //! Provides `export`, `index`, and `info` subcommands.
 
@@ -16,7 +16,7 @@ mod utils;
 
 /// Convert repositories into LLM-friendly context packs
 #[derive(Parser)]
-#[command(name = "repo-to-prompt")]
+#[command(name = "repo-context")]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
 pub struct Cli {

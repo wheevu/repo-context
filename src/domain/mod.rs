@@ -16,6 +16,8 @@ pub enum OutputMode {
     Prompt,
     Rag,
     Contribution,
+    #[serde(rename = "pr-context")]
+    PrContext,
     #[default]
     Both,
 }
@@ -198,6 +200,10 @@ pub struct ScanStats {
     /// Rule -> number of files affected by the rule
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub redaction_file_counts: BTreeMap<String, usize>,
+
+    /// Number of chunks added by thread stitching.
+    #[serde(default)]
+    pub stitched_chunks: usize,
 }
 
 impl ScanStats {
@@ -237,6 +243,7 @@ impl ScanStats {
             "languages_detected":      languages_detected,
             "top_ignored_patterns":    top_ignored_patterns,
             "redaction_counts":        self.redaction_counts,
+            "stitched_chunks":         self.stitched_chunks,
             "processing_time_seconds": self.processing_time_seconds,
         });
 
@@ -610,7 +617,7 @@ where
     deserializer.deserialize_any(GlobsVisitor)
 }
 
-/// Main configuration for repo-to-prompt
+/// Main configuration for repo-context
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     // Input source
@@ -659,6 +666,26 @@ pub struct Config {
     /// Optional task description used for retrieval-driven reranking.
     #[serde(default)]
     pub task_query: Option<String>,
+
+    /// Enable second-stage semantic reranking over top-K chunks.
+    #[serde(default = "default_true")]
+    pub semantic_rerank: bool,
+
+    /// Number of top-ranked chunks to run through semantic reranking.
+    #[serde(default = "default_rerank_top_k")]
+    pub rerank_top_k: usize,
+
+    /// Semantic model identifier for retrieval.
+    #[serde(default)]
+    pub semantic_model: Option<String>,
+
+    /// Fraction of token budget reserved for stitched context.
+    #[serde(default = "default_stitch_budget_fraction")]
+    pub stitch_budget_fraction: f64,
+
+    /// Number of top chunks used as stitching seeds.
+    #[serde(default = "default_stitch_top_n")]
+    pub stitch_top_n: usize,
 
     // Chunking options
     #[serde(default = "default_chunk_tokens")]
@@ -714,6 +741,11 @@ impl Default for Config {
             skip_minified: true,
             max_tokens: None,
             task_query: None,
+            semantic_rerank: true,
+            rerank_top_k: default_rerank_top_k(),
+            semantic_model: None,
+            stitch_budget_fraction: default_stitch_budget_fraction(),
+            stitch_top_n: default_stitch_top_n(),
             chunk_tokens: default_chunk_tokens(),
             chunk_overlap: default_chunk_overlap(),
             min_chunk_tokens: default_min_chunk_tokens(),
@@ -744,6 +776,18 @@ fn default_max_total_bytes() -> u64 {
 
 fn default_chunk_tokens() -> usize {
     800
+}
+
+fn default_rerank_top_k() -> usize {
+    200
+}
+
+fn default_stitch_budget_fraction() -> f64 {
+    0.30
+}
+
+fn default_stitch_top_n() -> usize {
+    20
 }
 
 fn default_chunk_overlap() -> usize {

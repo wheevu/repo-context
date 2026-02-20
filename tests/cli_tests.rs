@@ -4,18 +4,19 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use rusqlite::Connection;
 use std::fs;
+use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
 #[test]
 fn test_cli_version() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.arg("--version");
-    cmd.assert().success().stdout(predicate::str::contains("repo-to-prompt"));
+    cmd.assert().success().stdout(predicate::str::contains("repo-context"));
 }
 
 #[test]
 fn test_cli_help() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.arg("--help");
     cmd.assert()
         .success()
@@ -29,7 +30,7 @@ fn test_cli_help() {
 
 #[test]
 fn test_export_requires_path_or_repo() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.arg("export");
     cmd.assert()
         .failure()
@@ -38,7 +39,7 @@ fn test_export_requires_path_or_repo() {
 
 #[test]
 fn test_export_rejects_both_path_and_repo() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.args(["export", "--path", ".", "--repo", "https://github.com/test/test"]);
     cmd.assert()
         .failure()
@@ -47,14 +48,14 @@ fn test_export_rejects_both_path_and_repo() {
 
 #[test]
 fn test_export_rejects_invalid_redaction_mode() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.args(["export", "--path", ".", "--redaction-mode", "invalid"]);
     cmd.assert().failure().stderr(predicate::str::contains("Invalid redaction mode"));
 }
 
 #[test]
 fn test_info_reports_tree_sitter_capabilities() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.args(["info", "."]);
     cmd.assert().success().stdout(predicate::str::contains("Statistics:"));
 }
@@ -62,7 +63,7 @@ fn test_info_reports_tree_sitter_capabilities() {
 #[test]
 fn test_export_accepts_contribution_mode() {
     let out = TempDir::new().expect("temp out dir");
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.args([
         "export",
         "--path",
@@ -92,7 +93,7 @@ fn test_index_creates_sqlite_database_with_symbols() {
     .expect("write test file");
 
     let db_path = repo.path().join("index.sqlite");
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.args([
         "index",
         "--path",
@@ -106,7 +107,7 @@ fn test_index_creates_sqlite_database_with_symbols() {
     ]);
     cmd.assert().success().stdout(predicate::str::contains("Index created at"));
 
-    let mut cmd_again = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd_again = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd_again.args([
         "index",
         "--path",
@@ -134,7 +135,7 @@ fn test_index_creates_sqlite_database_with_symbols() {
         .expect("count symbols");
     assert!(symbol_count >= 1);
 
-    let mut query_cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut query_cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     query_cmd.args([
         "query",
         "--db",
@@ -151,7 +152,7 @@ fn test_index_creates_sqlite_database_with_symbols() {
         .stdout(predicate::str::contains("src/auth.py"));
 
     let out_path = repo.path().join("codeintel.json");
-    let mut codeintel_cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut codeintel_cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     codeintel_cmd.args([
         "codeintel",
         "--db",
@@ -185,4 +186,90 @@ fn test_index_creates_sqlite_database_with_symbols() {
         .unwrap_or(false));
     assert!(doc.get("symbol_links").and_then(|v| v.as_array()).is_some());
     assert!(doc.get("stats").and_then(|v| v.as_object()).is_some());
+}
+
+#[test]
+fn test_index_lsp_creates_symbol_edges_when_available() {
+    if !rust_analyzer_available() {
+        eprintln!("skipping LSP integration test: rust-analyzer not available");
+        return;
+    }
+
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::create_dir_all(repo.path().join("src")).expect("mkdir src");
+    fs::create_dir_all(repo.path().join("tests")).expect("mkdir tests");
+    fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"lsp-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+    )
+    .expect("write cargo manifest");
+    fs::write(repo.path().join("src/lib.rs"), "pub mod auth;\npub mod handler;\n")
+        .expect("write lib.rs");
+    fs::write(
+        repo.path().join("src/auth.rs"),
+        "pub fn refresh_token(user: &str) -> String {\n    user.to_string()\n}\n",
+    )
+    .expect("write auth.rs");
+    fs::write(
+        repo.path().join("src/handler.rs"),
+        "use crate::auth::refresh_token;\n\npub fn handle(user: &str) -> String {\n    refresh_token(user)\n}\n",
+    )
+    .expect("write handler.rs");
+    fs::write(
+        repo.path().join("tests/auth_test.rs"),
+        "use lsp_fixture::handler::handle;\n\n#[test]\nfn test_handle() {\n    assert_eq!(handle(\"x\"), \"x\");\n}\n",
+    )
+    .expect("write integration test");
+
+    let db_path = repo.path().join("index.sqlite");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "index",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--db",
+        db_path.to_str().expect("utf8 db path"),
+        "--lsp",
+        "--chunk-tokens",
+        "64",
+        "--chunk-overlap",
+        "8",
+    ]);
+    cmd.assert().success().stdout(predicate::str::contains("lsp edges indexed:"));
+
+    let conn = Connection::open(&db_path).expect("open sqlite");
+    let symbol_edges_table: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='symbol_edges'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("symbol_edges table exists");
+    assert_eq!(symbol_edges_table, 1);
+
+    let invalid_edge_kinds: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM symbol_edges WHERE kind NOT IN ('ref', 'call', 'test', 'import')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("edge kinds check");
+    assert_eq!(invalid_edge_kinds, 0);
+
+    let indexed_mtime_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE extension = '.rs' AND mtime IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("mtime count");
+    assert!(indexed_mtime_count >= 3);
+}
+
+fn rust_analyzer_available() -> bool {
+    StdCommand::new("rust-analyzer")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
 }

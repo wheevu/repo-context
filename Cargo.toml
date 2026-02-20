@@ -1,21 +1,21 @@
 [package]
-name = "repo-to-prompt"
+name = "repo-context"
 version = "0.2.0"
 edition = "2021"
-authors = ["Repo-to-Prompt Contributors"]
+authors = ["Repo-Context Contributors"]
 license = "MIT"
 description = "Convert repositories into LLM-friendly context packs for prompting and RAG"
-repository = "https://github.com/wheevu/repo-to-prompt"
+repository = "https://github.com/wheevu/repo-context"
 keywords = ["llm", "rag", "repository", "context", "prompt"]
 categories = ["command-line-utilities", "text-processing"]
 readme = "README.md"
 
 [lib]
-name = "repo_to_prompt"
+name = "repo_context"
 path = "src/lib.rs"
 
 [[bin]]
-name = "repo-to-prompt"
+name = "repo-context"
 path = "src/main.rs"
 
 [dependencies]

@@ -12,7 +12,7 @@ use crate::lsp::rust_analyzer;
 #[derive(Args)]
 pub struct QueryArgs {
     /// SQLite index database path
-    #[arg(long, value_name = "FILE", default_value = ".repo-to-prompt/index.sqlite")]
+    #[arg(long, value_name = "FILE", default_value = ".repo-context/index.sqlite")]
     pub db: PathBuf,
 
     /// Task query text
@@ -26,6 +26,10 @@ pub struct QueryArgs {
     /// Optional LSP backend for Rust symbol discovery
     #[arg(long, value_name = "MODE", default_value = "auto")]
     pub lsp_backend: LspBackend,
+
+    /// Expand results into definition/callers/tests/docs sections
+    #[arg(long)]
+    pub expand: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -46,7 +50,7 @@ pub fn run(args: QueryArgs) -> Result<()> {
     )?;
     if has_chunks == 0 {
         anyhow::bail!(
-            "Index schema not found in {}. Run `repo-to-prompt index` first.",
+            "Index schema not found in {}. Run `repo-context index` first.",
             args.db.display()
         );
     }
@@ -144,6 +148,12 @@ pub fn run(args: QueryArgs) -> Result<()> {
 
     if rows.is_empty() {
         println!("No matches found. Try broadening the query.");
+        return Ok(());
+    }
+
+    if args.expand {
+        let expanded = expand_symbol_context(&conn, &tokens, &rows, args.limit)?;
+        print_expanded_results(&args.task, &expanded);
         return Ok(());
     }
 
@@ -379,10 +389,252 @@ fn summarize(content: &str) -> String {
     out
 }
 
+#[derive(Default)]
+struct ExpandedContext {
+    definitions: Vec<SearchRow>,
+    callers: Vec<SearchRow>,
+    tests: Vec<SearchRow>,
+    config_docs: Vec<SearchRow>,
+}
+
+fn expand_symbol_context(
+    conn: &Connection,
+    tokens: &[String],
+    ranked_rows: &[SearchRow],
+    limit: usize,
+) -> Result<ExpandedContext> {
+    let mut out = ExpandedContext::default();
+    let symbols = matched_symbols(conn, tokens)?;
+    if symbols.is_empty() {
+        out.definitions = ranked_rows.iter().take(limit.max(1)).cloned().collect();
+        return Ok(out);
+    }
+
+    let definition_rows = fetch_definition_chunks(conn, &symbols, limit.max(1))?;
+    let def_chunk_ids: Vec<String> = definition_rows.iter().map(|r| r.chunk_id.clone()).collect();
+    out.definitions = definition_rows;
+
+    let edges_available = table_exists(conn, "symbol_edges")?;
+    if edges_available && !def_chunk_ids.is_empty() {
+        out.callers =
+            fetch_edge_chunks(conn, &def_chunk_ids, &["ref", "call", "import"], limit.max(1))?;
+        out.tests = fetch_edge_chunks(conn, &def_chunk_ids, &["test"], limit.max(1))?;
+    }
+
+    if out.callers.is_empty() {
+        out.callers = ranked_rows.iter().take(limit.max(1)).cloned().collect();
+    }
+
+    if out.tests.is_empty() {
+        let terms: HashSet<String> = symbols.into_iter().collect();
+        out.tests = related_test_chunks(conn, &terms, limit.max(1))?;
+    }
+
+    out.config_docs = fetch_config_doc_chunks(conn, limit.max(1))?;
+
+    if out.definitions.is_empty() {
+        out.definitions = ranked_rows.iter().take(limit.max(1)).cloned().collect();
+    }
+
+    Ok(out)
+}
+
+fn print_expanded_results(task: &str, expanded: &ExpandedContext) {
+    println!("Expanded matches for task: {task}");
+    print_section("Definition", &expanded.definitions);
+    print_section("Top Callers", &expanded.callers);
+    print_section("Related Tests", &expanded.tests);
+    print_section("Config / Docs", &expanded.config_docs);
+}
+
+fn print_section(title: &str, rows: &[SearchRow]) {
+    println!("\n== {title} ==");
+    if rows.is_empty() {
+        println!("- none");
+        return;
+    }
+
+    for row in rows {
+        println!("- {}:{}-{} (score {:.3})", row.path, row.start_line, row.end_line, row.score);
+        println!("  {}", summarize(&row.content));
+    }
+}
+
+fn matched_symbols(conn: &Connection, tokens: &[String]) -> Result<Vec<String>> {
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut symbols = BTreeSet::new();
+    let mut stmt = conn.prepare("SELECT DISTINCT symbol FROM symbols WHERE symbol = ?1")?;
+    for token in tokens {
+        let rows = stmt.query_map(params![token], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            symbols.insert(row?);
+        }
+    }
+
+    Ok(symbols.into_iter().collect())
+}
+
+fn fetch_definition_chunks(
+    conn: &Connection,
+    symbols: &[String],
+    limit: usize,
+) -> Result<Vec<SearchRow>> {
+    if symbols.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stmt = conn.prepare(
+        "
+        SELECT c.id, c.file_path, c.start_line, c.end_line, c.content, c.priority
+        FROM symbols s
+        JOIN chunks c ON c.id = s.chunk_id
+        WHERE s.symbol = ?1 AND s.kind = 'def'
+        ORDER BY c.priority DESC, c.start_line ASC
+        LIMIT ?2
+        ",
+    )?;
+
+    for symbol in symbols {
+        let rows = stmt.query_map(params![symbol, limit as i64], |row| {
+            Ok(SearchRow {
+                chunk_id: row.get(0)?,
+                path: row.get(1)?,
+                start_line: row.get::<_, i64>(2)? as usize,
+                end_line: row.get::<_, i64>(3)? as usize,
+                content: row.get(4)?,
+                score: row.get(5)?,
+            })
+        })?;
+
+        for row in rows {
+            let row = row?;
+            if seen.insert(row.chunk_id.clone()) {
+                out.push(row);
+            }
+        }
+    }
+
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.start_line.cmp(&b.start_line))
+    });
+    out.truncate(limit);
+    Ok(out)
+}
+
+fn fetch_edge_chunks(
+    conn: &Connection,
+    def_chunk_ids: &[String],
+    kinds: &[&str],
+    limit: usize,
+) -> Result<Vec<SearchRow>> {
+    if def_chunk_ids.is_empty() || kinds.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut rows_out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stmt = conn.prepare(
+        "
+        SELECT c.id, c.file_path, c.start_line, c.end_line, c.content, c.priority
+        FROM symbol_edges e
+        JOIN chunks c ON c.id = e.to_chunk_id
+        WHERE e.from_chunk_id = ?1 AND e.kind = ?2
+        ORDER BY c.priority DESC, c.start_line ASC
+        LIMIT ?3
+        ",
+    )?;
+
+    for def_id in def_chunk_ids {
+        for kind in kinds {
+            let rows = stmt.query_map(params![def_id, kind, limit as i64], |row| {
+                Ok(SearchRow {
+                    chunk_id: row.get(0)?,
+                    path: row.get(1)?,
+                    start_line: row.get::<_, i64>(2)? as usize,
+                    end_line: row.get::<_, i64>(3)? as usize,
+                    content: row.get(4)?,
+                    score: 0.6_f64.max(row.get::<_, f64>(5)? * 0.9),
+                })
+            })?;
+
+            for row in rows {
+                let row = row?;
+                if seen.insert(row.chunk_id.clone()) {
+                    rows_out.push(row);
+                }
+            }
+        }
+    }
+
+    rows_out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.start_line.cmp(&b.start_line))
+    });
+    rows_out.truncate(limit);
+    Ok(rows_out)
+}
+
+fn fetch_config_doc_chunks(conn: &Connection, limit: usize) -> Result<Vec<SearchRow>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT c.id, c.file_path, c.start_line, c.end_line, c.content, c.priority
+        FROM chunks c
+        JOIN files f ON f.path = c.file_path
+        WHERE f.priority >= 0.9
+           OR c.file_path LIKE 'README%'
+           OR c.file_path LIKE 'docs/%'
+           OR c.file_path LIKE '%.md'
+           OR c.file_path LIKE '%.toml'
+           OR c.file_path LIKE '.github/%'
+        ORDER BY c.priority DESC, c.start_line ASC
+        LIMIT ?1
+        ",
+    )?;
+
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok(SearchRow {
+            chunk_id: row.get(0)?,
+            path: row.get(1)?,
+            start_line: row.get::<_, i64>(2)? as usize,
+            end_line: row.get::<_, i64>(3)? as usize,
+            content: row.get(4)?,
+            score: row.get(5)?,
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        params![name],
+        |row| row.get(0),
+    )?;
+    Ok(exists > 0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::symbol_query_terms;
+    use super::{expand_symbol_context, symbol_query_terms, SearchRow};
     use crate::lsp::rust_analyzer::WorkspaceSymbol;
+    use rusqlite::Connection;
     use std::collections::HashSet;
 
     #[test]
@@ -400,5 +652,101 @@ mod tests {
         for term in expected {
             assert!(terms.contains(&term));
         }
+    }
+
+    #[test]
+    fn expand_context_uses_definition_and_edges() {
+        let conn = Connection::open_in_memory().expect("sqlite in-memory db");
+        conn.execute_batch(
+            "
+            CREATE TABLE files (
+                path TEXT PRIMARY KEY,
+                language TEXT NOT NULL,
+                extension TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                priority REAL NOT NULL,
+                token_estimate INTEGER NOT NULL,
+                file_hash TEXT NOT NULL,
+                indexed_at TEXT NOT NULL,
+                mtime INTEGER
+            );
+            CREATE TABLE chunks (
+                id TEXT PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                language TEXT NOT NULL,
+                priority REAL NOT NULL,
+                token_estimate INTEGER NOT NULL,
+                tags_json TEXT NOT NULL,
+                content TEXT NOT NULL
+            );
+            CREATE TABLE symbols (
+                symbol TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                chunk_id TEXT NOT NULL
+            );
+            CREATE TABLE symbol_edges (
+                from_chunk_id TEXT NOT NULL,
+                to_chunk_id TEXT NOT NULL,
+                kind TEXT NOT NULL
+            );
+            ",
+        )
+        .expect("schema");
+
+        conn.execute(
+            "INSERT INTO files (path, language, extension, size_bytes, priority, token_estimate, file_hash, indexed_at, mtime)
+             VALUES (?1, 'rust', '.rs', 10, 0.9, 5, 'a', 'now', 0)",
+            ["src/auth.rs"],
+        )
+        .expect("insert file");
+        conn.execute(
+            "INSERT INTO files (path, language, extension, size_bytes, priority, token_estimate, file_hash, indexed_at, mtime)
+             VALUES (?1, 'rust', '.rs', 10, 0.5, 5, 'b', 'now', 0)",
+            ["src/handler.rs"],
+        )
+        .expect("insert file 2");
+        conn.execute(
+            "INSERT INTO chunks (id, file_path, start_line, end_line, language, priority, token_estimate, tags_json, content)
+             VALUES ('def1', 'src/auth.rs', 1, 20, 'rust', 0.95, 20, '{}', 'fn refresh_token() {}')",
+            [],
+        )
+        .expect("insert def chunk");
+        conn.execute(
+            "INSERT INTO chunks (id, file_path, start_line, end_line, language, priority, token_estimate, tags_json, content)
+             VALUES ('call1', 'src/handler.rs', 1, 20, 'rust', 0.60, 20, '{}', 'refresh_token();')",
+            [],
+        )
+        .expect("insert caller chunk");
+        conn.execute(
+            "INSERT INTO symbols (symbol, kind, file_path, chunk_id)
+             VALUES ('refresh_token', 'def', 'src/auth.rs', 'def1')",
+            [],
+        )
+        .expect("insert symbol");
+        conn.execute(
+            "INSERT INTO symbol_edges (from_chunk_id, to_chunk_id, kind)
+             VALUES ('def1', 'call1', 'call')",
+            [],
+        )
+        .expect("insert edge");
+
+        let tokens = vec!["refresh_token".to_string()];
+        let ranked = vec![SearchRow {
+            chunk_id: "fallback".to_string(),
+            path: "src/fallback.rs".to_string(),
+            start_line: 1,
+            end_line: 1,
+            content: "fallback".to_string(),
+            score: 0.1,
+        }];
+
+        let expanded = expand_symbol_context(&conn, &tokens, &ranked, 5).expect("expanded");
+        assert_eq!(expanded.definitions.len(), 1);
+        assert_eq!(expanded.definitions[0].chunk_id, "def1");
+        assert_eq!(expanded.callers.len(), 1);
+        assert_eq!(expanded.callers[0].chunk_id, "call1");
     }
 }

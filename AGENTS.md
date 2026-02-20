@@ -1,10 +1,10 @@
-# Agent Guide for repo-to-prompt
+# Agent Guide for repo-context
 
-This guide is for AI coding agents working in the `repo-to-prompt` codebase. It contains build commands, code style conventions, and project-specific guidelines.
+This guide is for AI coding agents working in the `repo-context` codebase. It contains build commands, code style conventions, and project-specific guidelines.
 
 ## Project Overview
 
-**repo-to-prompt** is a Rust CLI tool that converts code repositories into LLM-friendly context packs for prompting and RAG (Retrieval-Augmented Generation) workflows.
+**repo-context** is a Rust CLI tool that converts code repositories into LLM-friendly context packs for prompting and RAG (Retrieval-Augmented Generation) workflows.
 
 - **Language**: Rust (edition 2021)
 - **Build System**: Cargo
@@ -26,7 +26,7 @@ cargo build
 
 # Build optimized release binary
 cargo build --release
-# Binary: target/release/repo-to-prompt
+# Binary: target/release/repo-context
 
 # Install to ~/.cargo/bin
 cargo install --path .
@@ -266,7 +266,7 @@ All other languages fall back to the line-based chunker. Java and Kotlin have ex
 ## Project Structure
 
 ```
-repo-to-prompt/
+repo-context/
 ├── src/
 │   ├── main.rs              # Binary entry point
 │   ├── lib.rs               # Library entry point (re-exports modules)

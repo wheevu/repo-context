@@ -105,8 +105,13 @@ expression: normalized_report
     "redact_secrets": true,
     "ref": null,
     "repo": null,
+    "rerank_top_k": 200,
     "reranking": null,
+    "semantic_model": null,
+    "semantic_rerank": true,
     "skip_minified": true,
+    "stitch_budget_fraction": 0.3,
+    "stitch_top_n": 20,
     "task_query": null,
     "tree_depth": 4
   },
@@ -144,7 +149,8 @@ expression: normalized_report
   ],
   "output_files": [
     "/<OUTPUT_DIR>/chunks.jsonl",
-    "/<OUTPUT_DIR>/context_pack.md"
+    "/<OUTPUT_DIR>/context_pack.md",
+    "/<OUTPUT_DIR>/symbol_graph.db"
   ],
   "schema_version": "1.0.0",
   "stats": {
@@ -170,6 +176,7 @@ expression: normalized_report
     "redaction_counts": {
       "openai_key": 1
     },
+    "stitched_chunks": 0,
     "top_ignored_patterns": {},
     "total_bytes_included": 386,
     "total_bytes_scanned": 386,

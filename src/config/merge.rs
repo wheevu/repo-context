@@ -18,6 +18,11 @@ pub struct CliOverrides {
     pub skip_minified: Option<bool>,
     pub max_tokens: Option<usize>,
     pub task_query: Option<String>,
+    pub semantic_rerank: Option<bool>,
+    pub rerank_top_k: Option<usize>,
+    pub semantic_model: Option<String>,
+    pub stitch_budget_fraction: Option<f64>,
+    pub stitch_top_n: Option<usize>,
     pub chunk_tokens: Option<usize>,
     pub chunk_overlap: Option<usize>,
     pub min_chunk_tokens: Option<usize>,
@@ -69,6 +74,21 @@ pub fn merge_cli_with_config(mut base_config: Config, cli: CliOverrides) -> Conf
     }
     if let Some(task_query) = cli.task_query {
         base_config.task_query = Some(task_query);
+    }
+    if let Some(semantic_rerank) = cli.semantic_rerank {
+        base_config.semantic_rerank = semantic_rerank;
+    }
+    if let Some(rerank_top_k) = cli.rerank_top_k {
+        base_config.rerank_top_k = rerank_top_k;
+    }
+    if let Some(semantic_model) = cli.semantic_model {
+        base_config.semantic_model = Some(semantic_model);
+    }
+    if let Some(stitch_budget_fraction) = cli.stitch_budget_fraction {
+        base_config.stitch_budget_fraction = stitch_budget_fraction;
+    }
+    if let Some(stitch_top_n) = cli.stitch_top_n {
+        base_config.stitch_top_n = stitch_top_n;
     }
     if let Some(chunk_tokens) = cli.chunk_tokens {
         base_config.chunk_tokens = chunk_tokens;

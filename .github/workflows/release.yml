@@ -18,28 +18,28 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            artifact: repo-to-prompt-linux-x86_64
-            binary: repo-to-prompt
+            artifact: repo-context-linux-x86_64
+            binary: repo-context
 
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            artifact: repo-to-prompt-linux-aarch64
-            binary: repo-to-prompt
+            artifact: repo-context-linux-aarch64
+            binary: repo-context
 
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: repo-to-prompt-macos-x86_64
-            binary: repo-to-prompt
+            artifact: repo-context-macos-x86_64
+            binary: repo-context
 
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: repo-to-prompt-macos-aarch64
-            binary: repo-to-prompt
+            artifact: repo-context-macos-aarch64
+            binary: repo-context
 
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact: repo-to-prompt-windows-x86_64
-            binary: repo-to-prompt.exe
+            artifact: repo-context-windows-x86_64
+            binary: repo-context.exe
 
     steps:
       - uses: actions/checkout@v4

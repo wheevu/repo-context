@@ -13,7 +13,7 @@ fn golden_export_outputs_are_stable() {
     let out = TempDir::new().expect("temp out");
     let output_dir = out.path().join("export");
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.args([
         "export",
         "--path",

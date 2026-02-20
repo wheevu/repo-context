@@ -1,14 +1,14 @@
-# repo-to-prompt
+# repo-context
 
-*(Was previously Python, which was okay 👍. But now the thing's charged with the Speed Force 🏃🏻💨⚡️)*
+*(Was previously Python, which was okay. But now the thing's charged with the Speed Force)*
 
-Turn a code repository into a tidy “context pack” you can paste into an LLM — or feed into a RAG pipeline.
+Turn a code repository into a tidy "context pack" you can paste into an LLM — or feed into a RAG pipeline.
 
-[![CI](https://github.com/wheevu/repo-to-prompt/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wheevu/repo-to-prompt/actions/workflows/ci.yml)
+[![CI](https://github.com/wheevu/repo-context/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wheevu/repo-context/actions/workflows/ci.yml)
 
 ## What it does
 
-`repo-to-prompt` scans a repository and exports **high-signal text bundles**:
+`repo-context` scans a repository and exports **high-signal text bundles**:
 
 -   **`context_pack.md`** — a structured markdown doc you can paste into ChatGPT/Claude/etc.
 -   **`chunks.jsonl`** — one chunk per line (great for embeddings + retrieval)
@@ -16,9 +16,9 @@ Turn a code repository into a tidy “context pack” you can paste into an LLM 
 
 It tries to keep the *important* stuff (READMEs, configs, entrypoints, core source) and skip the noise (generated files, vendor folders, giant binaries).
 
-## Why you’d use it
+## Why you'd use it
 
--   You want an LLM to help with a repo **without** dumping your whole codebase into chat. 🫩
+-   You want an LLM to help with a repo **without** dumping your whole codebase into chat.
 -   You want **repeatable** outputs (stable ordering + stable chunk IDs).
 -   You want basic protection against accidentally leaking secrets (optional redaction).
 
@@ -36,15 +36,15 @@ It tries to keep the *important* stuff (READMEs, configs, entrypoints, core sour
 
 ### Pre-built binaries (recommended)
 
-Grab the latest release from the GitHub Releases page and put `repo-to-prompt` somewhere on your `PATH`.
+Grab the latest release from the GitHub Releases page and put `repo-context` somewhere on your `PATH`.
 
 ### Build from source
 
 ```bash
-git clone https://github.com/wheevu/repo-to-prompt.git
-cd repo-to-prompt
+git clone https://github.com/wheevu/repo-context.git
+cd repo-context
 cargo build --release
-# The binary will be at: target/release/repo-to-prompt
+# The binary will be at: target/release/repo-context
 
 # Or install to ~/.cargo/bin
 cargo install --path .
@@ -54,51 +54,51 @@ cargo install --path .
 
 Export a local repo:
 ```bash
-repo-to-prompt export --path .
+repo-context export --path .
 ```
 
 Export from a remote repo:
 ```bash
-repo-to-prompt export --repo https://github.com/owner/repo
+repo-context export --repo https://github.com/owner/repo
 ```
 
 Just show stats (no output files):
 ```bash
-repo-to-prompt info .
+repo-context info .
 ```
 
 Build a local retrieval index once:
 ```bash
-repo-to-prompt index --path .
+repo-context index --path .
 ```
 
 Query the local index:
 ```bash
-repo-to-prompt query --task "where is auth token refresh handled?"
+repo-context query --task "where is auth token refresh handled?"
 ```
 
 Export portable code-intel JSON:
 ```bash
-repo-to-prompt codeintel
+repo-context codeintel
 ```
 
 ## Common recipes
 
-**“Small + high signal” export**
+**"Small + high signal" export**
 ```bash
-repo-to-prompt export -p . \
+repo-context export -p . \
   --include-ext ".rs,.toml,.md" \
   --exclude-glob "tests/**,target/**"
 ```
 
 **RAG-only output to a custom folder**
 ```bash
-repo-to-prompt export -p . --mode rag -o ./embeddings
+repo-context export -p . --mode rag -o ./embeddings
 ```
 
 **Reproducible output (nice for diffs)**
 ```bash
-repo-to-prompt export -p . --no-timestamp
+repo-context export -p . --no-timestamp
 ```
 
 ## Output (what you get)
@@ -106,14 +106,14 @@ repo-to-prompt export -p . --no-timestamp
 Outputs go to: `<output-dir>/<repo-name>/`
 
 **Files:**
--   `context_pack.md` — overview + tree + “key files” + chunked content
+-   `context_pack.md` — overview + tree + "key files" + chunked content
 -   `chunks.jsonl` — `{ id, path, lang, start_line, end_line, content, ... }`
 -   `report.json` — scan/export stats + skip reasons
 
 ## Configuration
 
 By default, it looks for one of these files in the repository root:
--   `repo-to-prompt.toml`, `.repo-to-prompt.toml`
+-   `repo-context.toml`, `.repo-context.toml`
 -   `r2p.toml`, `.r2p.toml`
 -   `r2p.yml`/`.yaml`, `.r2p.yml`/`.yaml`
 
@@ -123,7 +123,7 @@ CLI flags override config values.
 <summary>Example config (`r2p.toml`)</summary>
 
 ```toml
-[repo-to-prompt]
+[repo-context]
 include_extensions = [".rs", ".toml", ".md"]
 exclude_globs      = ["tests/**", "target/**"]
 chunk_tokens       = 800
@@ -139,7 +139,7 @@ redact_secrets     = true
 
 ## Secret redaction (optional)
 
-By default, `repo-to-prompt` can detect and replace common secrets with placeholders like:
+By default, `repo-context` can detect and replace common secrets with placeholders like:
 `[AWS_ACCESS_KEY_REDACTED]`
 
 You can also allowlist paths/strings or add your own patterns via config.

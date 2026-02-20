@@ -32,6 +32,23 @@ pub struct WorkspaceAnalysis {
     pub reference_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SymbolSeed {
+    pub chunk_id: String,
+    pub symbol: String,
+    pub path: String,
+    pub line: u32,
+    pub character: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SymbolReference {
+    pub from_chunk_id: String,
+    pub symbol: String,
+    pub path: String,
+    pub line: u32,
+}
+
 pub fn analyze_workspace_symbols(
     root: &Path,
     query: &str,
@@ -110,6 +127,88 @@ pub fn analyze_workspace_symbols(
     let _ = conn.notify("exit", json!(null));
 
     Ok(WorkspaceAnalysis { symbols, reference_paths })
+}
+
+pub fn analyze_symbol_references(
+    root: &Path,
+    seeds: &[SymbolSeed],
+    max_symbols: usize,
+    max_refs_per_symbol: usize,
+) -> Result<Vec<SymbolReference>> {
+    if !is_available() {
+        anyhow::bail!("rust-analyzer is not available in PATH");
+    }
+
+    if seeds.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut conn = LspConnection::spawn("rust-analyzer")?;
+
+    let root_uri = file_uri(root)?;
+    let init = json!({
+        "processId": null,
+        "rootUri": root_uri,
+        "capabilities": {},
+        "trace": "off",
+    });
+    let _ = conn.request("initialize", init)?;
+    conn.notify("initialized", json!({}))?;
+
+    let mut refs = BTreeSet::new();
+    for seed in seeds.iter().take(max_symbols.max(1)) {
+        let uri = match file_uri(&root.join(&seed.path)) {
+            Ok(uri) => uri,
+            Err(_) => continue,
+        };
+        let params = json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": seed.line, "character": seed.character },
+            "context": { "includeDeclaration": true }
+        });
+
+        let response = conn.request("textDocument/references", params)?;
+        let Some(items) = response.as_array() else {
+            continue;
+        };
+
+        for item in items.iter().take(max_refs_per_symbol.max(1)) {
+            let Some(uri) = item.get("uri").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(path) = file_uri_to_path(uri) else {
+                continue;
+            };
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            let rel_s = rel.to_string_lossy().replace('\\', "/");
+            if !rel_s.ends_with(".rs") {
+                continue;
+            }
+
+            let line = item
+                .get("range")
+                .and_then(|r| r.get("start"))
+                .and_then(|s| s.get("line"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32;
+            refs.insert((seed.chunk_id.clone(), seed.symbol.to_ascii_lowercase(), rel_s, line));
+        }
+    }
+
+    let _ = conn.request("shutdown", json!(null));
+    let _ = conn.notify("exit", json!(null));
+
+    Ok(refs
+        .into_iter()
+        .map(|(from_chunk_id, symbol, path, line)| SymbolReference {
+            from_chunk_id,
+            symbol,
+            path,
+            line,
+        })
+        .collect())
 }
 
 fn reference_paths(

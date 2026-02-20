@@ -88,7 +88,7 @@ fn export_task_reranking_is_recorded_in_report() {
     let out_base = TempDir::new().expect("temp out");
     let out = out_base.path().join("out");
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.args([
         "export",
         "--path",
@@ -108,11 +108,12 @@ fn export_task_reranking_is_recorded_in_report() {
     let report: serde_json::Value = serde_json::from_str(&report_raw).expect("parse report");
 
     assert_eq!(report["config"]["task_query"], serde_json::json!("guide documentation"));
-    assert_eq!(report["config"]["reranking"], serde_json::json!("bm25+deps"));
+    let mode = report["config"]["reranking"].as_str().unwrap_or_default();
+    assert!(mode.starts_with("bm25+"), "unexpected reranking mode: {mode}");
 }
 
 fn run_export(repo_root: &Path, output_dir: &Path) {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.args([
         "export",
         "--path",
@@ -200,7 +201,7 @@ fn byte_budget_breaks_on_limit_and_drops_all_remaining() {
     // makes total=201 >= 10 on the next iteration... Let's use budget=5 to drop large and small2.
     // With budget=5: small.py size=6, total=0 < 5 so accepted, total becomes 6. large.py:
     // total=6 >= 5, so bulk-drop large.py + small2.py and break.
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-to-prompt"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.args([
         "export",
         "--path",

@@ -140,7 +140,7 @@ fn checkout_ref(repo: &Repository, reference: &str) -> Result<()> {
 fn build_temp_repo_dir(repo_name: &str) -> PathBuf {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let pid = std::process::id();
-    env::temp_dir().join(format!("repo-to-prompt-hf-{repo_name}-{pid}-{nanos}"))
+    env::temp_dir().join(format!("repo-context-hf-{repo_name}-{pid}-{nanos}"))
 }
 
 #[cfg(test)]

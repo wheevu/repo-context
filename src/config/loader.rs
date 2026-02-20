@@ -73,7 +73,7 @@ pub fn load_config(repo_root: &Path, config_path: Option<&Path>) -> Result<Confi
     Ok(parsed)
 }
 
-/// Parse TOML config, supporting nested [repo-to-prompt] or [r2p] sections.
+/// Parse TOML config, supporting nested [repo-context] or [r2p] sections.
 ///
 /// Matches Python's _parse_toml behavior (lines 262-267).
 fn parse_toml_config(content: &str, config_file: &Path) -> Result<Config> {
@@ -82,7 +82,8 @@ fn parse_toml_config(content: &str, config_file: &Path) -> Result<Config> {
         .with_context(|| format!("Invalid TOML syntax: {}", config_file.display()))?;
 
     // Check for nested section (Python lines 263-266)
-    let config_val = if let Some(nested) = raw.get("repo-to-prompt") {
+    // Prefer repo-context, then r2p.
+    let config_val = if let Some(nested) = raw.get("repo-context") {
         nested.clone()
     } else if let Some(nested) = raw.get("r2p") {
         nested.clone()
@@ -94,7 +95,7 @@ fn parse_toml_config(content: &str, config_file: &Path) -> Result<Config> {
     config_val.try_into().with_context(|| format!("Invalid TOML config: {}", config_file.display()))
 }
 
-/// Parse YAML config, supporting nested repo-to-prompt or r2p sections.
+/// Parse YAML config, supporting nested repo-context or r2p sections.
 ///
 /// Matches Python's _parse_yaml behavior (lines 295-300).
 fn parse_yaml_config(content: &str, config_file: &Path) -> Result<Config> {
@@ -103,7 +104,8 @@ fn parse_yaml_config(content: &str, config_file: &Path) -> Result<Config> {
         .with_context(|| format!("Invalid YAML syntax: {}", config_file.display()))?;
 
     // Check for nested section (Python lines 296-299)
-    let config_val = if let Some(nested) = raw.get("repo-to-prompt") {
+    // Prefer repo-context, then r2p.
+    let config_val = if let Some(nested) = raw.get("repo-context") {
         nested.clone()
     } else if let Some(nested) = raw.get("r2p") {
         nested.clone()
@@ -118,8 +120,10 @@ fn parse_yaml_config(content: &str, config_file: &Path) -> Result<Config> {
 
 fn discover_config(repo_root: &Path) -> Option<std::path::PathBuf> {
     let candidates = [
-        "repo-to-prompt.toml",
-        ".repo-to-prompt.toml",
+        // New names (preferred)
+        "repo-context.toml",
+        ".repo-context.toml",
+        // Short names
         "r2p.toml",
         ".r2p.toml",
         "r2p.yml",
@@ -155,7 +159,7 @@ mod tests {
     #[test]
     fn test_load_toml_config() {
         let tmp = TempDir::new().expect("tmp");
-        let path = tmp.path().join("repo-to-prompt.toml");
+        let path = tmp.path().join("repo-context.toml");
         fs::write(&path, "max_file_bytes = 999\nrespect_gitignore = false\nmode = 'prompt'\n")
             .expect("write");
 
@@ -205,7 +209,7 @@ mod tests {
     fn test_auto_discovered_invalid_type_returns_default() {
         let tmp = TempDir::new().expect("tmp");
         // Write a bad config at the auto-discovery location
-        fs::write(tmp.path().join("repo-to-prompt.toml"), "include_extensions = 123\n")
+        fs::write(tmp.path().join("repo-context.toml"), "include_extensions = 123\n")
             .expect("write");
 
         // Auto-discover: no explicit path provided — should soft-warn and return default
@@ -218,7 +222,7 @@ mod tests {
     #[test]
     fn test_auto_discovered_mixed_type_list_returns_default() {
         let tmp = TempDir::new().expect("tmp");
-        fs::write(tmp.path().join("repo-to-prompt.toml"), "include_extensions = [\".py\", 123]\n")
+        fs::write(tmp.path().join("repo-context.toml"), "include_extensions = [\".py\", 123]\n")
             .expect("write");
 
         let cfg = load_config(tmp.path(), None).expect("should not error on auto-discovery");

@@ -2,18 +2,20 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use super::utils::parse_csv;
 use crate::chunk::{chunk_content, coalesce_small_chunks_with_max};
 use crate::config::{load_config, merge_cli_with_config, CliOverrides};
 use crate::domain::{Chunk, FileInfo, ScanStats};
 use crate::fetch::fetch_repository;
+use crate::lsp::rust_analyzer;
 use crate::rank::rank_files;
 use crate::scan::scanner::FileScanner;
 use crate::utils::read_file_safe;
@@ -32,12 +34,12 @@ pub struct IndexArgs {
     #[arg(long, value_name = "REF")]
     pub ref_: Option<String>,
 
-    /// Path to config file (repo-to-prompt.toml or .r2p.yml)
+    /// Path to config file (repo-context.toml or .r2p.yml)
     #[arg(short = 'c', long, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
     /// SQLite path for the index database
-    #[arg(long, value_name = "FILE", default_value = ".repo-to-prompt/index.sqlite")]
+    #[arg(long, value_name = "FILE", default_value = ".repo-context/index.sqlite")]
     pub db: PathBuf,
 
     /// Include only these extensions (comma-separated)
@@ -79,6 +81,10 @@ pub struct IndexArgs {
     /// Coalesce chunks smaller than this
     #[arg(long, value_name = "TOKENS")]
     pub min_chunk_tokens: Option<usize>,
+
+    /// Enrich index with rust-analyzer symbol references
+    #[arg(long)]
+    pub lsp: bool,
 }
 
 pub fn run(args: IndexArgs) -> Result<()> {
@@ -138,31 +144,16 @@ pub fn run(args: IndexArgs) -> Result<()> {
     let ranked_files = rank_files(&root_path, scanned_files)?;
     let selected_files = apply_byte_budget(ranked_files, Some(merged.max_total_bytes), &mut stats);
 
-    let mut prepared = Vec::new();
-    let mut unreadable = 0usize;
-    for file in &selected_files {
-        let (content, _encoding) = match read_file_safe(&file.path, None, None) {
-            Ok(value) => value,
-            Err(_) => {
-                unreadable += 1;
-                continue;
-            }
-        };
-
-        let hash = sha256_hex(&content);
-        prepared.push(PreparedFile { file: file.clone(), content, hash });
-    }
-
     let summary = write_index(
         &args.db,
         &root_path,
         &selected_files,
-        &prepared,
         &stats,
         IndexBuildOptions {
             chunk_tokens: merged.chunk_tokens,
             chunk_overlap: merged.chunk_overlap,
             min_chunk_tokens: merged.min_chunk_tokens,
+            lsp_enabled: args.lsp,
         },
     )?;
 
@@ -172,8 +163,11 @@ pub fn run(args: IndexArgs) -> Result<()> {
     println!("  files reindexed: {}", summary.files_reindexed);
     println!("  files reused: {}", summary.files_reused);
     println!("  files removed: {}", summary.files_removed);
-    if unreadable > 0 {
-        println!("  files unreadable: {}", unreadable);
+    if summary.files_unreadable > 0 {
+        println!("  files unreadable: {}", summary.files_unreadable);
+    }
+    if args.lsp {
+        println!("  lsp edges indexed: {}", summary.symbol_edges_indexed);
     }
 
     Ok(())
@@ -183,7 +177,6 @@ fn write_index(
     db_path: &Path,
     root_path: &Path,
     files: &[FileInfo],
-    prepared: &[PreparedFile],
     stats: &ScanStats,
     build: IndexBuildOptions,
 ) -> Result<IndexSummary> {
@@ -198,20 +191,27 @@ fn write_index(
 
     let tx = conn.transaction()?;
 
-    let existing_hashes = {
-        let mut stmt = tx.prepare("SELECT path, file_hash FROM files")?;
-        let rows =
-            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let existing_index = {
+        let mut stmt = tx.prepare("SELECT path, file_hash, mtime FROM files")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                ExistingFileRecord {
+                    file_hash: row.get::<_, String>(1)?,
+                    mtime: row.get::<_, Option<i64>>(2)?,
+                },
+            ))
+        })?;
         let mut map = HashMap::new();
         for row in rows {
-            let (path, hash) = row?;
-            map.insert(path, hash);
+            let (path, record) = row?;
+            map.insert(path, record);
         }
         map
     };
 
     let selected_paths: HashSet<String> = files.iter().map(|f| f.relative_path.clone()).collect();
-    let existing_paths: HashSet<String> = existing_hashes.keys().cloned().collect();
+    let existing_paths: HashSet<String> = existing_index.keys().cloned().collect();
     let stale_paths: Vec<String> = existing_paths.difference(&selected_paths).cloned().collect();
     for path in &stale_paths {
         tx.execute("DELETE FROM chunk_fts WHERE path = ?1", params![path])?;
@@ -220,13 +220,15 @@ fn write_index(
 
     let mut files_reindexed = 0usize;
     let mut files_reused = 0usize;
+    let mut files_unreadable = 0usize;
     let indexed_at = chrono::Utc::now().to_rfc3339();
 
-    for prepared_file in prepared {
-        let path = &prepared_file.file.relative_path;
-        let was_same = existing_hashes.get(path).is_some_and(|h| h == &prepared_file.hash);
+    for file in files {
+        let path = &file.relative_path;
+        let current_mtime = file_mtime_seconds(&file.path);
+        let existing = existing_index.get(path);
 
-        if was_same {
+        if existing.and_then(|record| record.mtime) == current_mtime {
             files_reused += 1;
             tx.execute(
                 "
@@ -236,11 +238,45 @@ fn write_index(
                 ",
                 params![
                     path,
-                    &prepared_file.file.language,
-                    &prepared_file.file.extension,
-                    prepared_file.file.size_bytes as i64,
-                    prepared_file.file.priority,
+                    &file.language,
+                    &file.extension,
+                    file.size_bytes as i64,
+                    file.priority,
                     &indexed_at,
+                ],
+            )?;
+            continue;
+        }
+
+        let (content, _encoding) = match read_file_safe(&file.path, None, None) {
+            Ok(value) => value,
+            Err(_) => {
+                files_unreadable += 1;
+                continue;
+            }
+        };
+
+        let content_hash = sha256_hex(&content);
+        let was_same = existing.is_some_and(|record| record.file_hash == content_hash);
+
+        if was_same {
+            files_reused += 1;
+            tx.execute(
+                "
+                UPDATE files
+                SET language = ?2, extension = ?3, size_bytes = ?4, priority = ?5, indexed_at = ?6,
+                    file_hash = ?7, mtime = ?8
+                WHERE path = ?1
+                ",
+                params![
+                    path,
+                    &file.language,
+                    &file.extension,
+                    file.size_bytes as i64,
+                    file.priority,
+                    &indexed_at,
+                    &content_hash,
+                    current_mtime,
                 ],
             )?;
             continue;
@@ -248,14 +284,11 @@ fn write_index(
 
         files_reindexed += 1;
         tx.execute("DELETE FROM chunk_fts WHERE path = ?1", params![path])?;
+        tx.execute("DELETE FROM symbol_edges WHERE from_chunk_id IN (SELECT id FROM chunks WHERE file_path = ?1)", params![path])?;
+        tx.execute("DELETE FROM symbol_edges WHERE to_chunk_id IN (SELECT id FROM chunks WHERE file_path = ?1)", params![path])?;
         tx.execute("DELETE FROM files WHERE path = ?1", params![path])?;
 
-        let raw_chunks = chunk_content(
-            &prepared_file.file,
-            &prepared_file.content,
-            build.chunk_tokens,
-            build.chunk_overlap,
-        )?;
+        let raw_chunks = chunk_content(file, &content, build.chunk_tokens, build.chunk_overlap)?;
         let file_chunks =
             coalesce_small_chunks_with_max(raw_chunks, build.min_chunk_tokens, build.chunk_tokens);
         let file_tokens = file_chunks.iter().map(|c| c.token_estimate).sum::<usize>();
@@ -263,18 +296,20 @@ fn write_index(
         tx.execute(
             "
             INSERT INTO files
-                (path, language, extension, size_bytes, priority, token_estimate, file_hash, indexed_at)
+                (path, language, extension, size_bytes, priority, token_estimate, file_hash, mtime,
+                 indexed_at)
             VALUES
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ",
             params![
                 path,
-                &prepared_file.file.language,
-                &prepared_file.file.extension,
-                prepared_file.file.size_bytes as i64,
-                prepared_file.file.priority,
+                &file.language,
+                &file.extension,
+                file.size_bytes as i64,
+                file.priority,
                 file_tokens as i64,
-                &prepared_file.hash,
+                &content_hash,
+                current_mtime,
                 &indexed_at,
             ],
         )?;
@@ -304,12 +339,19 @@ fn write_index(
 
     tx.commit()?;
 
+    let mut symbol_edges_indexed = 0usize;
+    if build.lsp_enabled {
+        symbol_edges_indexed = enrich_symbol_edges_with_lsp(db_path, root_path)?;
+    }
+
     Ok(IndexSummary {
         files_indexed,
         chunks_indexed,
         files_reindexed,
         files_reused,
         files_removed: stale_paths.len(),
+        files_unreadable,
+        symbol_edges_indexed,
     })
 }
 
@@ -327,6 +369,7 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             priority REAL NOT NULL,
             token_estimate INTEGER NOT NULL,
             file_hash TEXT NOT NULL,
+            mtime INTEGER,
             indexed_at TEXT NOT NULL
         );
 
@@ -358,6 +401,15 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS symbol_edges (
+            from_chunk_id TEXT NOT NULL,
+            to_chunk_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('ref', 'call', 'test', 'import')),
+            PRIMARY KEY(from_chunk_id, to_chunk_id, kind),
+            FOREIGN KEY(from_chunk_id) REFERENCES chunks(id) ON DELETE CASCADE,
+            FOREIGN KEY(to_chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+        );
+
         CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
             chunk_id UNINDEXED,
             path UNINDEXED,
@@ -367,8 +419,11 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
         CREATE INDEX IF NOT EXISTS idx_symbols_symbol ON symbols(symbol);
         CREATE INDEX IF NOT EXISTS idx_symbols_file_path ON symbols(file_path);
+        CREATE INDEX IF NOT EXISTS idx_symbol_edges_from ON symbol_edges(from_chunk_id);
+        CREATE INDEX IF NOT EXISTS idx_symbol_edges_to ON symbol_edges(to_chunk_id);
         ",
     )?;
+    ensure_files_mtime_column(conn)?;
     Ok(())
 }
 
@@ -416,11 +471,10 @@ fn insert_chunk(tx: &rusqlite::Transaction<'_>, chunk: &Chunk) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
-struct PreparedFile {
-    file: FileInfo,
-    content: String,
-    hash: String,
+#[derive(Debug, Clone)]
+struct ExistingFileRecord {
+    file_hash: String,
+    mtime: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -430,6 +484,8 @@ struct IndexSummary {
     files_reindexed: usize,
     files_reused: usize,
     files_removed: usize,
+    files_unreadable: usize,
+    symbol_edges_indexed: usize,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -437,6 +493,7 @@ struct IndexBuildOptions {
     chunk_tokens: usize,
     chunk_overlap: usize,
     min_chunk_tokens: usize,
+    lsp_enabled: bool,
 }
 
 fn sha256_hex(content: &str) -> String {
@@ -474,4 +531,192 @@ fn apply_byte_budget(
     }
     stats.total_bytes_included = total;
     selected
+}
+
+#[derive(Debug, Clone)]
+struct SymbolSeed {
+    chunk_id: String,
+    symbol: String,
+    path: String,
+    line: u32,
+}
+
+#[derive(Debug, Clone)]
+struct ChunkLocation {
+    id: String,
+    path: String,
+    content: String,
+}
+
+fn ensure_files_mtime_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(files)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut has_mtime = false;
+    for row in rows {
+        if row? == "mtime" {
+            has_mtime = true;
+            break;
+        }
+    }
+
+    if !has_mtime {
+        conn.execute("ALTER TABLE files ADD COLUMN mtime INTEGER", [])?;
+    }
+    Ok(())
+}
+
+fn file_mtime_seconds(path: &Path) -> Option<i64> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let duration = modified.duration_since(UNIX_EPOCH).ok()?;
+    Some(duration.as_secs() as i64)
+}
+
+fn enrich_symbol_edges_with_lsp(db_path: &Path, root_path: &Path) -> Result<usize> {
+    if !rust_analyzer::is_available() {
+        return Ok(0);
+    }
+
+    let mut conn = Connection::open(db_path)
+        .with_context(|| format!("Failed to open SQLite database at {}", db_path.display()))?;
+    let has_rust: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM files WHERE language = 'rust' OR extension = '.rs'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_rust == 0 {
+        return Ok(0);
+    }
+
+    let seeds = collect_symbol_seeds(&conn)?;
+    if seeds.is_empty() {
+        return Ok(0);
+    }
+
+    let refs =
+        match rust_analyzer::analyze_symbol_references(root_path, &to_lsp_seeds(&seeds), 600, 80) {
+            Ok(items) => items,
+            Err(err) => {
+                eprintln!("warning: rust-analyzer edge enrichment unavailable: {err}");
+                return Ok(0);
+            }
+        };
+    if refs.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM symbol_edges", [])?;
+
+    let mut inserted = 0usize;
+    for reference in refs {
+        let line_1based = reference.line as usize + 1;
+        let Some(target) = find_chunk_for_reference(&tx, &reference.path, line_1based)? else {
+            continue;
+        };
+        if target.id == reference.from_chunk_id {
+            continue;
+        }
+
+        let kind = classify_edge_kind(&reference.symbol, &target.path, &target.content);
+        inserted += tx.execute(
+            "
+            INSERT OR IGNORE INTO symbol_edges (from_chunk_id, to_chunk_id, kind)
+            VALUES (?1, ?2, ?3)
+            ",
+            params![reference.from_chunk_id, target.id, kind],
+        )?;
+    }
+
+    tx.commit()?;
+    Ok(inserted)
+}
+
+fn collect_symbol_seeds(conn: &Connection) -> Result<Vec<SymbolSeed>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT s.chunk_id, s.symbol, s.file_path, c.start_line
+        FROM symbols s
+        JOIN chunks c ON c.id = s.chunk_id
+        WHERE c.language = 'rust'
+          AND s.kind IN ('def', 'type', 'impl')
+        ORDER BY c.priority DESC, c.start_line ASC
+        LIMIT 1200
+        ",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SymbolSeed {
+            chunk_id: row.get(0)?,
+            symbol: row.get::<_, String>(1)?,
+            path: row.get(2)?,
+            line: row.get::<_, i64>(3)? as u32,
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn to_lsp_seeds(seeds: &[SymbolSeed]) -> Vec<rust_analyzer::SymbolSeed> {
+    seeds
+        .iter()
+        .map(|seed| rust_analyzer::SymbolSeed {
+            chunk_id: seed.chunk_id.clone(),
+            symbol: seed.symbol.clone(),
+            path: seed.path.clone(),
+            line: seed.line.saturating_sub(1),
+            character: 0,
+        })
+        .collect()
+}
+
+fn find_chunk_for_reference(
+    tx: &rusqlite::Transaction<'_>,
+    path: &str,
+    line_1based: usize,
+) -> Result<Option<ChunkLocation>> {
+    let mut stmt = tx.prepare(
+        "
+        SELECT id, file_path, content
+        FROM chunks
+        WHERE file_path = ?1
+          AND start_line <= ?2
+          AND end_line >= ?2
+        ORDER BY priority DESC, start_line ASC
+        LIMIT 1
+        ",
+    )?;
+
+    let row = stmt
+        .query_row(params![path, line_1based as i64], |row| {
+            Ok(ChunkLocation { id: row.get(0)?, path: row.get(1)?, content: row.get(2)? })
+        })
+        .optional()?;
+    Ok(row)
+}
+
+fn classify_edge_kind(symbol: &str, path: &str, content: &str) -> &'static str {
+    let lower_path = path.to_ascii_lowercase();
+    if lower_path.contains("/tests/")
+        || lower_path.starts_with("tests/")
+        || lower_path.contains("_test.rs")
+        || lower_path.contains(".test.")
+    {
+        return "test";
+    }
+
+    let lower = content.to_ascii_lowercase();
+    if lower.contains(&format!("use {symbol}"))
+        || lower.contains(&format!("mod {symbol}"))
+        || lower.contains(&format!("::{symbol}"))
+    {
+        return "import";
+    }
+    if lower.contains(&format!("{symbol}(")) {
+        return "call";
+    }
+    "ref"
 }

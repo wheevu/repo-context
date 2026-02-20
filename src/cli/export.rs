@@ -11,13 +11,18 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use super::utils::parse_csv;
+use crate::analysis::pr::build_pr_context;
 use crate::chunk::{chunk_content, coalesce_small_chunks_with_max};
 use crate::config::{load_config, merge_cli_with_config, CliOverrides};
 use crate::domain::{Chunk, OutputMode, RedactionMode};
 use crate::fetch::fetch_repository;
-use crate::rank::{rank_files_with_manifest, rerank_chunks_by_task};
+use crate::graph::{persist::persist_graph, schema::open_or_create};
+use crate::rank::{
+    rank_files_with_manifest, rerank_chunks_by_task, stitch_thread_bundles, StitchTier,
+};
 use crate::redact::Redactor;
 use crate::render::{render_context_pack, render_jsonl, write_report};
+use crate::rerank::{build_reranker, normalize_scores};
 use crate::scan::scanner::FileScanner;
 use crate::scan::tree::generate_tree;
 use crate::utils::read_file_safe;
@@ -36,7 +41,7 @@ pub struct ExportArgs {
     #[arg(long, value_name = "REF")]
     pub ref_: Option<String>,
 
-    /// Path to config file (repo-to-prompt.toml or .r2p.yml)
+    /// Path to config file (repo-context.toml or .r2p.yml)
     #[arg(short = 'c', long, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
@@ -76,6 +81,26 @@ pub struct ExportArgs {
     #[arg(long, value_name = "TEXT")]
     pub task: Option<String>,
 
+    /// Disable second-stage semantic reranking
+    #[arg(long)]
+    pub no_semantic_rerank: bool,
+
+    /// Semantic model identifier
+    #[arg(long, value_name = "MODEL")]
+    pub semantic_model: Option<String>,
+
+    /// Number of chunks to semantic-rerank
+    #[arg(long, value_name = "N")]
+    pub rerank_top_k: Option<usize>,
+
+    /// Fraction of max tokens reserved for stitched context
+    #[arg(long, value_name = "FLOAT")]
+    pub stitch_budget_fraction: Option<f64>,
+
+    /// Number of top-ranked chunks used as stitching seeds
+    #[arg(long, value_name = "N")]
+    pub stitch_top_n: Option<usize>,
+
     /// Target tokens per chunk
     #[arg(long, value_name = "TOKENS")]
     pub chunk_tokens: Option<usize>,
@@ -88,7 +113,7 @@ pub struct ExportArgs {
     #[arg(long, value_name = "TOKENS")]
     pub min_chunk_tokens: Option<usize>,
 
-    /// Output format: 'prompt' (Markdown), 'rag' (JSONL), 'contribution', or 'both'
+    /// Output format: 'prompt' (Markdown), 'rag' (JSONL), 'contribution', 'pr-context', or 'both'
     #[arg(short = 'm', long, value_name = "MODE")]
     pub mode: Option<String>,
 
@@ -111,6 +136,10 @@ pub struct ExportArgs {
     /// Redaction mode: fast|standard|paranoid|structure-safe
     #[arg(long, value_name = "MODE")]
     pub redaction_mode: Option<String>,
+
+    /// Skip writing persisted graph database
+    #[arg(long)]
+    pub no_graph: bool,
 }
 
 pub fn run(args: ExportArgs) -> Result<()> {
@@ -155,6 +184,11 @@ pub fn run(args: ExportArgs) -> Result<()> {
         skip_minified: if args.include_minified { Some(false) } else { None },
         max_tokens: args.max_tokens,
         task_query: args.task.clone(),
+        semantic_rerank: if args.no_semantic_rerank { Some(false) } else { None },
+        rerank_top_k: args.rerank_top_k,
+        semantic_model: args.semantic_model.clone(),
+        stitch_budget_fraction: args.stitch_budget_fraction,
+        stitch_top_n: args.stitch_top_n,
         chunk_tokens: args.chunk_tokens,
         chunk_overlap: args.chunk_overlap,
         min_chunk_tokens: args.min_chunk_tokens,
@@ -167,7 +201,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
 
     let mut merged = merge_cli_with_config(file_config, cli_overrides);
 
-    if matches!(merged.mode, OutputMode::Contribution) {
+    if matches!(merged.mode, OutputMode::Contribution | OutputMode::PrContext) {
         for pattern in default_contribution_patterns() {
             if !merged.always_include_patterns.contains(&pattern) {
                 merged.always_include_patterns.push(pattern);
@@ -287,6 +321,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
                     ("reason".to_string(), json!("token_budget")),
                     ("priority".to_string(), json!((file.priority * 1000.0).round() / 1000.0)),
                     ("tokens".to_string(), json!(file_tokens)),
+                    ("chunks".to_string(), json!(file_chunks.len())),
                 ]));
                 continue;
             }
@@ -313,8 +348,11 @@ pub fn run(args: ExportArgs) -> Result<()> {
     let min_chunk_tokens = merged.min_chunk_tokens;
     chunks = coalesce_small_chunks_with_max(chunks, min_chunk_tokens, chunk_tokens);
 
+    let mut reranking_mode: Option<String> = None;
+    let mut stitched_unavailable_chunks: usize = 0;
     if let Some(task_query) = merged.task_query.as_deref() {
         let file_scores = rerank_chunks_by_task(&mut chunks, task_query, 0.4);
+        reranking_mode = Some("bm25+deps".to_string());
         chunks.sort_by(|a, b| {
             b.priority
                 .partial_cmp(&a.priority)
@@ -322,6 +360,59 @@ pub fn run(args: ExportArgs) -> Result<()> {
                 .then_with(|| a.path.cmp(&b.path))
                 .then_with(|| a.start_line.cmp(&b.start_line))
         });
+
+        for (idx, chunk) in chunks.iter_mut().enumerate() {
+            chunk.tags.insert(format!("reason:bm25(rank={})", idx + 1));
+        }
+
+        if merged.semantic_rerank {
+            let reranker = build_reranker(merged.semantic_model.as_deref());
+            let top_k = merged.rerank_top_k.min(chunks.len());
+            let semantic_scores = reranker.rerank(task_query, &chunks[..top_k])?;
+            let normalized = normalize_scores(&semantic_scores);
+            for (chunk, score) in chunks[..top_k].iter_mut().zip(normalized.into_iter()) {
+                chunk.priority =
+                    (((chunk.priority * 0.6) + (score * 0.4)) * 1000.0).round() / 1000.0;
+                chunk.tags.insert(format!("reason:semantic(score={:.3})", score));
+            }
+            chunks.sort_by(|a, b| {
+                b.priority
+                    .partial_cmp(&a.priority)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.path.cmp(&b.path))
+                    .then_with(|| a.start_line.cmp(&b.start_line))
+            });
+            reranking_mode = Some(format!("bm25+{}", reranker.name()));
+        }
+
+        if let Some(max_tokens) = merged.max_tokens {
+            let budget = ((max_tokens as f64) * merged.stitch_budget_fraction).round() as usize;
+            let stitch = stitch_thread_bundles(&chunks, merged.stitch_top_n, budget);
+            for chunk in &mut chunks {
+                if let Some(tier) = stitch.stitched.get(&chunk.id) {
+                    chunk.tags.insert(format!("stitch:{}", tier.as_str()));
+                    chunk.tags.insert(format!("reason:stitched({})", tier.as_str()));
+                }
+            }
+            stats.stitched_chunks = stitch.stitched.len();
+            stitched_unavailable_chunks = stats
+                .dropped_files
+                .iter()
+                .filter(|dropped| {
+                    dropped.get("reason").and_then(|v| v.as_str()) == Some("token_budget")
+                })
+                .map(|dropped| dropped.get("chunks").and_then(|v| v.as_u64()).unwrap_or(0) as usize)
+                .sum();
+
+            sort_chunks_for_stitch_story(&mut chunks, &stitch.seed_ids, &stitch.stitched);
+
+            if stats.stitched_chunks > 0 {
+                println!(
+                    "  Thread stitching: {} chunks (~{} tokens reserved)",
+                    stats.stitched_chunks, stitch.tokens_used
+                );
+            }
+        }
 
         for file in &mut selected_files {
             if let Some(task_score) = file_scores.get(&file.relative_path) {
@@ -353,6 +444,23 @@ pub fn run(args: ExportArgs) -> Result<()> {
 
     let output_dir = resolve_output_dir(&merged.output_dir, &root_path);
     fs::create_dir_all(&output_dir)?;
+    let mut graph_written: Option<(PathBuf, usize, usize)> = None;
+    if !args.no_graph {
+        let graph_path = output_dir.join("symbol_graph.db");
+        match open_or_create(&graph_path) {
+            Ok(mut conn) => match persist_graph(&mut conn, &chunks) {
+                Ok((symbols, edges)) => {
+                    graph_written = Some((graph_path, symbols, edges));
+                }
+                Err(err) => {
+                    eprintln!("[graph] Warning: failed to persist graph: {err}");
+                }
+            },
+            Err(err) => {
+                eprintln!("[graph] Warning: failed to open graph DB: {err}");
+            }
+        }
+    }
 
     let highlight: HashSet<String> = selected_files
         .iter()
@@ -360,6 +468,17 @@ pub fn run(args: ExportArgs) -> Result<()> {
         .map(|f| f.relative_path.clone())
         .collect();
     let tree = generate_tree(&root_path, merged.tree_depth, true, &highlight)?;
+
+    let pr_report = if matches!(merged.mode, OutputMode::PrContext) {
+        Some(build_pr_context(
+            &selected_files,
+            &chunks,
+            merged.task_query.as_deref(),
+            graph_written.is_some(),
+        ))
+    } else {
+        None
+    };
 
     let context_pack = render_context_pack(
         &root_path,
@@ -369,20 +488,31 @@ pub fn run(args: ExportArgs) -> Result<()> {
         &tree,
         &manifest_info,
         merged.task_query.as_deref(),
+        pr_report.as_ref(),
         !args.no_timestamp,
     );
     let jsonl = render_jsonl(&chunks);
 
     let mut output_files = Vec::new();
-    if matches!(merged.mode, OutputMode::Prompt | OutputMode::Both | OutputMode::Contribution) {
+    if matches!(
+        merged.mode,
+        OutputMode::Prompt | OutputMode::Both | OutputMode::Contribution | OutputMode::PrContext
+    ) {
         let p = output_dir.join("context_pack.md");
         fs::write(&p, context_pack)?;
         output_files.push(p.display().to_string());
     }
-    if matches!(merged.mode, OutputMode::Rag | OutputMode::Both | OutputMode::Contribution) {
+    if matches!(
+        merged.mode,
+        OutputMode::Rag | OutputMode::Both | OutputMode::Contribution | OutputMode::PrContext
+    ) {
         let p = output_dir.join("chunks.jsonl");
         fs::write(&p, jsonl)?;
         output_files.push(p.display().to_string());
+    }
+    if let Some((graph_path, symbols, edges)) = &graph_written {
+        println!("[graph] symbol_graph.db: {symbols} symbols, {edges} import edges");
+        output_files.push(graph_path.display().to_string());
     }
 
     let report_path = output_dir.join("report.json");
@@ -415,16 +545,21 @@ pub fn run(args: ExportArgs) -> Result<()> {
         json!({
             "chunk_overlap":        merged.chunk_overlap,
             "chunk_tokens":         merged.chunk_tokens,
+            "stitch_budget_fraction": merged.stitch_budget_fraction,
+            "stitch_top_n":         merged.stitch_top_n,
             "exclude_globs":        exclude_globs_val,
             "follow_symlinks":      merged.follow_symlinks,
             "include_extensions":   include_extensions_val,
             "max_file_bytes":       merged.max_file_bytes,
             "max_tokens":           merged.max_tokens,
             "max_total_bytes":      merged.max_total_bytes,
+            "semantic_rerank":      merged.semantic_rerank,
+            "semantic_model":       merged.semantic_model,
+            "rerank_top_k":         merged.rerank_top_k,
             "mode":                 mode_val,
             "path":                 path_val,
             "task_query":           task_val,
-            "reranking":            if merged.task_query.is_some() { json!("bm25+deps") } else { serde_json::Value::Null },
+            "reranking":            reranking_mode,
             "redact_secrets":       merged.redact_secrets,
             "ref":                  merged.ref_.clone(),
             "repo":                 merged.repo_url.clone(),
@@ -480,6 +615,12 @@ pub fn run(args: ExportArgs) -> Result<()> {
 
     if stats.files_dropped_budget > 0 {
         println!("  Files dropped (budget): {}", stats.files_dropped_budget);
+        if stitched_unavailable_chunks > 0 {
+            println!(
+                "  {} stitched chunks unavailable (file dropped pre-budget)",
+                stitched_unavailable_chunks
+            );
+        }
     }
     if forced_token_files > 0 {
         if let Some(max_tokens) = merged.max_tokens {
@@ -495,7 +636,11 @@ pub fn run(args: ExportArgs) -> Result<()> {
     println!("  Total bytes:     {}", stats.total_bytes_included);
     println!("  Total tokens:    ~{}", stats.total_tokens_estimated);
     if let Some(task_query) = merged.task_query.as_deref() {
-        println!("  Task reranking:  bm25+deps ({task_query})");
+        if let Some(mode) = reranking_mode.as_deref() {
+            println!("  Task reranking:  {mode} ({task_query})");
+        } else {
+            println!("  Task reranking:  bm25+deps ({task_query})");
+        }
     }
     println!("  Processing time: {:.2}s", stats.processing_time_seconds);
 
@@ -550,13 +695,48 @@ fn resolve_output_dir(config_output: &Path, root_path: &Path) -> PathBuf {
     }
 }
 
+fn sort_group(
+    chunk: &Chunk,
+    seed_ids: &std::collections::BTreeSet<String>,
+    stitched: &std::collections::HashMap<String, StitchTier>,
+) -> u8 {
+    if seed_ids.contains(&chunk.id) {
+        return 0;
+    }
+    match stitched.get(&chunk.id) {
+        Some(StitchTier::Definition) => 1,
+        Some(StitchTier::Callee) => 2,
+        Some(StitchTier::Caller) => 3,
+        None => 4,
+    }
+}
+
+fn sort_chunks_for_stitch_story(
+    chunks: &mut [Chunk],
+    seed_ids: &std::collections::BTreeSet<String>,
+    stitched: &std::collections::HashMap<String, StitchTier>,
+) {
+    chunks.sort_by(|a, b| {
+        let a_key = sort_group(a, seed_ids, stitched);
+        let b_key = sort_group(b, seed_ids, stitched);
+        a_key
+            .cmp(&b_key)
+            .then_with(|| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.start_line.cmp(&b.start_line))
+    });
+}
+
 fn parse_mode(mode: Option<&str>) -> Result<OutputMode> {
     match mode.unwrap_or("both").to_ascii_lowercase().as_str() {
         "prompt" => Ok(OutputMode::Prompt),
         "rag" => Ok(OutputMode::Rag),
         "contribution" => Ok(OutputMode::Contribution),
+        "pr-context" | "pr_context" | "prcontext" => Ok(OutputMode::PrContext),
         "both" => Ok(OutputMode::Both),
-        invalid => anyhow::bail!("Invalid mode '{invalid}'. Use: prompt|rag|contribution|both"),
+        invalid => {
+            anyhow::bail!("Invalid mode '{invalid}'. Use: prompt|rag|contribution|pr-context|both")
+        }
     }
 }
 
@@ -638,4 +818,66 @@ fn apply_byte_budget(
     }
     stats.total_bytes_included = total;
     selected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sort_chunks_for_stitch_story;
+    use crate::domain::Chunk;
+    use crate::rank::StitchTier;
+    use std::collections::{BTreeSet, HashMap};
+
+    fn mk_chunk(id: &str, priority: f64, path: &str, start_line: usize) -> Chunk {
+        Chunk {
+            id: id.to_string(),
+            path: path.to_string(),
+            language: "rust".to_string(),
+            start_line,
+            end_line: start_line,
+            content: "fn x() {}".to_string(),
+            priority,
+            tags: BTreeSet::new(),
+            token_estimate: 10,
+        }
+    }
+
+    #[test]
+    fn stitch_story_sort_orders_seed_then_tiers_then_rest() {
+        let mut chunks = vec![
+            mk_chunk("rest", 0.99, "z.rs", 1),
+            mk_chunk("callee_hi", 0.95, "b.rs", 2),
+            mk_chunk("seed_hi", 0.70, "a.rs", 2),
+            mk_chunk("caller", 0.90, "c.rs", 1),
+            mk_chunk("def_lo", 0.60, "d.rs", 10),
+            mk_chunk("seed_lo", 0.20, "a.rs", 1),
+            mk_chunk("def_hi", 0.85, "d.rs", 1),
+            mk_chunk("callee_lo", 0.30, "b.rs", 1),
+        ];
+
+        let seed_ids = BTreeSet::from(["seed_hi".to_string(), "seed_lo".to_string()]);
+        let stitched = HashMap::from([
+            ("def_hi".to_string(), StitchTier::Definition),
+            ("def_lo".to_string(), StitchTier::Definition),
+            ("callee_hi".to_string(), StitchTier::Callee),
+            ("callee_lo".to_string(), StitchTier::Callee),
+            ("caller".to_string(), StitchTier::Caller),
+        ]);
+
+        sort_chunks_for_stitch_story(&mut chunks, &seed_ids, &stitched);
+        let ordered: Vec<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
+
+        assert_eq!(
+            ordered,
+            vec![
+                "seed_hi",
+                "seed_lo",
+                "def_hi",
+                "def_lo",
+                "callee_hi",
+                "callee_lo",
+                "caller",
+                "rest"
+            ]
+        );
+    }
 }

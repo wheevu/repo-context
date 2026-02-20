@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 #[derive(Args)]
 pub struct CodeIntelArgs {
     /// SQLite index database path
-    #[arg(long, value_name = "FILE", default_value = ".repo-to-prompt/index.sqlite")]
+    #[arg(long, value_name = "FILE", default_value = ".repo-context/index.sqlite")]
     pub db: PathBuf,
 
     /// Output path for portable code-intel JSON
-    #[arg(long, value_name = "FILE", default_value = ".repo-to-prompt/codeintel.json")]
+    #[arg(long, value_name = "FILE", default_value = ".repo-context/codeintel.json")]
     pub out: PathBuf,
 }
 
@@ -31,7 +31,7 @@ pub fn run(args: CodeIntelArgs) -> Result<()> {
     )?;
     if has_symbols == 0 {
         anyhow::bail!(
-            "Index schema not found in {}. Run `repo-to-prompt index` first.",
+            "Index schema not found in {}. Run `repo-context index` first.",
             args.db.display()
         );
     }

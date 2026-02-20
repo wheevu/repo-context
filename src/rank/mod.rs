@@ -11,6 +11,38 @@ pub mod ranker;
 
 pub use ranker::FileRanker;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StitchTier {
+    Definition,
+    Callee,
+    Caller,
+}
+
+impl StitchTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Definition => "definition",
+            Self::Callee => "callee",
+            Self::Caller => "caller",
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::Definition => 0,
+            Self::Callee => 1,
+            Self::Caller => 2,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct StitchedBundle {
+    pub seed_ids: BTreeSet<String>,
+    pub stitched: HashMap<String, StitchTier>,
+    pub tokens_used: usize,
+}
+
 pub fn rerank_chunks_by_task(
     chunks: &mut [Chunk],
     query: &str,
@@ -66,6 +98,164 @@ pub fn rerank_chunks_by_task(
     }
 
     file_scores
+}
+
+pub fn stitch_thread_bundles(
+    chunks: &[Chunk],
+    top_n_seeds: usize,
+    stitch_budget_tokens: usize,
+) -> StitchedBundle {
+    if chunks.is_empty() || stitch_budget_tokens == 0 {
+        return StitchedBundle::default();
+    }
+
+    let mut ranked: Vec<&Chunk> = chunks.iter().collect();
+    ranked.sort_by(|a, b| {
+        b.priority
+            .partial_cmp(&a.priority)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.start_line.cmp(&b.start_line))
+    });
+
+    let seeds: Vec<&Chunk> = ranked.into_iter().take(top_n_seeds.max(1)).collect();
+    let seed_ids: BTreeSet<String> = seeds.iter().map(|c| c.id.clone()).collect();
+    let seed_files: HashSet<String> = seeds.iter().map(|c| c.path.clone()).collect();
+
+    let known_files: HashSet<String> = chunks.iter().map(|c| c.path.clone()).collect();
+    let symbol_defs = symbol_definitions(chunks);
+    let graph = dependency_graph(chunks, &known_files, &symbol_defs);
+
+    let mut symbol_chunk_ids: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for chunk in chunks {
+        for tag in &chunk.tags {
+            if let Some((kind, name)) = tag.split_once(':') {
+                if matches!(kind, "def" | "type" | "impl") {
+                    symbol_chunk_ids
+                        .entry(name.to_ascii_lowercase())
+                        .or_default()
+                        .insert(chunk.id.clone());
+                }
+            }
+        }
+    }
+
+    let mut definition_ids: BTreeSet<String> = BTreeSet::new();
+    let mut seed_tag_symbols: HashSet<String> = HashSet::new();
+    for seed in &seeds {
+        for tag in &seed.tags {
+            if let Some((kind, name)) = tag.split_once(':') {
+                if matches!(kind, "def" | "type" | "impl") {
+                    seed_tag_symbols.insert(name.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+
+    for symbol in &seed_tag_symbols {
+        if let Some(ids) = symbol_chunk_ids.get(symbol) {
+            for id in ids {
+                if !seed_ids.contains(id) {
+                    definition_ids.insert(id.clone());
+                }
+            }
+        }
+    }
+
+    let mut token_hits: HashMap<String, usize> = HashMap::new();
+    for seed in &seeds {
+        for token in extract_signal_tokens(&seed.content) {
+            *token_hits.entry(token).or_insert(0) += 1;
+        }
+    }
+    for (token, count) in token_hits {
+        if count < 2 {
+            continue;
+        }
+        if let Some(ids) = symbol_chunk_ids.get(&token) {
+            for id in ids {
+                if !seed_ids.contains(id) {
+                    definition_ids.insert(id.clone());
+                }
+            }
+        }
+    }
+
+    let mut callee_files = BTreeSet::new();
+    let mut caller_files = BTreeSet::new();
+    for seed in &seed_files {
+        if let Some(neighbors) = graph.get(seed) {
+            for target in neighbors {
+                if !seed_files.contains(target) {
+                    callee_files.insert(target.clone());
+                }
+            }
+        }
+    }
+    for (source, neighbors) in &graph {
+        for neighbor in neighbors {
+            if seed_files.contains(neighbor) && !seed_files.contains(source) {
+                caller_files.insert(source.clone());
+            }
+        }
+    }
+
+    let mut chunks_by_file: HashMap<&str, Vec<&Chunk>> = HashMap::new();
+    for chunk in chunks {
+        chunks_by_file.entry(chunk.path.as_str()).or_default().push(chunk);
+    }
+
+    let mut candidates: Vec<(&Chunk, StitchTier)> = Vec::new();
+    for id in &definition_ids {
+        if let Some(chunk) = chunks.iter().find(|c| c.id == *id) {
+            candidates.push((chunk, StitchTier::Definition));
+        }
+    }
+    for file in &callee_files {
+        if let Some(file_chunks) = chunks_by_file.get(file.as_str()) {
+            for chunk in file_chunks {
+                if !seed_ids.contains(&chunk.id) && !definition_ids.contains(&chunk.id) {
+                    candidates.push((chunk, StitchTier::Callee));
+                }
+            }
+        }
+    }
+    for file in &caller_files {
+        if let Some(file_chunks) = chunks_by_file.get(file.as_str()) {
+            for chunk in file_chunks {
+                if !seed_ids.contains(&chunk.id)
+                    && !definition_ids.contains(&chunk.id)
+                    && !callee_files.contains(file)
+                {
+                    candidates.push((chunk, StitchTier::Caller));
+                }
+            }
+        }
+    }
+
+    candidates.sort_by(|(a, tier_a), (b, tier_b)| {
+        tier_a
+            .rank()
+            .cmp(&tier_b.rank())
+            .then_with(|| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.start_line.cmp(&b.start_line))
+    });
+
+    let mut stitched = HashMap::new();
+    let mut tokens_used = 0usize;
+    for (chunk, tier) in candidates {
+        if stitched.contains_key(&chunk.id) {
+            continue;
+        }
+        if tokens_used + chunk.token_estimate > stitch_budget_tokens {
+            continue;
+        }
+        stitched.insert(chunk.id.clone(), tier);
+        tokens_used += chunk.token_estimate;
+    }
+
+    StitchedBundle { seed_ids, stitched, tokens_used }
 }
 
 fn dependency_expansion_scores(
@@ -212,7 +402,7 @@ fn is_test_like_file(path: &str) -> bool {
         || lower.contains("test_")
 }
 
-fn symbol_definitions(chunks: &[Chunk]) -> HashMap<String, HashSet<String>> {
+pub(crate) fn symbol_definitions(chunks: &[Chunk]) -> HashMap<String, HashSet<String>> {
     let mut defs: HashMap<String, HashSet<String>> = HashMap::new();
     for chunk in chunks {
         for tag in &chunk.tags {
@@ -226,7 +416,7 @@ fn symbol_definitions(chunks: &[Chunk]) -> HashMap<String, HashSet<String>> {
     defs
 }
 
-fn dependency_graph(
+pub(crate) fn dependency_graph(
     chunks: &[Chunk],
     known_files: &HashSet<String>,
     symbol_defs: &HashMap<String, HashSet<String>>,
@@ -258,7 +448,7 @@ fn dependency_graph(
     graph
 }
 
-fn extract_import_references(content: &str) -> Vec<String> {
+pub(crate) fn extract_import_references(content: &str) -> Vec<String> {
     let mut refs = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
@@ -302,7 +492,7 @@ fn extract_import_references(content: &str) -> Vec<String> {
     refs
 }
 
-fn resolve_reference(
+pub(crate) fn resolve_reference(
     reference: &str,
     current_file: &str,
     known_files: &HashSet<String>,
@@ -384,6 +574,48 @@ fn tokenize(text: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn extract_signal_tokens(content: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if trimmed.starts_with("use ")
+            || trimmed.starts_with("impl ")
+            || trimmed.starts_with("trait ")
+            || trimmed.contains("::")
+        {
+            tokens.extend(
+                trimmed
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .map(|t| t.to_ascii_lowercase())
+                    .filter(|t| t.len() >= 3 && !ignored_symbols().contains(&t.as_str())),
+            );
+        }
+
+        if let Some((prefix, _)) = trimmed.split_once('(') {
+            let name = prefix
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next_back()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if name.len() >= 3 && !ignored_symbols().contains(&name.as_str()) {
+                tokens.push(name);
+            }
+        }
+    }
+    tokens
+}
+
+fn ignored_symbols() -> &'static [&'static str] {
+    &[
+        "result", "ok", "err", "vec", "string", "option", "none", "some", "box", "arc", "mutex",
+        "hashmap", "hashset", "self", "super", "crate", "true", "false",
+    ]
 }
 
 pub fn rank_files(root_path: &Path, files: Vec<FileInfo>) -> Result<Vec<FileInfo>> {

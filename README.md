@@ -1,6 +1,6 @@
 # repo-context
 
-*(Was previously Python, which was okay. But now the thing's charged with the Speed Force)*
+*(Was previously 'repo-to-prompt', written in python, which was okay. But now the thing's charged with the Speed Force ⚡️🏃🏻)*
 
 Turn a code repository into a tidy "context pack" you can paste into an LLM — or feed into a RAG pipeline.
 
@@ -18,7 +18,7 @@ It tries to keep the *important* stuff (READMEs, configs, entrypoints, core sour
 
 ## Why you'd use it
 
--   You want an LLM to help with a repo **without** dumping your whole codebase into chat.
+-   You want an LLM to help with a repo **without** dumping your whole codebase into chat. 🫩
 -   You want **repeatable** outputs (stable ordering + stable chunk IDs).
 -   You want basic protection against accidentally leaking secrets (optional redaction).
 

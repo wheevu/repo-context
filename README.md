@@ -36,6 +36,7 @@ It tries to keep the *important* stuff (READMEs, configs, entrypoints, core sour
 -   **SQLite symbol graph** export (`symbol_graph.db`) for local graph-aware workflows
 -   **Guardrails in context packs** (Claims Index + Missing Pieces heuristics)
 -   **Local index workflow** (`index` / `query`) + portable code-intel export (`codeintel`)
+-   **Context diff mode** (`diff`) with text/markdown/json output formats
 
 ## Install
 
@@ -87,6 +88,12 @@ Export portable code-intel JSON:
 repo-context codeintel
 ```
 
+Compare two exports:
+```bash
+repo-context diff out/repo-a out/repo-b
+repo-context diff out/repo-a out/repo-b --format json
+```
+
 ## Common recipes
 
 **"Small + high signal" export**
@@ -104,6 +111,21 @@ repo-context export -p . --mode rag -o ./embeddings
 **Reproducible output (nice for diffs)**
 ```bash
 repo-context export -p . --no-timestamp
+```
+
+**Strict budget behavior with always-include files**
+```bash
+# hard-error if always-include files alone exceed --max-tokens
+repo-context export -p . --max-tokens 50000
+
+# explicitly allow always-include overflow
+repo-context export -p . --max-tokens 50000 --allow-over-budget
+```
+
+**Best stitching quality (index first, export second)**
+```bash
+repo-context index -p .
+repo-context export -p . --task "trace auth refresh flow"
 ```
 
 ## Output (what you get)

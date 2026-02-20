@@ -5,7 +5,7 @@ use clap::Args;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -15,6 +15,7 @@ use crate::chunk::{chunk_content, coalesce_small_chunks_with_max};
 use crate::config::{load_config, merge_cli_with_config, CliOverrides};
 use crate::domain::{Chunk, FileInfo, ScanStats};
 use crate::fetch::fetch_repository;
+use crate::graph::persist::persist_graph;
 use crate::lsp::rust_analyzer;
 use crate::rank::rank_files;
 use crate::scan::scanner::FileScanner;
@@ -169,6 +170,10 @@ pub fn run(args: IndexArgs) -> Result<()> {
     if args.lsp {
         println!("  lsp edges indexed: {}", summary.symbol_edges_indexed);
     }
+    println!(
+        "  graph symbols/import edges: {}/{}",
+        summary.graph_symbols_indexed, summary.graph_import_edges_indexed
+    );
 
     Ok(())
 }
@@ -340,6 +345,13 @@ fn write_index(
     tx.commit()?;
 
     let mut symbol_edges_indexed = 0usize;
+    let mut graph_symbols_indexed = 0usize;
+    let mut graph_import_edges_indexed = 0usize;
+    let all_chunks = load_all_chunks(&conn)?;
+    if let Ok((symbols, edges)) = persist_graph(&mut conn, &all_chunks) {
+        graph_symbols_indexed = symbols;
+        graph_import_edges_indexed = edges;
+    }
     if build.lsp_enabled {
         symbol_edges_indexed = enrich_symbol_edges_with_lsp(db_path, root_path)?;
     }
@@ -352,6 +364,8 @@ fn write_index(
         files_removed: stale_paths.len(),
         files_unreadable,
         symbol_edges_indexed,
+        graph_symbols_indexed,
+        graph_import_edges_indexed,
     })
 }
 
@@ -410,6 +424,35 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             FOREIGN KEY(to_chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS symbol_chunks (
+            symbol TEXT NOT NULL,
+            chunk_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            path TEXT NOT NULL,
+            PRIMARY KEY (symbol, chunk_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS file_imports (
+            source_path TEXT NOT NULL,
+            target_path TEXT NOT NULL,
+            PRIMARY KEY (source_path, target_path)
+        );
+
+        CREATE TABLE IF NOT EXISTS chunk_meta (
+            chunk_id TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            priority REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS symbol_refs (
+            symbol TEXT NOT NULL,
+            chunk_id TEXT NOT NULL,
+            ref_kind TEXT NOT NULL DEFAULT 'ref',
+            PRIMARY KEY (symbol, chunk_id, ref_kind)
+        );
+
         CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
             chunk_id UNINDEXED,
             path UNINDEXED,
@@ -421,6 +464,8 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_symbols_file_path ON symbols(file_path);
         CREATE INDEX IF NOT EXISTS idx_symbol_edges_from ON symbol_edges(from_chunk_id);
         CREATE INDEX IF NOT EXISTS idx_symbol_edges_to ON symbol_edges(to_chunk_id);
+        CREATE INDEX IF NOT EXISTS idx_symbol_refs_symbol ON symbol_refs(symbol);
+        CREATE INDEX IF NOT EXISTS idx_symbol_refs_chunk ON symbol_refs(chunk_id);
         ",
     )?;
     ensure_files_mtime_column(conn)?;
@@ -486,6 +531,8 @@ struct IndexSummary {
     files_removed: usize,
     files_unreadable: usize,
     symbol_edges_indexed: usize,
+    graph_symbols_indexed: usize,
+    graph_import_edges_indexed: usize,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -531,6 +578,39 @@ fn apply_byte_budget(
     }
     stats.total_bytes_included = total;
     selected
+}
+
+fn load_all_chunks(conn: &Connection) -> Result<Vec<Chunk>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT id, file_path, start_line, end_line, language, priority, token_estimate, tags_json,
+               content
+        FROM chunks
+        ORDER BY file_path, start_line, id
+        ",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        let tags_json: String = row.get(7)?;
+        let tags: BTreeSet<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+        Ok(Chunk {
+            id: row.get(0)?,
+            path: row.get(1)?,
+            start_line: row.get::<_, i64>(2)? as usize,
+            end_line: row.get::<_, i64>(3)? as usize,
+            language: row.get(4)?,
+            priority: row.get(5)?,
+            token_estimate: row.get::<_, i64>(6)? as usize,
+            tags,
+            content: row.get(8)?,
+        })
+    })?;
+
+    let mut chunks = Vec::new();
+    for row in rows {
+        chunks.push(row?);
+    }
+    Ok(chunks)
 }
 
 #[derive(Debug, Clone)]

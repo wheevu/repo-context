@@ -25,7 +25,8 @@ fn test_cli_help() {
         .stdout(predicate::str::contains("info"))
         .stdout(predicate::str::contains("index"))
         .stdout(predicate::str::contains("query"))
-        .stdout(predicate::str::contains("codeintel"));
+        .stdout(predicate::str::contains("codeintel"))
+        .stdout(predicate::str::contains("diff"));
 }
 
 #[test]
@@ -72,11 +73,81 @@ fn test_export_accepts_contribution_mode() {
         "contribution",
         "--max-tokens",
         "10",
+        "--allow-over-budget",
         "--output-dir",
         out.path().to_str().expect("utf8 path"),
         "--no-timestamp",
     ]);
     cmd.assert().success();
+}
+
+#[test]
+fn test_diff_compares_two_exports() {
+    let before = TempDir::new().expect("temp before");
+    let after = TempDir::new().expect("temp after");
+
+    fs::write(
+        before.path().join("report.json"),
+        r#"{"schema_version":"1.0.0","stats":{},"config":{},"output_files":[],"files":[{"id":"a1","path":"src/a.rs","priority":0.75,"tokens":10}]}"#,
+    )
+    .expect("write before report");
+    fs::write(
+        after.path().join("report.json"),
+        r#"{"schema_version":"1.0.0","stats":{},"config":{},"output_files":[],"files":[{"id":"a2","path":"src/a.rs","priority":0.8,"tokens":12},{"id":"b1","path":"src/b.rs","priority":0.6,"tokens":5}]}"#,
+    )
+    .expect("write after report");
+
+    fs::write(
+        before.path().join("chunks.jsonl"),
+        r#"{"content":"x","end_line":1,"id":"c1","lang":"rust","path":"src/a.rs","priority":0.7,"start_line":1,"tags":["def:a"]}"#,
+    )
+    .expect("write before chunks");
+    fs::write(
+        after.path().join("chunks.jsonl"),
+        r#"{"content":"x","end_line":1,"id":"c1","lang":"rust","path":"src/a.rs","priority":0.7,"start_line":1,"tags":["def:a","async:await"]}
+{"content":"y","end_line":2,"id":"c2","lang":"rust","path":"src/b.rs","priority":0.6,"start_line":1,"tags":["def:b"]}"#,
+    )
+    .expect("write after chunks");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "diff",
+        before.path().to_str().expect("before path"),
+        after.path().to_str().expect("after path"),
+    ]);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Files: +1 added, -0 removed, 1 modified"))
+        .stdout(predicate::str::contains("Changed chunk tags: 1"));
+}
+
+#[test]
+fn test_diff_json_output() {
+    let before = TempDir::new().expect("temp before");
+    let after = TempDir::new().expect("temp after");
+    fs::write(
+        before.path().join("report.json"),
+        r#"{"schema_version":"1.0.0","stats":{},"config":{},"output_files":[],"files":[]}"#,
+    )
+    .expect("write before report");
+    fs::write(
+        after.path().join("report.json"),
+        r#"{"schema_version":"1.0.0","stats":{},"config":{},"output_files":[],"files":[{"id":"x","path":"src/x.rs","priority":0.9,"tokens":3}]}"#,
+    )
+    .expect("write after report");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "diff",
+        before.path().to_str().expect("before path"),
+        after.path().to_str().expect("after path"),
+        "--format",
+        "json",
+    ]);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("\"files_added\": 1"))
+        .stdout(predicate::str::contains("\"files_removed\": 0"));
 }
 
 #[test]

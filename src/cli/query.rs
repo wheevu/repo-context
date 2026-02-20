@@ -143,6 +143,7 @@ pub fn run(args: QueryArgs) -> Result<()> {
             .unwrap_or(Ordering::Equal)
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.start_line.cmp(&b.start_line))
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
     });
     rows.truncate(args.limit.max(1));
 
@@ -315,6 +316,7 @@ fn related_test_chunks(
             .unwrap_or(Ordering::Equal)
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.start_line.cmp(&b.start_line))
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
     });
     out.truncate(limit);
     Ok(out)
@@ -525,6 +527,7 @@ fn fetch_definition_chunks(
             .unwrap_or(Ordering::Equal)
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.start_line.cmp(&b.start_line))
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
     });
     out.truncate(limit);
     Ok(out)
@@ -581,6 +584,7 @@ fn fetch_edge_chunks(
             .unwrap_or(Ordering::Equal)
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.start_line.cmp(&b.start_line))
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
     });
     rows_out.truncate(limit);
     Ok(rows_out)

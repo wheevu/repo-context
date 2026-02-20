@@ -295,6 +295,10 @@ pub fn render_context_pack(
         out.push('\n');
     }
 
+    if let Some(async_section) = render_async_topology(chunks) {
+        out.push_str(&async_section);
+    }
+
     // ── File Contents ────────────────────────────────────────────────────────
     out.push_str("## 📄 File Contents\n\n");
 
@@ -316,7 +320,7 @@ pub fn render_context_pack(
     for path in sorted_paths {
         let file_chunks = chunks_by_file.get(path).unwrap();
         let mut sorted_chunks: Vec<&&Chunk> = file_chunks.iter().collect();
-        sorted_chunks.sort_by_key(|c| c.start_line);
+        sorted_chunks.sort_by(|a, b| a.start_line.cmp(&b.start_line).then_with(|| a.id.cmp(&b.id)));
 
         let lang = sorted_chunks.first().map(|c| c.language.as_str()).unwrap_or("text");
         let priority = file_priorities.get(*path).copied().unwrap_or(0.5);
@@ -381,4 +385,53 @@ fn capitalize(s: &str) -> String {
         None => String::new(),
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
+}
+
+fn render_async_topology(chunks: &[Chunk]) -> Option<String> {
+    let mut async_rows: Vec<&Chunk> = chunks
+        .iter()
+        .filter(|chunk| chunk.tags.iter().any(|tag| tag.starts_with("async:")))
+        .collect();
+    if async_rows.len() < 3 {
+        return None;
+    }
+
+    async_rows.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then_with(|| a.start_line.cmp(&b.start_line))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let mut out = String::new();
+    out.push_str("## ⚡ Async Topology\n\n");
+    out.push_str("| File | Patterns | Lines |\n");
+    out.push_str("|---|---|---|\n");
+    for chunk in &async_rows {
+        let mut patterns: Vec<&str> =
+            chunk.tags.iter().filter_map(|tag| tag.strip_prefix("async:")).collect();
+        patterns.sort_unstable();
+        patterns.dedup();
+        out.push_str(&format!(
+            "| `{}` | {} | {}-{} |\n",
+            chunk.path,
+            patterns.join(", "),
+            chunk.start_line,
+            chunk.end_line
+        ));
+    }
+
+    let entrypoints: Vec<&Chunk> =
+        async_rows.iter().copied().filter(|chunk| chunk.tags.contains("async:entry")).collect();
+    if !entrypoints.is_empty() {
+        out.push_str("\n**Async entry points:**\n");
+        for chunk in entrypoints {
+            out.push_str(&format!(
+                "- `{}` (Lines {}-{})\n",
+                chunk.path, chunk.start_line, chunk.end_line
+            ));
+        }
+    }
+    out.push('\n');
+    Some(out)
 }

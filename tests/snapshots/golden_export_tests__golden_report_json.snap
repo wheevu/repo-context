@@ -4,6 +4,7 @@ expression: normalized_report
 ---
 {
   "config": {
+    "allow_over_budget": false,
     "chunk_overlap": 30,
     "chunk_tokens": 220,
     "exclude_globs": [

@@ -11,12 +11,13 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use super::utils::parse_csv;
+use crate::analysis::async_boundary::detect_async_boundaries;
 use crate::analysis::pr::build_pr_context;
 use crate::chunk::{chunk_content, coalesce_small_chunks_with_max};
 use crate::config::{load_config, merge_cli_with_config, CliOverrides};
 use crate::domain::{Chunk, OutputMode, RedactionMode};
 use crate::fetch::fetch_repository;
-use crate::graph::{persist::persist_graph, schema::open_or_create};
+use crate::graph::{lazy_loader::LazyChunkLoader, persist::persist_graph, schema::open_or_create};
 use crate::rank::{
     rank_files_with_manifest, rerank_chunks_by_task, stitch_thread_bundles, StitchTier,
 };
@@ -76,6 +77,10 @@ pub struct ExportArgs {
     /// Maximum tokens in output
     #[arg(short = 't', long, value_name = "TOKENS")]
     pub max_tokens: Option<usize>,
+
+    /// Allow always-include files to exceed max token budget
+    #[arg(long)]
+    pub allow_over_budget: bool,
 
     /// Task description for retrieval-driven reranking
     #[arg(long, value_name = "TEXT")]
@@ -256,97 +261,93 @@ pub fn run(args: ExportArgs) -> Result<()> {
     };
     let always_include = build_globset(&merged.always_include_patterns)?;
     let mut chunks: Vec<Chunk> = Vec::new();
-    // Track token budget at file granularity (matching Python behaviour).
-    let mut total_tokens_so_far: usize = 0;
-    let mut forced_token_files: usize = 0;
-
-    for file in &mut selected_files {
-        // Read the full file content once.
-        let (content, _enc) = match read_file_safe(&file.path, None, None) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        // Redact the full content before chunking so multi-line secrets (e.g. PEM keys)
-        // that would straddle chunk boundaries are always caught.
-        // Skip redaction entirely if this file matches the allowlist.
-        let redacted_content = if let Some(ref r) = redactor {
-            let filename = file.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if r.is_file_allowlisted(filename, &file.relative_path) {
-                content
-            } else {
-                use std::collections::{BTreeMap, HashSet};
-                let outcome = r.redact_with_language_report(
-                    &content,
-                    &file.language,
-                    &file.extension,
-                    filename,
-                    &file.relative_path,
-                );
-                if outcome.content != content {
-                    // Update redaction stats at file granularity.
-                    let mut rule_file_sets: BTreeMap<String, HashSet<String>> = BTreeMap::new();
-                    for (rule, count) in &outcome.counts {
-                        *stats.redaction_counts.entry(rule.clone()).or_insert(0) += count;
-                        rule_file_sets
-                            .entry(rule.clone())
-                            .or_default()
-                            .insert(file.relative_path.clone());
-                    }
-                    stats.redacted_files += 1;
-                    for (rule, file_set) in rule_file_sets {
-                        *stats.redaction_file_counts.entry(rule).or_insert(0) += file_set.len();
-                    }
-                    outcome.content
-                } else {
-                    content
-                }
-            }
+    let mut always_indices = Vec::new();
+    let mut normal_indices = Vec::new();
+    for (idx, file) in selected_files.iter().enumerate() {
+        let is_always_include =
+            always_include.as_ref().map(|g| g.is_match(&file.relative_path)).unwrap_or(false);
+        if is_always_include {
+            always_indices.push(idx);
         } else {
-            content
+            normal_indices.push(idx);
+        }
+    }
+
+    let mut always_tokens = 0usize;
+    for idx in always_indices {
+        if let Some(file_chunks) = process_export_file(
+            &mut selected_files[idx],
+            redactor.as_ref(),
+            chunk_tokens,
+            chunk_overlap,
+            &mut stats,
+        )? {
+            let file_tokens: usize = file_chunks.iter().map(|c| c.token_estimate).sum();
+            always_tokens += file_tokens;
+            chunks.extend(file_chunks);
+        }
+    }
+
+    if let Some(max_tokens) = merged.max_tokens {
+        if always_tokens > max_tokens && !args.allow_over_budget {
+            anyhow::bail!(
+                "always-include files require {always_tokens} tokens but max_tokens={max_tokens}; use --allow-over-budget to proceed"
+            );
+        }
+    }
+
+    let mut normal_tokens = 0usize;
+    let mut remaining_budget = merged.max_tokens.map(|max| max.saturating_sub(always_tokens));
+    if let (Some(max_tokens), Some(rest)) = (merged.max_tokens, remaining_budget) {
+        if always_tokens > max_tokens {
+            eprintln!(
+                "Warning: always-include files use {} tokens above max_tokens={} (remaining budget: {})",
+                always_tokens.saturating_sub(max_tokens),
+                max_tokens,
+                rest
+            );
+            remaining_budget = Some(0);
+        }
+    }
+
+    for idx in normal_indices {
+        let Some(file_chunks) = process_export_file(
+            &mut selected_files[idx],
+            redactor.as_ref(),
+            chunk_tokens,
+            chunk_overlap,
+            &mut stats,
+        )?
+        else {
+            continue;
         };
 
-        let file_chunks = chunk_content(file, &redacted_content, chunk_tokens, chunk_overlap)?;
         let file_tokens: usize = file_chunks.iter().map(|c| c.token_estimate).sum();
-        file.token_estimate = file_tokens;
-
-        // Token budget check at file granularity — matches Python cli.py:530-539.
-        if let Some(max_tokens) = merged.max_tokens {
-            let is_always_include =
-                always_include.as_ref().map(|g| g.is_match(&file.relative_path)).unwrap_or(false);
-            if total_tokens_so_far + file_tokens > max_tokens && !is_always_include {
+        if let Some(budget) = remaining_budget {
+            if normal_tokens + file_tokens > budget {
                 stats.files_dropped_budget += 1;
                 stats.dropped_files.push(std::collections::HashMap::from([
-                    ("path".to_string(), json!(file.relative_path)),
+                    ("path".to_string(), json!(selected_files[idx].relative_path)),
                     ("reason".to_string(), json!("token_budget")),
-                    ("priority".to_string(), json!((file.priority * 1000.0).round() / 1000.0)),
+                    (
+                        "priority".to_string(),
+                        json!((selected_files[idx].priority * 1000.0).round() / 1000.0),
+                    ),
                     ("tokens".to_string(), json!(file_tokens)),
                     ("chunks".to_string(), json!(file_chunks.len())),
                 ]));
                 continue;
             }
-            if total_tokens_so_far + file_tokens > max_tokens && is_always_include {
-                forced_token_files += 1;
-            }
         }
-        total_tokens_so_far += file_tokens;
-
-        // Tag redacted chunks and update per-chunk redaction stats.
-        if redactor.is_some() {
-            for mut chunk in file_chunks {
-                if chunk.content.contains("[REDACTED") || chunk.content.contains("_REDACTED]") {
-                    chunk.tags.insert("redacted".to_string());
-                    stats.redacted_chunks += 1;
-                }
-                chunks.push(chunk);
-            }
-        } else {
-            chunks.extend(file_chunks);
-        }
+        normal_tokens += file_tokens;
+        chunks.extend(file_chunks);
     }
 
     let min_chunk_tokens = merged.min_chunk_tokens;
     chunks = coalesce_small_chunks_with_max(chunks, min_chunk_tokens, chunk_tokens);
+    let index_db_path = find_index_db(&root_path);
+    let lazy_loader = index_db_path.as_deref().map(LazyChunkLoader::new);
+    let workspace_members = extract_workspace_members(&manifest_info);
 
     let mut reranking_mode: Option<String> = None;
     let mut stitched_unavailable_chunks: usize = 0;
@@ -359,6 +360,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.path.cmp(&b.path))
                 .then_with(|| a.start_line.cmp(&b.start_line))
+                .then_with(|| a.id.cmp(&b.id))
         });
 
         for (idx, chunk) in chunks.iter_mut().enumerate() {
@@ -381,13 +383,25 @@ pub fn run(args: ExportArgs) -> Result<()> {
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| a.path.cmp(&b.path))
                     .then_with(|| a.start_line.cmp(&b.start_line))
+                    .then_with(|| a.id.cmp(&b.id))
             });
             reranking_mode = Some(format!("bm25+{}", reranker.name()));
         }
 
         if let Some(max_tokens) = merged.max_tokens {
-            let budget = ((max_tokens as f64) * merged.stitch_budget_fraction).round() as usize;
-            let stitch = stitch_thread_bundles(&chunks, merged.stitch_top_n, budget);
+            let effective_tokens = max_tokens.saturating_sub(always_tokens);
+            let budget =
+                ((effective_tokens as f64) * merged.stitch_budget_fraction).round() as usize;
+            let stitch = stitch_thread_bundles(
+                &chunks,
+                merged.stitch_top_n,
+                budget,
+                lazy_loader.as_ref(),
+                &workspace_members,
+            );
+            if !stitch.lazy_chunks.is_empty() {
+                chunks.extend(stitch.lazy_chunks.iter().cloned());
+            }
             for chunk in &mut chunks {
                 if let Some(tier) = stitch.stitched.get(&chunk.id) {
                     chunk.tags.insert(format!("stitch:{}", tier.as_str()));
@@ -395,7 +409,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
                 }
             }
             stats.stitched_chunks = stitch.stitched.len();
-            stitched_unavailable_chunks = stats
+            let dropped_chunks: usize = stats
                 .dropped_files
                 .iter()
                 .filter(|dropped| {
@@ -403,6 +417,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
                 })
                 .map(|dropped| dropped.get("chunks").and_then(|v| v.as_u64()).unwrap_or(0) as usize)
                 .sum();
+            stitched_unavailable_chunks = dropped_chunks.saturating_sub(stitch.lazy_chunks.len());
 
             sort_chunks_for_stitch_story(&mut chunks, &stitch.seed_ids, &stitch.stitched);
 
@@ -439,6 +454,14 @@ pub fn run(args: ExportArgs) -> Result<()> {
             .collect();
     }
 
+    for boundary in detect_async_boundaries(&chunks) {
+        if let Some(chunk) = chunks.iter_mut().find(|c| c.id == boundary.chunk_id) {
+            for pattern in boundary.patterns {
+                chunk.tags.insert(pattern.tag().to_string());
+            }
+        }
+    }
+
     stats.chunks_created = chunks.len();
     stats.total_tokens_estimated = chunks.iter().map(|c| c.token_estimate).sum();
 
@@ -446,18 +469,49 @@ pub fn run(args: ExportArgs) -> Result<()> {
     fs::create_dir_all(&output_dir)?;
     let mut graph_written: Option<(PathBuf, usize, usize)> = None;
     if !args.no_graph {
-        let graph_path = output_dir.join("symbol_graph.db");
-        match open_or_create(&graph_path) {
-            Ok(mut conn) => match persist_graph(&mut conn, &chunks) {
-                Ok((symbols, edges)) => {
-                    graph_written = Some((graph_path, symbols, edges));
+        if let Some(index_db) = index_db_path.as_ref() {
+            if let Some((symbols, edges)) = query_graph_stats(index_db) {
+                println!(
+                    "info: using index.sqlite graph ({} symbols, {} import edges)",
+                    symbols, edges
+                );
+                graph_written = Some((index_db.clone(), symbols, edges));
+            } else {
+                println!(
+                    "info: index.sqlite exists but graph tables are missing; using pack-only graph."
+                );
+                let graph_path = output_dir.join("symbol_graph.db");
+                match open_or_create(&graph_path) {
+                    Ok(mut conn) => match persist_graph(&mut conn, &chunks) {
+                        Ok((symbols, edges)) => {
+                            graph_written = Some((graph_path, symbols, edges));
+                        }
+                        Err(err) => {
+                            eprintln!("[graph] Warning: failed to persist graph: {err}");
+                        }
+                    },
+                    Err(err) => {
+                        eprintln!("[graph] Warning: failed to open graph DB: {err}");
+                    }
                 }
+            }
+        } else {
+            println!(
+                "info: no index.sqlite found — using pack-only graph. Run 'repo-context index' for full graph + better stitching."
+            );
+            let graph_path = output_dir.join("symbol_graph.db");
+            match open_or_create(&graph_path) {
+                Ok(mut conn) => match persist_graph(&mut conn, &chunks) {
+                    Ok((symbols, edges)) => {
+                        graph_written = Some((graph_path, symbols, edges));
+                    }
+                    Err(err) => {
+                        eprintln!("[graph] Warning: failed to persist graph: {err}");
+                    }
+                },
                 Err(err) => {
-                    eprintln!("[graph] Warning: failed to persist graph: {err}");
+                    eprintln!("[graph] Warning: failed to open graph DB: {err}");
                 }
-            },
-            Err(err) => {
-                eprintln!("[graph] Warning: failed to open graph DB: {err}");
             }
         }
     }
@@ -511,7 +565,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
         output_files.push(p.display().to_string());
     }
     if let Some((graph_path, symbols, edges)) = &graph_written {
-        println!("[graph] symbol_graph.db: {symbols} symbols, {edges} import edges");
+        println!("[graph] {}: {symbols} symbols, {edges} import edges", graph_path.display());
         output_files.push(graph_path.display().to_string());
     }
 
@@ -552,6 +606,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
             "include_extensions":   include_extensions_val,
             "max_file_bytes":       merged.max_file_bytes,
             "max_tokens":           merged.max_tokens,
+            "allow_over_budget":    args.allow_over_budget,
             "max_total_bytes":      merged.max_total_bytes,
             "semantic_rerank":      merged.semantic_rerank,
             "semantic_model":       merged.semantic_model,
@@ -622,16 +677,6 @@ pub fn run(args: ExportArgs) -> Result<()> {
             );
         }
     }
-    if forced_token_files > 0 {
-        if let Some(max_tokens) = merged.max_tokens {
-            let overflow = total_tokens_so_far.saturating_sub(max_tokens);
-            println!(
-                "  Warning: forced {} always-include file(s), token budget exceeded by ~{}",
-                forced_token_files, overflow
-            );
-        }
-    }
-
     println!("  Chunks created:  {}", stats.chunks_created);
     println!("  Total bytes:     {}", stats.total_bytes_included);
     println!("  Total tokens:    ~{}", stats.total_tokens_estimated);
@@ -695,6 +740,107 @@ fn resolve_output_dir(config_output: &Path, root_path: &Path) -> PathBuf {
     }
 }
 
+fn find_index_db(root_path: &Path) -> Option<PathBuf> {
+    let candidate = root_path.join(".repo-context").join("index.sqlite");
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn query_graph_stats(db_path: &Path) -> Option<(usize, usize)> {
+    let conn = rusqlite::Connection::open(db_path).ok()?;
+    let symbols = conn
+        .query_row("SELECT COUNT(*) FROM symbol_chunks", [], |row| row.get::<_, i64>(0))
+        .ok()? as usize;
+    let edges = conn
+        .query_row("SELECT COUNT(*) FROM file_imports", [], |row| row.get::<_, i64>(0))
+        .ok()? as usize;
+    Some((symbols, edges))
+}
+
+fn extract_workspace_members(
+    manifest_info: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    let Some(value) = manifest_info.get("cargo_workspace_members") else {
+        return Vec::new();
+    };
+    let mut members: Vec<String> = value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .collect();
+    members.sort();
+    members.dedup();
+    members
+}
+
+fn process_export_file(
+    file: &mut crate::domain::FileInfo,
+    redactor: Option<&Redactor>,
+    chunk_tokens: usize,
+    chunk_overlap: usize,
+    stats: &mut crate::domain::ScanStats,
+) -> Result<Option<Vec<Chunk>>> {
+    let (content, _enc) = match read_file_safe(&file.path, None, None) {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+
+    let redacted_content = if let Some(r) = redactor {
+        let filename = file.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if r.is_file_allowlisted(filename, &file.relative_path) {
+            content
+        } else {
+            use std::collections::{BTreeMap, HashSet};
+            let outcome = r.redact_with_language_report(
+                &content,
+                &file.language,
+                &file.extension,
+                filename,
+                &file.relative_path,
+            );
+            if outcome.content != content {
+                let mut rule_file_sets: BTreeMap<String, HashSet<String>> = BTreeMap::new();
+                for (rule, count) in &outcome.counts {
+                    *stats.redaction_counts.entry(rule.clone()).or_insert(0) += count;
+                    rule_file_sets
+                        .entry(rule.clone())
+                        .or_default()
+                        .insert(file.relative_path.clone());
+                }
+                stats.redacted_files += 1;
+                for (rule, file_set) in rule_file_sets {
+                    *stats.redaction_file_counts.entry(rule).or_insert(0) += file_set.len();
+                }
+                outcome.content
+            } else {
+                content
+            }
+        }
+    } else {
+        content
+    };
+
+    let mut file_chunks = chunk_content(file, &redacted_content, chunk_tokens, chunk_overlap)?;
+    let file_tokens: usize = file_chunks.iter().map(|c| c.token_estimate).sum();
+    file.token_estimate = file_tokens;
+
+    if redactor.is_some() {
+        for chunk in &mut file_chunks {
+            if chunk.content.contains("[REDACTED") || chunk.content.contains("_REDACTED]") {
+                chunk.tags.insert("redacted".to_string());
+                stats.redacted_chunks += 1;
+            }
+        }
+    }
+
+    Ok(Some(file_chunks))
+}
+
 fn sort_group(
     chunk: &Chunk,
     seed_ids: &std::collections::BTreeSet<String>,
@@ -707,7 +853,8 @@ fn sort_group(
         Some(StitchTier::Definition) => 1,
         Some(StitchTier::Callee) => 2,
         Some(StitchTier::Caller) => 3,
-        None => 4,
+        Some(StitchTier::CrossCrate) => 4,
+        None => 5,
     }
 }
 
@@ -724,6 +871,7 @@ fn sort_chunks_for_stitch_story(
             .then_with(|| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal))
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.start_line.cmp(&b.start_line))
+            .then_with(|| a.id.cmp(&b.id))
     });
 }
 

@@ -1,6 +1,7 @@
 //! File ranking by importance
 
 use crate::domain::{Chunk, FileInfo, RankingWeights};
+use crate::graph::lazy_loader::LazyChunkLoader;
 use anyhow::Result;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -16,6 +17,7 @@ pub enum StitchTier {
     Definition,
     Callee,
     Caller,
+    CrossCrate,
 }
 
 impl StitchTier {
@@ -24,6 +26,7 @@ impl StitchTier {
             Self::Definition => "definition",
             Self::Callee => "callee",
             Self::Caller => "caller",
+            Self::CrossCrate => "cross-crate",
         }
     }
 
@@ -32,6 +35,7 @@ impl StitchTier {
             Self::Definition => 0,
             Self::Callee => 1,
             Self::Caller => 2,
+            Self::CrossCrate => 3,
         }
     }
 }
@@ -41,6 +45,7 @@ pub struct StitchedBundle {
     pub seed_ids: BTreeSet<String>,
     pub stitched: HashMap<String, StitchTier>,
     pub tokens_used: usize,
+    pub lazy_chunks: Vec<Chunk>,
 }
 
 pub fn rerank_chunks_by_task(
@@ -104,6 +109,8 @@ pub fn stitch_thread_bundles(
     chunks: &[Chunk],
     top_n_seeds: usize,
     stitch_budget_tokens: usize,
+    loader: Option<&LazyChunkLoader>,
+    workspace_members: &[String],
 ) -> StitchedBundle {
     if chunks.is_empty() || stitch_budget_tokens == 0 {
         return StitchedBundle::default();
@@ -116,6 +123,7 @@ pub fn stitch_thread_bundles(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.start_line.cmp(&b.start_line))
+            .then_with(|| a.id.cmp(&b.id))
     });
 
     let seeds: Vec<&Chunk> = ranked.into_iter().take(top_n_seeds.max(1)).collect();
@@ -205,17 +213,32 @@ pub fn stitch_thread_bundles(
         chunks_by_file.entry(chunk.path.as_str()).or_default().push(chunk);
     }
 
-    let mut candidates: Vec<(&Chunk, StitchTier)> = Vec::new();
+    let mut candidates: Vec<(Chunk, StitchTier)> = Vec::new();
+    let seed_member_roots: HashSet<String> = seed_files
+        .iter()
+        .filter_map(|path| {
+            workspace_member_for_path(path, workspace_members).map(|s| s.to_string())
+        })
+        .collect();
     for id in &definition_ids {
         if let Some(chunk) = chunks.iter().find(|c| c.id == *id) {
-            candidates.push((chunk, StitchTier::Definition));
+            candidates.push((chunk.clone(), StitchTier::Definition));
         }
     }
     for file in &callee_files {
         if let Some(file_chunks) = chunks_by_file.get(file.as_str()) {
             for chunk in file_chunks {
                 if !seed_ids.contains(&chunk.id) && !definition_ids.contains(&chunk.id) {
-                    candidates.push((chunk, StitchTier::Callee));
+                    let tier = if is_cross_crate_candidate(
+                        &chunk.path,
+                        &seed_member_roots,
+                        workspace_members,
+                    ) {
+                        StitchTier::CrossCrate
+                    } else {
+                        StitchTier::Callee
+                    };
+                    candidates.push(((*chunk).clone(), tier));
                 }
             }
         }
@@ -227,8 +250,71 @@ pub fn stitch_thread_bundles(
                     && !definition_ids.contains(&chunk.id)
                     && !callee_files.contains(file)
                 {
-                    candidates.push((chunk, StitchTier::Caller));
+                    let tier = if is_cross_crate_candidate(
+                        &chunk.path,
+                        &seed_member_roots,
+                        workspace_members,
+                    ) {
+                        StitchTier::CrossCrate
+                    } else {
+                        StitchTier::Caller
+                    };
+                    candidates.push(((*chunk).clone(), tier));
                 }
+            }
+        }
+    }
+
+    if let Some(loader) = loader {
+        let mut seen_ids: HashSet<String> = chunks.iter().map(|c| c.id.clone()).collect();
+
+        for file in &callee_files {
+            if chunks_by_file.contains_key(file.as_str()) || !loader.has_file(file) {
+                continue;
+            }
+            for mut chunk in loader.load_chunks_for_file(file) {
+                if seen_ids.contains(&chunk.id)
+                    || seed_ids.contains(&chunk.id)
+                    || definition_ids.contains(&chunk.id)
+                {
+                    continue;
+                }
+                chunk.tags.insert("stitch:lazy".to_string());
+                seen_ids.insert(chunk.id.clone());
+                let tier =
+                    if is_cross_crate_candidate(&chunk.path, &seed_member_roots, workspace_members)
+                    {
+                        StitchTier::CrossCrate
+                    } else {
+                        StitchTier::Callee
+                    };
+                candidates.push((chunk, tier));
+            }
+        }
+        for file in &caller_files {
+            if chunks_by_file.contains_key(file.as_str()) || !loader.has_file(file) {
+                continue;
+            }
+            if callee_files.contains(file) {
+                continue;
+            }
+            for mut chunk in loader.load_chunks_for_file(file) {
+                if seen_ids.contains(&chunk.id)
+                    || seed_ids.contains(&chunk.id)
+                    || definition_ids.contains(&chunk.id)
+                {
+                    continue;
+                }
+                chunk.tags.insert("stitch:lazy".to_string());
+                seen_ids.insert(chunk.id.clone());
+                let tier =
+                    if is_cross_crate_candidate(&chunk.path, &seed_member_roots, workspace_members)
+                    {
+                        StitchTier::CrossCrate
+                    } else {
+                        StitchTier::Caller
+                    };
+                candidates.push((chunk, tier));
             }
         }
     }
@@ -240,9 +326,11 @@ pub fn stitch_thread_bundles(
             .then_with(|| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal))
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.start_line.cmp(&b.start_line))
+            .then_with(|| a.id.cmp(&b.id))
     });
 
     let mut stitched = HashMap::new();
+    let mut lazy_chunks = Vec::new();
     let mut tokens_used = 0usize;
     for (chunk, tier) in candidates {
         if stitched.contains_key(&chunk.id) {
@@ -252,10 +340,13 @@ pub fn stitch_thread_bundles(
             continue;
         }
         stitched.insert(chunk.id.clone(), tier);
+        if chunk.tags.contains("stitch:lazy") {
+            lazy_chunks.push(chunk.clone());
+        }
         tokens_used += chunk.token_estimate;
     }
 
-    StitchedBundle { seed_ids, stitched, tokens_used }
+    StitchedBundle { seed_ids, stitched, tokens_used, lazy_chunks }
 }
 
 fn dependency_expansion_scores(
@@ -616,6 +707,25 @@ fn ignored_symbols() -> &'static [&'static str] {
         "result", "ok", "err", "vec", "string", "option", "none", "some", "box", "arc", "mutex",
         "hashmap", "hashset", "self", "super", "crate", "true", "false",
     ]
+}
+
+fn workspace_member_for_path<'a>(path: &str, workspace_members: &'a [String]) -> Option<&'a str> {
+    workspace_members
+        .iter()
+        .map(String::as_str)
+        .filter(|root| path == *root || path.starts_with(&format!("{root}/")))
+        .max_by_key(|root| root.len())
+}
+
+fn is_cross_crate_candidate(
+    path: &str,
+    seed_member_roots: &HashSet<String>,
+    workspace_members: &[String],
+) -> bool {
+    let Some(member) = workspace_member_for_path(path, workspace_members) else {
+        return false;
+    };
+    !seed_member_roots.is_empty() && !seed_member_roots.contains(member)
 }
 
 pub fn rank_files(root_path: &Path, files: Vec<FileInfo>) -> Result<Vec<FileInfo>> {

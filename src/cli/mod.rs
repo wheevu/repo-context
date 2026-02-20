@@ -8,6 +8,7 @@ use tracing::Level;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod codeintel;
+mod diff;
 mod export;
 mod index;
 mod info;
@@ -44,6 +45,9 @@ enum Commands {
 
     /// Export portable code-intel JSON (SCIP-lite)
     Codeintel(codeintel::CodeIntelArgs),
+
+    /// Compare two export outputs and show structural diffs
+    Diff(diff::DiffArgs),
 }
 
 pub fn run() -> Result<()> {
@@ -67,5 +71,6 @@ pub fn run() -> Result<()> {
         Commands::Index(args) => index::run(args),
         Commands::Query(args) => query::run(args),
         Commands::Codeintel(args) => codeintel::run(args),
+        Commands::Diff(args) => diff::run(args),
     }
 }

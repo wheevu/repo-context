@@ -7,6 +7,7 @@ pub mod context;
 pub mod github;
 pub mod huggingface;
 pub mod local;
+pub mod workspace;
 
 pub use context::RepoContext;
 

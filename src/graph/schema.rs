@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use rusqlite::Connection;
 use std::path::Path;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub fn open_or_create(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -39,7 +39,8 @@ pub fn open_or_create(path: &Path) -> Result<Connection> {
         CREATE TABLE IF NOT EXISTS symbol_refs (
             symbol TEXT NOT NULL,
             chunk_id TEXT NOT NULL,
-            PRIMARY KEY (symbol, chunk_id)
+            ref_kind TEXT NOT NULL DEFAULT 'ref',
+            PRIMARY KEY (symbol, chunk_id, ref_kind)
         );
         ",
     )?;
@@ -51,11 +52,33 @@ pub fn open_or_create(path: &Path) -> Result<Connection> {
             conn.execute("INSERT INTO schema_version(version) VALUES(?1)", [SCHEMA_VERSION])?;
         }
         Some(version) if version == SCHEMA_VERSION => {}
+        Some(1) => {
+            migrate_v1_to_v2(&conn)?;
+            conn.execute("UPDATE schema_version SET version = ?1", [SCHEMA_VERSION])?;
+        }
         Some(version) => {
             bail!("Unsupported symbol_graph schema version {version}; expected {}", SCHEMA_VERSION);
         }
     }
     Ok(conn)
+}
+
+fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        ALTER TABLE symbol_refs RENAME TO symbol_refs_old;
+        CREATE TABLE symbol_refs (
+            symbol TEXT NOT NULL,
+            chunk_id TEXT NOT NULL,
+            ref_kind TEXT NOT NULL DEFAULT 'ref',
+            PRIMARY KEY (symbol, chunk_id, ref_kind)
+        );
+        INSERT OR IGNORE INTO symbol_refs(symbol, chunk_id, ref_kind)
+            SELECT symbol, chunk_id, 'ref' FROM symbol_refs_old;
+        DROP TABLE symbol_refs_old;
+        ",
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! File ranker implementation with manifest-aware entrypoint detection.
 
 use crate::domain::{FileInfo, RankingWeights};
+use crate::fetch::workspace::discover_workspace_graph;
 use crate::utils::{
     is_likely_generated, is_lock_file, is_vendored, normalize_path, read_file_safe,
 };
@@ -48,6 +49,7 @@ pub struct FileRanker {
     entrypoints: HashSet<String>,
     detected_languages: HashSet<String>,
     manifest_info: HashMap<String, JsonValue>,
+    workspace_members: Vec<String>,
     weights: RankingWeights,
 }
 
@@ -68,6 +70,7 @@ impl FileRanker {
             entrypoints: HashSet::new(),
             detected_languages: HashSet::new(),
             manifest_info: HashMap::new(),
+            workspace_members: Vec::new(),
             weights,
         };
         ranker.load_manifests();
@@ -164,6 +167,11 @@ impl FileRanker {
     #[allow(dead_code)]
     pub fn get_manifest_info(&self) -> &HashMap<String, JsonValue> {
         &self.manifest_info
+    }
+
+    #[allow(dead_code)]
+    pub fn get_workspace_members(&self) -> &[String] {
+        &self.workspace_members
     }
 
     fn load_manifests(&mut self) {
@@ -310,6 +318,30 @@ impl FileRanker {
                 }
             }
         }
+
+        if let Some(graph) = discover_workspace_graph(&self.root_path) {
+            let mut members: Vec<String> = graph.member_roots.into_iter().collect();
+            members.sort();
+            for member in &members {
+                self.entrypoint_candidates.insert(normalize_path(&format!("{member}/src/main.rs")));
+                self.entrypoint_candidates.insert(normalize_path(&format!("{member}/src/lib.rs")));
+            }
+            self.workspace_members = members.clone();
+            self.manifest_info.insert(
+                "cargo_workspace_members".to_string(),
+                JsonValue::Array(members.into_iter().map(JsonValue::String).collect()),
+            );
+            self.manifest_info.insert(
+                "cargo_workspace_crates".to_string(),
+                JsonValue::Array(
+                    graph
+                        .members
+                        .into_iter()
+                        .map(|member| JsonValue::String(member.name))
+                        .collect(),
+                ),
+            );
+        }
         // Python only inserts detected_languages for Cargo.toml; it does NOT add
         // src/main.rs or src/lib.rs as entrypoint candidates (ranker.py).
     }
@@ -409,7 +441,7 @@ fn is_api_definition(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::FileRanker;
+    use super::{FileRanker, JsonValue};
     use crate::domain::FileInfo;
     use std::collections::{BTreeSet, HashSet};
     use std::fs;
@@ -487,5 +519,28 @@ mod tests {
 
         assert!(contributing.priority > cargo.priority);
         assert!(contributing.tags.contains("contribution"));
+    }
+
+    #[test]
+    fn workspace_members_add_member_entrypoints() {
+        let tmp = TempDir::new().expect("tmp");
+        fs::write(tmp.path().join("Cargo.toml"), "[workspace]\nmembers=[\"crates/*\"]\n")
+            .expect("write root cargo");
+        fs::create_dir_all(tmp.path().join("crates/a/src")).expect("mkdir a/src");
+        fs::write(
+            tmp.path().join("crates/a/Cargo.toml"),
+            "[package]\nname=\"a\"\nversion=\"0.1.0\"\n",
+        )
+        .expect("write member cargo");
+        fs::write(tmp.path().join("crates/a/src/main.rs"), "fn main() {}\n").expect("write main");
+
+        let scanned = HashSet::from(["crates/a/src/main.rs".to_string()]);
+        let ranker = FileRanker::new(tmp.path(), scanned);
+        assert!(ranker.get_entrypoints().contains("crates/a/src/main.rs"));
+        assert!(ranker
+            .get_manifest_info()
+            .get("cargo_workspace_members")
+            .and_then(JsonValue::as_array)
+            .is_some());
     }
 }

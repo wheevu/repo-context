@@ -8,4 +8,4 @@ pub mod report;
 
 pub use context_pack::render_context_pack;
 pub use jsonl::render_jsonl;
-pub use report::write_report;
+pub use report::{write_report, ReportOptions};

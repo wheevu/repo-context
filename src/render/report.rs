@@ -6,16 +6,20 @@ use chrono::Utc;
 use serde_json::{json, Map, Value};
 use std::path::Path;
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReportOptions<'a> {
+    pub include_timestamp: bool,
+    pub provenance: Option<&'a Value>,
+    pub coverage: Option<&'a Value>,
+}
+
 pub fn write_report(
     report_path: &Path,
-    _root_path: &Path,
     stats: &ScanStats,
     files: &[FileInfo],
     output_files: &[String],
     config: &Value,
-    include_timestamp: bool,
-    provenance: Option<&Value>,
-    coverage: Option<&Value>,
+    options: ReportOptions<'_>,
 ) -> Result<()> {
     let mut sorted_output_files = output_files.to_vec();
     sorted_output_files.sort();
@@ -42,7 +46,7 @@ pub fn write_report(
 
     let mut report = Map::new();
     report.insert("schema_version".to_string(), Value::String(REPORT_SCHEMA_VERSION.to_string()));
-    if include_timestamp {
+    if options.include_timestamp {
         report.insert(
             "generated_at".to_string(),
             Value::String(Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string()),
@@ -50,10 +54,10 @@ pub fn write_report(
     }
     report.insert("stats".to_string(), stats.to_report_value());
     report.insert("config".to_string(), config.clone());
-    if let Some(provenance) = provenance {
+    if let Some(provenance) = options.provenance {
         report.insert("provenance".to_string(), provenance.clone());
     }
-    if let Some(coverage) = coverage {
+    if let Some(coverage) = options.coverage {
         report.insert("coverage".to_string(), coverage.clone());
     }
     report.insert("output_files".to_string(), serde_json::to_value(sorted_output_files)?);
@@ -74,7 +78,7 @@ fn round_priority(priority: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::write_report;
+    use super::{write_report, ReportOptions};
     use crate::domain::{FileInfo, ScanStats};
     use serde_json::json;
     use std::collections::BTreeSet;
@@ -132,14 +136,11 @@ mod tests {
 
         write_report(
             &report_path,
-            tmp.path(),
             &ScanStats::default(),
             &[file],
             &["out/chunks.jsonl".to_string()],
             &json!({"mode":"rag"}),
-            false,
-            None,
-            None,
+            ReportOptions { include_timestamp: false, provenance: None, coverage: None },
         )
         .expect("write report");
 

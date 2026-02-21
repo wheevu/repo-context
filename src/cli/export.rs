@@ -27,7 +27,7 @@ use crate::rank::{
     symbol_definitions, StitchTier,
 };
 use crate::redact::Redactor;
-use crate::render::{render_context_pack, render_jsonl, write_report};
+use crate::render::{render_context_pack, render_jsonl, write_report, ReportOptions};
 use crate::rerank::{build_reranker, normalize_scores};
 use crate::scan::scanner::FileScanner;
 use crate::scan::tree::generate_tree;
@@ -840,14 +840,15 @@ pub fn run(args: ExportArgs) -> Result<()> {
 
     write_report(
         &report_path,
-        &root_path,
         &stats,
         &selected_files,
         &output_files,
         &config_dict,
-        !args.no_timestamp,
-        Some(&provenance),
-        Some(&coverage),
+        ReportOptions {
+            include_timestamp: !args.no_timestamp,
+            provenance: Some(&provenance),
+            coverage: Some(&coverage),
+        },
     )?;
     output_files.push(report_path.display().to_string());
 
@@ -2008,10 +2009,8 @@ fn invariant_score(
         }
     }
 
-    if !(file.is_doc || file.is_config || path_lower.contains("test")) {
-        if score < 6 {
-            return None;
-        }
+    if !(file.is_doc || file.is_config || path_lower.contains("test")) && score < 6 {
+        return None;
     }
 
     if file.size_bytes <= 256_000 {

@@ -245,8 +245,8 @@ mod tests {
         let areas = build_focus_areas(&files);
         let labels: Vec<&str> = areas.iter().map(|a| a.label.as_str()).collect();
 
-        assert!(labels.iter().any(|l| *l == "Directory: src/"));
-        assert!(labels.iter().any(|l| *l == "Directory: api/"));
-        assert!(labels.iter().any(|l| *l == "Entrypoint: src/main.rs"));
+        assert!(labels.contains(&"Directory: src/"));
+        assert!(labels.contains(&"Directory: api/"));
+        assert!(labels.contains(&"Entrypoint: src/main.rs"));
     }
 }

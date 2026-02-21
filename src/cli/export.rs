@@ -6,10 +6,12 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::json;
 use std::collections::HashSet;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use super::guided::{choose_guided_plan, GuidedPlan};
 use super::utils::parse_csv;
 use crate::analysis::async_boundary::detect_async_boundaries;
 use crate::analysis::pr::build_pr_context;
@@ -145,10 +147,22 @@ pub struct ExportArgs {
     /// Skip writing persisted graph database
     #[arg(long)]
     pub no_graph: bool,
+
+    /// Skip interactive guided mode and run quick export defaults
+    #[arg(long)]
+    pub quick: bool,
 }
 
 pub fn run(args: ExportArgs) -> Result<()> {
     let start_time = Instant::now();
+
+    let interactive_terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let guided_enabled = !args.quick && interactive_terminal;
+    if !args.quick && !interactive_terminal {
+        eprintln!(
+            "info: non-interactive session detected; using quick export defaults (same as --quick)"
+        );
+    }
 
     if args.path.is_some() && args.repo.is_some() {
         anyhow::bail!("Cannot specify both --path and --repo");
@@ -248,6 +262,11 @@ pub fn run(args: ExportArgs) -> Result<()> {
             ])
         })
         .collect();
+
+    if guided_enabled {
+        let plan = choose_guided_plan(&root_path, &stats, &ranked_files)?;
+        apply_guided_plan(&mut merged, &args, &plan);
+    }
 
     let mut selected_files =
         apply_byte_budget(ranked_files, Some(merged.max_total_bytes), &mut stats);
@@ -465,8 +484,8 @@ pub fn run(args: ExportArgs) -> Result<()> {
     stats.chunks_created = chunks.len();
     stats.total_tokens_estimated = chunks.iter().map(|c| c.token_estimate).sum();
 
-    let output_dir = resolve_output_dir(&merged.output_dir, &root_path);
-    let repo_name = repo_name_for_output(&root_path);
+    let output_dir = resolve_output_dir(&merged.output_dir, &root_path, merged.repo_url.as_deref());
+    let repo_name = repo_name_for_output(&root_path, merged.repo_url.as_deref());
     fs::create_dir_all(&output_dir)?;
     let mut graph_written: Option<(PathBuf, usize, usize)> = None;
     if !args.no_graph {
@@ -724,8 +743,8 @@ pub fn run(args: ExportArgs) -> Result<()> {
     Ok(())
 }
 
-fn resolve_output_dir(config_output: &Path, root_path: &Path) -> PathBuf {
-    let repo_name = repo_name_for_output(root_path);
+fn resolve_output_dir(config_output: &Path, root_path: &Path, repo_url: Option<&str>) -> PathBuf {
+    let repo_name = repo_name_for_output(root_path, repo_url);
     let normalized = config_output.to_string_lossy().replace('\\', "/");
 
     let base = if normalized.is_empty() || normalized == "./out" || normalized == "out" {
@@ -743,8 +762,77 @@ fn resolve_output_dir(config_output: &Path, root_path: &Path) -> PathBuf {
     }
 }
 
-fn repo_name_for_output(root_path: &Path) -> String {
+fn repo_name_for_output(root_path: &Path, repo_url: Option<&str>) -> String {
+    if let Some(url) = repo_url {
+        if let Some(repo_name) = repo_name_from_remote_url(url) {
+            return repo_name;
+        }
+    }
+
     root_path.file_name().and_then(|n| n.to_str()).unwrap_or("repo").to_string()
+}
+
+fn repo_name_from_remote_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let without_query = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
+    let without_tree =
+        without_query.rsplit_once("/tree/").map(|(prefix, _)| prefix).unwrap_or(without_query);
+    let base = without_tree.trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+
+    let repo_segment = base.rsplit('/').next().unwrap_or(base);
+    let repo_name = repo_segment.strip_suffix(".git").unwrap_or(repo_segment);
+    let repo_name = repo_name.trim();
+
+    if repo_name.is_empty() {
+        None
+    } else {
+        Some(repo_name.to_string())
+    }
+}
+
+fn apply_guided_plan(merged: &mut crate::domain::Config, args: &ExportArgs, plan: &GuidedPlan) {
+    if args.mode.is_none() {
+        if let Some(mode) = plan.mode {
+            merged.mode = mode;
+        }
+    }
+
+    if args.max_tokens.is_none() {
+        if let Some(max_tokens) = plan.max_tokens {
+            merged.max_tokens = Some(max_tokens);
+        }
+    }
+
+    if args.task.is_none() {
+        if let Some(task_query) = plan.task_query.as_ref() {
+            merged.task_query = Some(task_query.clone());
+        }
+    }
+
+    if args.stitch_budget_fraction.is_none() {
+        if let Some(stitch_budget_fraction) = plan.stitch_budget_fraction {
+            merged.stitch_budget_fraction = stitch_budget_fraction;
+        }
+    }
+
+    if args.stitch_top_n.is_none() {
+        if let Some(stitch_top_n) = plan.stitch_top_n {
+            merged.stitch_top_n = stitch_top_n;
+        }
+    }
+
+    if args.rerank_top_k.is_none() {
+        if let Some(rerank_top_k) = plan.rerank_top_k {
+            merged.rerank_top_k = rerank_top_k;
+        }
+    }
 }
 
 fn prefixed_output_file_name(repo_name: &str, base_name: &str) -> String {
@@ -981,10 +1069,14 @@ fn apply_byte_budget(
 
 #[cfg(test)]
 mod tests {
-    use super::sort_chunks_for_stitch_story;
-    use crate::domain::Chunk;
+    use super::{
+        apply_guided_plan, repo_name_for_output, repo_name_from_remote_url,
+        sort_chunks_for_stitch_story, ExportArgs, GuidedPlan,
+    };
+    use crate::domain::{Chunk, Config, OutputMode};
     use crate::rank::StitchTier;
     use std::collections::{BTreeSet, HashMap};
+    use std::path::Path;
 
     fn mk_chunk(id: &str, priority: f64, path: &str, start_line: usize) -> Chunk {
         Chunk {
@@ -1038,5 +1130,130 @@ mod tests {
                 "rest"
             ]
         );
+    }
+
+    #[test]
+    fn repo_name_from_remote_url_extracts_repo_segment() {
+        assert_eq!(
+            repo_name_from_remote_url("https://github.com/owner/repo"),
+            Some("repo".to_string())
+        );
+        assert_eq!(
+            repo_name_from_remote_url("https://github.com/owner/repo.git"),
+            Some("repo".to_string())
+        );
+        assert_eq!(
+            repo_name_from_remote_url("https://github.com/owner/repo/tree/main"),
+            Some("repo".to_string())
+        );
+        assert_eq!(
+            repo_name_from_remote_url("https://huggingface.co/spaces/gradio/demo/tree/main"),
+            Some("demo".to_string())
+        );
+    }
+
+    #[test]
+    fn repo_name_for_output_prefers_remote_name_for_temp_clone_paths() {
+        let temp_clone_root = Path::new("/tmp/repo-context-123456789");
+        let repo_name =
+            repo_name_for_output(temp_clone_root, Some("https://github.com/acme/important-repo"));
+
+        assert_eq!(repo_name, "important-repo");
+    }
+
+    fn default_args() -> ExportArgs {
+        ExportArgs {
+            path: None,
+            repo: None,
+            ref_: None,
+            config: None,
+            include_ext: None,
+            exclude_glob: None,
+            max_file_bytes: None,
+            max_total_bytes: None,
+            no_gitignore: false,
+            follow_symlinks: false,
+            include_minified: false,
+            max_tokens: None,
+            allow_over_budget: false,
+            task: None,
+            no_semantic_rerank: false,
+            semantic_model: None,
+            rerank_top_k: None,
+            stitch_budget_fraction: None,
+            stitch_top_n: None,
+            chunk_tokens: None,
+            chunk_overlap: None,
+            min_chunk_tokens: None,
+            mode: None,
+            output_dir: None,
+            no_timestamp: false,
+            tree_depth: None,
+            no_redact: false,
+            redaction_mode: None,
+            no_graph: false,
+            quick: false,
+        }
+    }
+
+    #[test]
+    fn guided_plan_applies_defaults_when_cli_not_explicit() {
+        let mut cfg = Config::default();
+        let args = default_args();
+        let plan = GuidedPlan {
+            mode: Some(OutputMode::Both),
+            max_tokens: Some(140_000),
+            task_query: Some("architecture and dependencies".to_string()),
+            stitch_budget_fraction: Some(0.45),
+            stitch_top_n: Some(40),
+            rerank_top_k: Some(300),
+        };
+
+        apply_guided_plan(&mut cfg, &args, &plan);
+
+        assert_eq!(cfg.mode, OutputMode::Both);
+        assert_eq!(cfg.max_tokens, Some(140_000));
+        assert_eq!(cfg.task_query.as_deref(), Some("architecture and dependencies"));
+        assert_eq!(cfg.stitch_budget_fraction, 0.45);
+        assert_eq!(cfg.stitch_top_n, 40);
+        assert_eq!(cfg.rerank_top_k, 300);
+    }
+
+    #[test]
+    fn guided_plan_does_not_override_explicit_cli_flags() {
+        let mut cfg = Config {
+            mode: OutputMode::Prompt,
+            max_tokens: Some(50_000),
+            task_query: Some("explicit task".to_string()),
+            stitch_budget_fraction: 0.2,
+            stitch_top_n: 10,
+            rerank_top_k: 42,
+            ..Config::default()
+        };
+        let mut args = default_args();
+        args.mode = Some("prompt".to_string());
+        args.max_tokens = Some(50_000);
+        args.task = Some("explicit task".to_string());
+        args.stitch_budget_fraction = Some(0.2);
+        args.stitch_top_n = Some(10);
+        args.rerank_top_k = Some(42);
+
+        let plan = GuidedPlan {
+            mode: Some(OutputMode::Both),
+            max_tokens: Some(140_000),
+            task_query: Some("architecture and dependencies".to_string()),
+            stitch_budget_fraction: Some(0.45),
+            stitch_top_n: Some(40),
+            rerank_top_k: Some(300),
+        };
+
+        apply_guided_plan(&mut cfg, &args, &plan);
+
+        assert_eq!(cfg.mode, OutputMode::Prompt);
+        assert_eq!(cfg.max_tokens, Some(50_000));
+        assert_eq!(cfg.task_query.as_deref(), Some("explicit task"));
+        assert_eq!(cfg.stitch_budget_fraction, 0.2);
+        assert_eq!(cfg.stitch_top_n, 10);
+        assert_eq!(cfg.rerank_top_k, 42);
     }
 }

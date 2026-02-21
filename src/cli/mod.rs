@@ -10,6 +10,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 mod codeintel;
 mod diff;
 mod export;
+mod guided;
 mod index;
 mod info;
 mod query;

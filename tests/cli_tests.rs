@@ -82,6 +82,43 @@ fn test_export_accepts_contribution_mode() {
 }
 
 #[test]
+fn test_export_quick_flag_skips_guided_mode() {
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::write(repo.path().join("main.rs"), "fn main() {}\n").expect("write source file");
+    let out = TempDir::new().expect("temp out dir");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--quick",
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("utf8 out path"),
+    ]);
+    cmd.assert().success();
+}
+
+#[test]
+fn test_export_auto_falls_back_to_quick_in_non_interactive_sessions() {
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::write(repo.path().join("main.rs"), "fn main() {}\n").expect("write source file");
+    let out = TempDir::new().expect("temp out dir");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("utf8 out path"),
+    ]);
+    cmd.assert().success().stderr(predicate::str::contains("non-interactive session detected"));
+}
+
+#[test]
 fn test_diff_compares_two_exports() {
     let before = TempDir::new().expect("temp before");
     let after = TempDir::new().expect("temp after");

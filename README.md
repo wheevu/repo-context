@@ -63,6 +63,15 @@ Export a local repo:
 repo-context export --path .
 ```
 
+By default, `export` is interactive in a terminal and lets you choose a focus preset
+(Quick scan / Architecture overview / Deep dive / Full context).
+In non-interactive sessions (CI, pipes), it automatically falls back to quick defaults.
+
+Skip prompts explicitly:
+```bash
+repo-context export --path . --quick
+```
+
 Export from a remote repo:
 ```bash
 repo-context export --repo https://github.com/owner/repo
@@ -99,6 +108,7 @@ repo-context diff out/repo-a out/repo-b --format json
 **"Small + high signal" export**
 ```bash
 repo-context export -p . \
+  --quick \
   --include-ext ".rs,.toml,.md" \
   --exclude-glob "tests/**,target/**"
 ```

@@ -14,6 +14,8 @@ pub fn write_report(
     output_files: &[String],
     config: &Value,
     include_timestamp: bool,
+    provenance: Option<&Value>,
+    coverage: Option<&Value>,
 ) -> Result<()> {
     let mut sorted_output_files = output_files.to_vec();
     sorted_output_files.sort();
@@ -48,6 +50,12 @@ pub fn write_report(
     }
     report.insert("stats".to_string(), stats.to_report_value());
     report.insert("config".to_string(), config.clone());
+    if let Some(provenance) = provenance {
+        report.insert("provenance".to_string(), provenance.clone());
+    }
+    if let Some(coverage) = coverage {
+        report.insert("coverage".to_string(), coverage.clone());
+    }
     report.insert("output_files".to_string(), serde_json::to_value(sorted_output_files)?);
     if !file_manifest.is_empty() {
         report.insert("files".to_string(), serde_json::to_value(file_manifest)?);
@@ -130,6 +138,8 @@ mod tests {
             &["out/chunks.jsonl".to_string()],
             &json!({"mode":"rag"}),
             false,
+            None,
+            None,
         )
         .expect("write report");
 

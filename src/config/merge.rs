@@ -31,6 +31,9 @@ pub struct CliOverrides {
     pub tree_depth: Option<usize>,
     pub redact_secrets: Option<bool>,
     pub redaction_mode: Option<crate::domain::RedactionMode>,
+    pub always_include_patterns: Option<Vec<String>>,
+    pub always_include_paths: Option<Vec<String>>,
+    pub invariant_keywords: Option<Vec<String>>,
 }
 
 pub fn merge_cli_with_config(mut base_config: Config, cli: CliOverrides) -> Config {
@@ -114,6 +117,15 @@ pub fn merge_cli_with_config(mut base_config: Config, cli: CliOverrides) -> Conf
     }
     if let Some(redaction_mode) = cli.redaction_mode {
         base_config.redaction_mode = redaction_mode;
+    }
+    if let Some(always_include_patterns) = cli.always_include_patterns {
+        base_config.always_include_patterns = always_include_patterns;
+    }
+    if let Some(always_include_paths) = cli.always_include_paths {
+        base_config.always_include_paths = always_include_paths;
+    }
+    if let Some(invariant_keywords) = cli.invariant_keywords {
+        base_config.invariant_keywords = invariant_keywords;
     }
 
     base_config

@@ -2,7 +2,8 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
+use serde_json::Value;
 use std::fs;
 use std::process::Command as StdCommand;
 use tempfile::TempDir;
@@ -119,6 +120,82 @@ fn test_export_auto_falls_back_to_quick_in_non_interactive_sessions() {
 }
 
 #[test]
+fn test_export_strict_budget_fails_when_protected_pins_exceed_budget() {
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::write(repo.path().join("README.md"), "# Repo\n").expect("write readme");
+    fs::write(repo.path().join("CONTRIBUTING.md"), "# Contributing\nMust do this\n")
+        .expect("write contributing");
+    fs::write(repo.path().join("SECURITY.md"), "# Security\nMust do that\n")
+        .expect("write security");
+    fs::write(repo.path().join("Cargo.toml"), "[package]\nname='demo'\nversion='0.1.0'\n")
+        .expect("write cargo");
+    fs::create_dir_all(repo.path().join("src")).expect("mkdir src");
+    fs::write(repo.path().join("src/lib.rs"), "pub fn x() {}\n").expect("write source");
+    let out = TempDir::new().expect("temp out dir");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--mode",
+        "contribution",
+        "--max-tokens",
+        "1",
+        "--strict-budget",
+        "--quick",
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("utf8 out path"),
+    ]);
+    cmd.assert().failure().stderr(predicate::str::contains("protected pin files require"));
+}
+
+#[test]
+fn test_export_from_index_uses_fresh_index_metadata() {
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::create_dir_all(repo.path().join("src")).expect("mkdir src");
+    fs::write(repo.path().join("Cargo.toml"), "[package]\nname='demo'\nversion='0.1.0'\n")
+        .expect("write cargo");
+    fs::write(repo.path().join("src/lib.rs"), "pub fn hello() -> &'static str { \"hi\" }\n")
+        .expect("write lib");
+
+    let index_dir = repo.path().join(".repo-context");
+    fs::create_dir_all(&index_dir).expect("mkdir index dir");
+    let db_path = index_dir.join("index.sqlite");
+
+    let mut index_cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    index_cmd.args([
+        "index",
+        "--path",
+        repo.path().to_str().expect("repo path"),
+        "--db",
+        db_path.to_str().expect("db path"),
+    ]);
+    index_cmd.assert().success();
+
+    let out = TempDir::new().expect("out dir");
+    let mut export_cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    export_cmd.args([
+        "export",
+        "--path",
+        repo.path().to_str().expect("repo path"),
+        "--from-index",
+        "--quick",
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("out path"),
+    ]);
+    export_cmd.assert().success().stdout(predicate::str::contains("using index dataset"));
+
+    let repo_name = repo.path().file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let report_path = out.path().join(repo_name).join(format!("{repo_name}_report.json"));
+    let report_raw = fs::read_to_string(report_path).expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+    assert_eq!(report["provenance"]["index"]["used_for_export"], Value::Bool(true));
+}
+
+#[test]
 fn test_diff_compares_two_exports() {
     let before = TempDir::new().expect("temp before");
     let after = TempDir::new().expect("temp after");
@@ -226,6 +303,12 @@ fn test_index_creates_sqlite_database_with_symbols() {
     cmd_again.assert().success().stdout(predicate::str::contains("files reused: 2"));
 
     let conn = Connection::open(&db_path).expect("open sqlite");
+    let config_hash: Option<String> = conn
+        .query_row("SELECT value FROM metadata WHERE key = 'config_hash'", [], |row| row.get(0))
+        .optional()
+        .expect("config hash metadata");
+    assert!(config_hash.as_deref().unwrap_or("").len() >= 16);
+
     let file_count: i64 =
         conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0)).expect("count files");
     assert!(file_count >= 2);

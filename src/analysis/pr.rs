@@ -9,6 +9,9 @@ pub struct PrContextReport {
     pub touch_points: Vec<TouchPoint>,
     pub entrypoints: Vec<EntrypointSurface>,
     pub invariants: Vec<Invariant>,
+    pub feature_flags: Vec<FeatureFlagBoundary>,
+    pub trait_impls: Vec<TraitImplEdge>,
+    pub error_flows: Vec<ErrorFlowSignal>,
     pub graph_available: bool,
 }
 
@@ -35,6 +38,28 @@ pub struct Invariant {
     pub chunk_id: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct FeatureFlagBoundary {
+    pub path: String,
+    pub feature: String,
+    pub chunk_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitImplEdge {
+    pub path: String,
+    pub trait_name: String,
+    pub target_type: String,
+    pub chunk_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ErrorFlowSignal {
+    pub path: String,
+    pub evidence: String,
+    pub chunk_id: String,
+}
+
 pub fn build_pr_context(
     files: &[FileInfo],
     chunks: &[Chunk],
@@ -44,6 +69,9 @@ pub fn build_pr_context(
     let mut touch_points = Vec::new();
     let mut entrypoints = Vec::new();
     let mut invariants = Vec::new();
+    let mut feature_flags = Vec::new();
+    let mut trait_impls = Vec::new();
+    let mut error_flows = Vec::new();
 
     let mut ranked_chunks: Vec<&Chunk> = chunks.iter().collect();
     ranked_chunks.sort_by(|a, b| {
@@ -144,6 +172,30 @@ pub fn build_pr_context(
                 symbol: "feature flag".to_string(),
                 chunk_id: chunk.id.clone(),
             });
+            for feature in extract_feature_names(&chunk.content) {
+                feature_flags.push(FeatureFlagBoundary {
+                    path: chunk.path.clone(),
+                    feature,
+                    chunk_id: chunk.id.clone(),
+                });
+            }
+        }
+
+        for (trait_name, target_type) in extract_trait_impls(&chunk.content) {
+            trait_impls.push(TraitImplEdge {
+                path: chunk.path.clone(),
+                trait_name,
+                target_type,
+                chunk_id: chunk.id.clone(),
+            });
+        }
+
+        for evidence in extract_error_flow_signals(&chunk.content) {
+            error_flows.push(ErrorFlowSignal {
+                path: chunk.path.clone(),
+                evidence,
+                chunk_id: chunk.id.clone(),
+            });
         }
     }
 
@@ -153,6 +205,25 @@ pub fn build_pr_context(
 
     invariants.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.kind.cmp(b.kind)));
     invariants.truncate(30);
+
+    feature_flags.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.feature.cmp(&b.feature)));
+    feature_flags.dedup_by(|a, b| a.path == b.path && a.feature == b.feature);
+    feature_flags.truncate(30);
+
+    trait_impls.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then_with(|| a.trait_name.cmp(&b.trait_name))
+            .then_with(|| a.target_type.cmp(&b.target_type))
+    });
+    trait_impls.dedup_by(|a, b| {
+        a.path == b.path && a.trait_name == b.trait_name && a.target_type == b.target_type
+    });
+    trait_impls.truncate(30);
+
+    error_flows.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.evidence.cmp(&b.evidence)));
+    error_flows.dedup_by(|a, b| a.path == b.path && a.evidence == b.evidence);
+    error_flows.truncate(30);
 
     if let Some(query) = task_query {
         let query_tokens: BTreeSet<String> = query
@@ -182,5 +253,101 @@ pub fn build_pr_context(
         entrypoints.dedup_by(|a, b| a.kind == b.kind && a.path == b.path && a.symbol == b.symbol);
     }
 
-    PrContextReport { touch_points, entrypoints, invariants, graph_available }
+    PrContextReport {
+        touch_points,
+        entrypoints,
+        invariants,
+        feature_flags,
+        trait_impls,
+        error_flows,
+        graph_available,
+    }
+}
+
+fn extract_feature_names(content: &str) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.contains("feature") {
+            continue;
+        }
+        if let Some(start) = trimmed.find("feature = \"") {
+            let tail = &trimmed[start + "feature = \"".len()..];
+            if let Some(end) = tail.find('"') {
+                let feature = tail[..end].trim();
+                if !feature.is_empty() {
+                    out.insert(feature.to_string());
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn extract_trait_impls(content: &str) -> Vec<(String, String)> {
+    let mut out = BTreeSet::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("impl ") || !trimmed.contains(" for ") {
+            continue;
+        }
+        let rest = trimmed.trim_start_matches("impl ");
+        let Some((trait_part, target_part)) = rest.split_once(" for ") else {
+            continue;
+        };
+        let trait_name = trait_part.split('<').next().unwrap_or("").trim();
+        let target =
+            target_part.split('{').next().unwrap_or("").split('<').next().unwrap_or("").trim();
+        if !trait_name.is_empty() && !target.is_empty() {
+            out.insert((trait_name.to_string(), target.to_string()));
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn extract_error_flow_signals(content: &str) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    let lower = content.to_ascii_lowercase();
+    for (needle, label) in [
+        ("thiserror::error", "thiserror type"),
+        ("derive(error)", "derive(Error)"),
+        ("anyhow::", "anyhow context"),
+        ("-> result<", "result return"),
+        ("map_err(", "map_err conversion"),
+        ("?", "error propagation (?)"),
+    ] {
+        if lower.contains(needle) {
+            out.insert(label.to_string());
+        }
+    }
+    out.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_error_flow_signals, extract_feature_names, extract_trait_impls};
+
+    #[test]
+    fn extracts_feature_flags_from_cfg_lines() {
+        let content = "#[cfg(feature = \"simd\")]\nfn run() {}\n";
+        let features = extract_feature_names(content);
+        assert_eq!(features, vec!["simd".to_string()]);
+    }
+
+    #[test]
+    fn extracts_trait_impl_edges() {
+        let content = "impl Display for ErrorKind { }\nimpl Serialize for Payload<T> {}\n";
+        let impls = extract_trait_impls(content);
+        assert!(impls.contains(&("Display".to_string(), "ErrorKind".to_string())));
+        assert!(impls.contains(&("Serialize".to_string(), "Payload".to_string())));
+    }
+
+    #[test]
+    fn extracts_error_flow_evidence() {
+        let content = "#[derive(Error)]\nfn x() -> Result<()> { anyhow::bail!(\"x\") }";
+        let signals = extract_error_flow_signals(content);
+        assert!(signals.iter().any(|s| s == "derive(Error)"));
+        assert!(signals.iter().any(|s| s == "result return"));
+        assert!(signals.iter().any(|s| s == "anyhow context"));
+    }
 }

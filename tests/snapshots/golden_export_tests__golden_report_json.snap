@@ -5,6 +5,8 @@ expression: normalized_report
 {
   "config": {
     "allow_over_budget": false,
+    "always_include_paths": [],
+    "always_include_patterns": [],
     "chunk_overlap": 30,
     "chunk_tokens": 220,
     "exclude_globs": [
@@ -48,6 +50,7 @@ expression: normalized_report
       "venv/**"
     ],
     "follow_symlinks": false,
+    "from_index": false,
     "include_extensions": [
       ".adoc",
       ".bash",
@@ -98,14 +101,28 @@ expression: normalized_report
       ".yml",
       ".zsh"
     ],
+    "invariant_keywords": [
+      "abi",
+      "compatibility",
+      "contract",
+      "invariant",
+      "locking",
+      "must",
+      "ownership",
+      "safety",
+      "schema",
+      "threading"
+    ],
     "max_file_bytes": 1048576,
     "max_tokens": 2000,
     "max_total_bytes": 20000000,
     "mode": "both",
     "path": "/<FIXTURE_ROOT>",
+    "pinned_only_mode": false,
     "redact_secrets": true,
     "ref": null,
     "repo": null,
+    "require_fresh_index": false,
     "rerank_top_k": 200,
     "reranking": null,
     "semantic_model": null,
@@ -113,8 +130,23 @@ expression: normalized_report
     "skip_minified": true,
     "stitch_budget_fraction": 0.3,
     "stitch_top_n": 20,
+    "strict_budget": false,
     "task_query": null,
     "tree_depth": 4
+  },
+  "coverage": {
+    "fingerprint": "<FINGERPRINT>",
+    "hot_paths_from_tests_examples": [],
+    "missing_context_todos": [],
+    "most_imported_not_included": [],
+    "public_api_surface_coverage": {
+      "coverage_ratio": 1.0,
+      "dropped_rust_files_considered": 0,
+      "estimated_total_pub_items": 0,
+      "included_pub_items": 0,
+      "language": "rust",
+      "notes": "Coverage counts Rust public items in included files and estimates dropped Rust files from disk when readable."
+    }
   },
   "files": [
     {
@@ -153,6 +185,22 @@ expression: normalized_report
     "/<OUTPUT_DIR>/<FIXTURE_REPO>_context_pack.md",
     "/<OUTPUT_DIR>/<FIXTURE_REPO>_symbol_graph.db"
   ],
+  "provenance": {
+    "config_hash": "<CONFIG_HASH>",
+    "fingerprint": "<FINGERPRINT>",
+    "git_branch": null,
+    "git_commit": null,
+    "index": {
+      "db_path": null,
+      "reason": "index.sqlite not found",
+      "status": "missing",
+      "used_for_export": false
+    },
+    "path": "/<FIXTURE_ROOT>",
+    "ref": null,
+    "repo": "<FIXTURE_REPO>",
+    "tool_version": "0.2.0"
+  },
   "schema_version": "1.0.0",
   "stats": {
     "chunks_created": 5,
@@ -171,6 +219,8 @@ expression: normalized_report
       "python": 2,
       "toml": 1
     },
+    "pinned_only_mode": false,
+    "pinned_overflow_tokens": 0,
     "processing_time_seconds": 0.0,
     "redacted_chunks": 1,
     "redacted_files": 1,

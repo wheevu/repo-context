@@ -63,49 +63,35 @@ Export a local repo:
 repo-context export --path .
 ```
 
-By default, `export` is interactive in a terminal and lets you choose a focus preset
-(Quick scan / Architecture overview / Deep dive / Full context).
-In non-interactive sessions (CI, pipes), it automatically falls back to quick defaults.
+Export from a remote repo:
+```bash
+repo-context export --repo https://github.com/owner/repo
+```
+
+Show repo stats only (no export files):
+```bash
+repo-context info .
+```
+
+## Guided mode (default)
+
+`repo-context export` is interactive by default in terminals:
+
+-   **Quick scan** (fast, high-signal defaults)
+-   **Architecture overview** (stronger dependency/system context)
+-   **Deep dive specific areas** (repo-specific focus selection)
+-   **Full context** (largest practical context bundle)
+
+In non-interactive sessions (CI/pipes), it automatically falls back to quick defaults.
 
 Skip prompts explicitly:
 ```bash
 repo-context export --path . --quick
 ```
 
-Export from a remote repo:
-```bash
-repo-context export --repo https://github.com/owner/repo
-```
+## Use-case playbook
 
-Just show stats (no output files):
-```bash
-repo-context info .
-```
-
-Build a local retrieval index once:
-```bash
-repo-context index --path .
-```
-
-Query the local index:
-```bash
-repo-context query --task "where is auth token refresh handled?"
-```
-
-Export portable code-intel JSON:
-```bash
-repo-context codeintel
-```
-
-Compare two exports:
-```bash
-repo-context diff out/repo-a out/repo-b
-repo-context diff out/repo-a out/repo-b --format json
-```
-
-## Common recipes
-
-**"Small + high signal" export**
+**Small + high-signal export (non-interactive)**
 ```bash
 repo-context export -p . \
   --quick \
@@ -113,17 +99,27 @@ repo-context export -p . \
   --exclude-glob "tests/**,target/**"
 ```
 
-**RAG-only output to a custom folder**
+**Architecture understanding for an unfamiliar repo**
+```bash
+repo-context export -p . --task "overall architecture and dependencies" --mode both
+```
+
+**Deep dive into a feature path**
+```bash
+repo-context export -p . --task "trace auth refresh and token validation flow"
+```
+
+**RAG-only output**
 ```bash
 repo-context export -p . --mode rag -o ./embeddings
 ```
 
-**Reproducible output (nice for diffs)**
+**Reproducible outputs for version-to-version diffs**
 ```bash
 repo-context export -p . --no-timestamp
 ```
 
-**Strict budget behavior with always-include files**
+**Strict token-budget handling with always-include files**
 ```bash
 # hard-error if always-include files alone exceed --max-tokens
 repo-context export -p . --max-tokens 50000
@@ -132,21 +128,173 @@ repo-context export -p . --max-tokens 50000
 repo-context export -p . --max-tokens 50000 --allow-over-budget
 ```
 
+**Contribution/PR packs with protected invariant files**
+```bash
+# defaults to pinned-only fallback when protected files exceed budget
+repo-context export -p . --mode contribution --max-tokens 12000
+
+# fail instead of fallback when protected set exceeds budget
+repo-context export -p . --mode contribution --max-tokens 12000 --strict-budget
+
+# explicit path/glob pins (repeatable flags supported)
+repo-context export -p . --mode contribution \
+  --always-include-path CONTRIBUTING.md \
+  --always-include-path SECURITY.md \
+  --always-include-glob "docs/contracts/**"
+```
+
 **Best stitching quality (index first, export second)**
 ```bash
 repo-context index -p .
-repo-context export -p . --task "trace auth refresh flow"
+repo-context export -p . --from-index --task "trace auth refresh flow"
 ```
+
+**Build local index and query it repeatedly**
+```bash
+repo-context index -p .
+repo-context query --task "where are retries and backoff handled?" --expand
+```
+
+For remote repos, `index --repo` now stores the default index in a persistent cache keyed by
+`repo_url + ref + config_hash`, so later `export --from-index` can reuse it.
+
+**Portable code-intel output from local index**
+```bash
+repo-context codeintel --db .repo-context/index.sqlite --out .repo-context/codeintel.json
+```
+
+**Compare two exports**
+```bash
+repo-context diff out/repo-a out/repo-b
+repo-context diff out/repo-a out/repo-b --format markdown
+repo-context diff out/repo-a out/repo-b --format json
+```
+
+## Command manual
+
+### Top-level commands
+
+-   `export` - create context artifacts (`context_pack`, `chunks`, report, graph)
+-   `info` - scan + ranking summary only
+-   `index` - build local SQLite retrieval/symbol index
+-   `query` - retrieve task-relevant chunks from index
+-   `codeintel` - export portable SCIP-like JSON from index
+-   `diff` - compare two exports
+
+### `export` options
+
+**Input source**
+-   `-p, --path <PATH>` local repository path
+-   `-r, --repo <URL>` remote repository URL (GitHub/HuggingFace)
+-   `--ref <REF>` branch/tag/SHA when using `--repo`
+-   `-c, --config <FILE>` config file path
+
+**Scope and filtering**
+-   `-i, --include-ext <EXTS>` extension allowlist (`.rs,.toml,.md`)
+-   `-e, --exclude-glob <GLOBS>` exclude globs
+-   `--max-file-bytes <BYTES>` per-file size cap
+-   `--max-total-bytes <BYTES>` total scan byte cap
+-   `--no-gitignore` ignore `.gitignore`
+-   `--follow-symlinks` follow symlinks
+-   `--include-minified` include minified/bundled files
+
+**Retrieval and ranking**
+-   `-t, --max-tokens <TOKENS>` output token budget
+-   `--allow-over-budget` allow always-include overflow
+-   `--strict-budget` fail when protected pins exceed token budget
+-   `--task <TEXT>` task-aware reranking query
+-   `--no-semantic-rerank` disable semantic rerank stage
+-   `--semantic-model <MODEL>` semantic model identifier
+-   `--rerank-top-k <N>` number of chunks for semantic reranking
+-   `--stitch-budget-fraction <FLOAT>` reserved budget for stitched context
+-   `--stitch-top-n <N>` top-ranked seed chunks for stitching
+
+**Chunking**
+-   `--chunk-tokens <TOKENS>` target chunk size
+-   `--chunk-overlap <TOKENS>` chunk overlap
+-   `--min-chunk-tokens <TOKENS>` coalescing threshold
+
+**Output and rendering**
+-   `-m, --mode <MODE>` `prompt|rag|contribution|pr-context|both`
+-   `-o, --output-dir <DIR>` output base directory
+-   `--no-timestamp` reproducible output (no timestamp fields)
+-   `--tree-depth <DEPTH>` tree depth in rendered context pack
+-   `--no-graph` skip `symbol_graph.db` output
+-   `--quick` skip guided menu and run non-interactive defaults
+-   `--from-index` prefer loading files/chunks from fresh local index
+-   `--require-fresh-index` fail if index is missing/stale when `--from-index` is used
+
+**Contribution pinning/invariants**
+-   `--always-include-path <PATHS>` hard Tier-0 pins (repeatable or CSV)
+-   `--always-include-glob <GLOBS>` Tier-1 protected pin patterns (repeatable or CSV)
+-   `--invariant-keywords <WORDS>` replace invariant discovery keyword set
+-   `--invariant-keywords-add <WORDS>` append to invariant discovery keyword set
+
+**Redaction**
+-   `--no-redact` disable secret redaction
+-   `--redaction-mode <MODE>` `fast|standard|paranoid|structure-safe`
+
+### `info` options
+
+-   `<PATH>` repo path to inspect
+-   `-i, --include-ext <EXTS>` extension allowlist
+-   `-e, --exclude-glob <GLOBS>` exclude globs
+-   `--max-file-bytes <BYTES>` per-file size cap
+-   `--no-gitignore` ignore `.gitignore`
+-   `--follow-symlinks` follow symlinks
+-   `--include-minified` include minified/bundled files
+
+### `index` options
+
+-   `-p, --path <PATH>` local path to index
+-   `-r, --repo <URL>` remote URL to clone and index
+-   `--ref <REF>` branch/tag/SHA for `--repo`
+-   `-c, --config <FILE>` config file path
+-   `--db <FILE>` SQLite output path (default: `.repo-context/index.sqlite`)
+-   `-i, --include-ext <EXTS>` extension allowlist
+-   `-e, --exclude-glob <GLOBS>` exclude globs
+-   `--max-file-bytes <BYTES>` per-file size cap
+-   `--max-total-bytes <BYTES>` total scan byte cap
+-   `--no-gitignore` ignore `.gitignore`
+-   `--follow-symlinks` follow symlinks
+-   `--include-minified` include minified/bundled files
+-   `--chunk-tokens <TOKENS>` chunk size target
+-   `--chunk-overlap <TOKENS>` chunk overlap
+-   `--min-chunk-tokens <TOKENS>` coalescing threshold
+-   `--lsp` enrich with rust-analyzer symbol references
+
+### `query` options
+
+-   `--db <FILE>` index database path
+-   `--task <TEXT>` required retrieval query text
+-   `-n, --limit <COUNT>` max hits to show
+-   `--lsp-backend <MODE>` `off|auto|rust-analyzer`
+-   `--expand` include definitions/callers/tests/docs expansions
+
+### `codeintel` options
+
+-   `--db <FILE>` index database path
+-   `--out <FILE>` output JSON path
+
+### `diff` options
+
+-   `<BEFORE> <AFTER>` directories containing prior/current exports
+-   `--format <FORMAT>` `text|markdown|json`
+
+### Global options
+
+-   `-v, --verbose` set log level to DEBUG
+-   `-h, --help` and `-V, --version`
 
 ## Output (what you get)
 
 Outputs go to: `<output-dir>/<repo-name>/`
 
 **Files:**
--   `context_pack.md` — overview + tree + "key files" + chunked content
--   `chunks.jsonl` — `{ id, path, lang, start_line, end_line, content, ... }`
--   `report.json` — scan/export stats + skip reasons
--   `symbol_graph.db` — persisted symbol/import graph (unless `--no-graph`)
+-   `<repo-name>_context_pack.md` — overview + tree + key files + chunked content
+-   `<repo-name>_chunks.jsonl` — `{ id, path, lang, start_line, end_line, content, ... }`
+-   `<repo-name>_report.json` — scan/export stats + skip reasons
+-   `<repo-name>_symbol_graph.db` — persisted symbol/import graph (unless `--no-graph`)
 
 ## Configuration
 

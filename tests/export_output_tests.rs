@@ -61,6 +61,8 @@ fn export_applies_redaction_and_report_shape() {
     assert_eq!(report["schema_version"], serde_json::json!("1.0.0"));
     assert!(report.get("generated_at").is_none());
     assert!(report.get("config").is_some());
+    assert!(report.get("provenance").is_some());
+    assert!(report.get("coverage").is_some());
     assert!(report.get("files").is_some());
     assert!(report["files"].as_array().expect("files array").len() >= 2);
     let redaction_counts =
@@ -68,6 +70,60 @@ fn export_applies_redaction_and_report_shape() {
     assert!(!redaction_counts.is_empty());
     assert!(report["stats"]["redacted_chunks"].as_u64().unwrap_or(0) > 0);
     assert!(report["stats"]["redacted_files"].as_u64().unwrap_or(0) > 0);
+    assert!(report["coverage"].get("most_imported_not_included").is_some());
+    assert!(report["coverage"].get("public_api_surface_coverage").is_some());
+    assert!(report["coverage"].get("missing_context_todos").is_some());
+}
+
+#[test]
+fn contribution_mode_uses_pinned_only_fallback_under_tiny_budget() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("README.md"), "# Repo\n\nOverview\n").expect("write readme");
+    fs::write(root.join("CONTRIBUTING.md"), "# Contributing\n\nMust follow style.\n")
+        .expect("write contributing");
+    fs::write(root.join("SECURITY.md"), "# Security\n\nMust report issues responsibly.\n")
+        .expect("write security");
+    fs::write(root.join("Cargo.toml"), "[package]\nname='demo'\nversion='0.1.0'\n")
+        .expect("write cargo");
+    fs::write(
+        root.join("src/lib.rs"),
+        format!("pub fn core() {{\n    let _x = \"{}\";\n}}\n", "a".repeat(6000)),
+    )
+    .expect("write lib");
+
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root str"),
+        "--mode",
+        "contribution",
+        "--max-tokens",
+        "10",
+        "--output-dir",
+        out.to_str().expect("out str"),
+        "--no-timestamp",
+        "--quick",
+    ]);
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(&out, root);
+    let report_raw = fs::read_to_string(actual.join(output_file_name(root, "report.json")))
+        .expect("read report");
+    let report: serde_json::Value = serde_json::from_str(&report_raw).expect("parse report");
+    assert_eq!(report["stats"]["pinned_only_mode"], serde_json::json!(true));
+    assert!(report["stats"]["pinned_overflow_tokens"].as_u64().unwrap_or(0) > 0);
+
+    let chunks = fs::read_to_string(actual.join(output_file_name(root, "chunks.jsonl")))
+        .expect("read chunks");
+    assert!(chunks.contains("README.md"));
+    assert!(chunks.contains("CONTRIBUTING.md"));
+    assert!(chunks.contains("SECURITY.md"));
+    assert!(chunks.contains("Cargo.toml"));
 }
 
 #[test]

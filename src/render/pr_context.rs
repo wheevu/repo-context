@@ -32,11 +32,47 @@ pub fn render_pr_context(report: &PrContextReport) -> String {
         ));
     }
 
+    if !report.feature_flags.is_empty() {
+        out.push_str("\n### Feature Flags\n");
+        for flag in report.feature_flags.iter().take(30) {
+            out.push_str(&format!(
+                "- `{}` — feature `{}` (chunk `{}`)\n",
+                flag.path, flag.feature, flag.chunk_id
+            ));
+        }
+    }
+
+    if !report.trait_impls.is_empty() {
+        out.push_str("\n### Trait Implementations\n");
+        for edge in report.trait_impls.iter().take(30) {
+            out.push_str(&format!(
+                "- `{}` — `impl {}` for `{}` (chunk `{}`)\n",
+                edge.path, edge.trait_name, edge.target_type, edge.chunk_id
+            ));
+        }
+    }
+
+    if !report.error_flows.is_empty() {
+        out.push_str("\n### Error Flows\n");
+        for flow in report.error_flows.iter().take(30) {
+            out.push_str(&format!(
+                "- `{}` — {} (chunk `{}`)\n",
+                flow.path, flow.evidence, flow.chunk_id
+            ));
+        }
+    }
+
     if report.graph_available {
         out.push_str("\n> Symbol graph available: yes\n");
     } else {
         out.push_str("\n> Symbol graph not available; run export without --no-graph to build it\n");
     }
+
+    out.push_str("\n### Validation Checklist\n");
+    out.push_str("- Update touched code paths and their nearest tests together.\n");
+    out.push_str("- Re-run linters/formatters before tests.\n");
+    out.push_str("- Run the smallest relevant test scope first, then full suite.\n");
+    out.push_str("- If behavior/contract changes, update docs and invariants in same PR.\n");
 
     out
 }

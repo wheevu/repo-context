@@ -204,6 +204,18 @@ pub struct ScanStats {
     /// Number of chunks added by thread stitching.
     #[serde(default)]
     pub stitched_chunks: usize,
+
+    /// Whether export ran in pinned-only fallback mode.
+    #[serde(default)]
+    pub pinned_only_mode: bool,
+
+    /// Tokens by which protected pins exceeded max_tokens.
+    #[serde(default)]
+    pub pinned_overflow_tokens: usize,
+
+    /// Protected pin files selected for contribution/pr-context packs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_files: Vec<HashMap<String, serde_json::Value>>,
 }
 
 impl ScanStats {
@@ -244,6 +256,8 @@ impl ScanStats {
             "top_ignored_patterns":    top_ignored_patterns,
             "redaction_counts":        self.redaction_counts,
             "stitched_chunks":         self.stitched_chunks,
+            "pinned_only_mode":        self.pinned_only_mode,
+            "pinned_overflow_tokens":  self.pinned_overflow_tokens,
             "processing_time_seconds": self.processing_time_seconds,
         });
 
@@ -714,8 +728,16 @@ pub struct Config {
     pub redaction_mode: RedactionMode,
 
     /// Glob patterns that should always be included even when token budget is exceeded.
-    #[serde(default)]
+    #[serde(default, alias = "always_include_globs")]
     pub always_include_patterns: Vec<String>,
+
+    /// Specific repository-relative paths that are always included.
+    #[serde(default)]
+    pub always_include_paths: Vec<String>,
+
+    /// Keywords used by invariant discovery for contribution/pr-context exports.
+    #[serde(default = "default_invariant_keywords")]
+    pub invariant_keywords: Vec<String>,
 
     /// Custom ranking weights (all fields optional; defaults match Python)
     #[serde(default, alias = "weights")]
@@ -755,6 +777,8 @@ impl Default for Config {
             redact_secrets: true,
             redaction_mode: RedactionMode::Standard,
             always_include_patterns: Vec::new(),
+            always_include_paths: Vec::new(),
+            invariant_keywords: default_invariant_keywords(),
             ranking_weights: RankingWeights::default(),
             redaction: RedactionConfig::default(),
         }
@@ -804,6 +828,24 @@ fn default_output_dir() -> PathBuf {
 
 fn default_tree_depth() -> usize {
     4
+}
+
+fn default_invariant_keywords() -> Vec<String> {
+    [
+        "must",
+        "invariant",
+        "safety",
+        "threading",
+        "ownership",
+        "locking",
+        "abi",
+        "contract",
+        "compatibility",
+        "schema",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 pub fn default_include_extensions() -> HashSet<String> {

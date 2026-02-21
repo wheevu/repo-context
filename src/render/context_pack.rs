@@ -5,7 +5,7 @@ use crate::domain::{Chunk, FileInfo, ScanStats};
 use crate::utils::{format_with_commas, read_file_safe};
 use chrono::Utc;
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use super::guardrails::{build_claims, build_missing_pieces, render_guardrails};
@@ -97,6 +97,31 @@ pub fn render_context_pack(
             out.push_str("\n**Build/Test commands (detected):**\n");
             for command in suggested_commands.iter().take(8) {
                 out.push_str(&format!("- `{}`\n", command));
+            }
+        }
+
+        let dev_loop = build_dev_loop_checklist(files, manifest_info, &suggested_commands);
+        if !dev_loop.is_empty() {
+            out.push_str("\n**Local dev loop checklist:**\n");
+            for step in dev_loop {
+                out.push_str(&format!("- `{}`\n", step));
+            }
+        }
+
+        if let Some(task) = task_query {
+            let task_map = build_task_touch_map(task, files, chunks);
+            if !task_map.is_empty() {
+                out.push_str("\n**Where to change this task:**\n");
+                for row in task_map.iter().take(10) {
+                    out.push_str(&format!(
+                        "- **{}** `{}` (lines {}-{}, matched: {})\n",
+                        row.kind,
+                        row.path,
+                        row.start_line,
+                        row.end_line,
+                        row.matched.join(", ")
+                    ));
+                }
             }
         }
 
@@ -434,4 +459,138 @@ fn render_async_topology(chunks: &[Chunk]) -> Option<String> {
     }
     out.push('\n');
     Some(out)
+}
+
+#[derive(Debug)]
+struct TaskTouchRow {
+    kind: &'static str,
+    path: String,
+    start_line: usize,
+    end_line: usize,
+    matched: Vec<String>,
+    score: usize,
+    priority: f64,
+}
+
+fn build_task_touch_map(task: &str, files: &[FileInfo], chunks: &[Chunk]) -> Vec<TaskTouchRow> {
+    let query_tokens = tokenize_task(task);
+    if query_tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let mut file_priority: HashMap<&str, f64> = HashMap::new();
+    for file in files {
+        file_priority.insert(file.relative_path.as_str(), file.priority);
+    }
+
+    let mut best_by_path: HashMap<&str, TaskTouchRow> = HashMap::new();
+    for chunk in chunks {
+        let mut matched: BTreeSet<String> = BTreeSet::new();
+        let lower = chunk.content.to_ascii_lowercase();
+        for token in &query_tokens {
+            if lower.contains(token) || chunk.path.to_ascii_lowercase().contains(token) {
+                matched.insert(token.clone());
+            }
+        }
+        if matched.is_empty() {
+            continue;
+        }
+
+        let kind = classify_path_kind(&chunk.path);
+        let row = TaskTouchRow {
+            kind,
+            path: chunk.path.clone(),
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            matched: matched.into_iter().collect(),
+            score: matched_len(&lower, &query_tokens),
+            priority: file_priority.get(chunk.path.as_str()).copied().unwrap_or(0.0),
+        };
+
+        match best_by_path.get(chunk.path.as_str()) {
+            None => {
+                best_by_path.insert(chunk.path.as_str(), row);
+            }
+            Some(existing) => {
+                if row.score > existing.score
+                    || (row.score == existing.score && row.priority > existing.priority)
+                {
+                    best_by_path.insert(chunk.path.as_str(), row);
+                }
+            }
+        }
+    }
+
+    let mut rows: Vec<TaskTouchRow> = best_by_path.into_values().collect();
+    rows.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    rows
+}
+
+fn matched_len(content_lower: &str, tokens: &HashSet<String>) -> usize {
+    tokens.iter().filter(|t| content_lower.contains(t.as_str())).count()
+}
+
+fn tokenize_task(task: &str) -> HashSet<String> {
+    task.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| s.len() >= 3)
+        .collect()
+}
+
+fn classify_path_kind(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    if lower.starts_with("tests/") || lower.contains("/tests/") || lower.contains("_test") {
+        "Test"
+    } else if lower.starts_with("docs/") || lower.ends_with(".md") || lower.ends_with(".rst") {
+        "Docs"
+    } else if lower.contains("workflow") || lower.starts_with(".github/") {
+        "CI"
+    } else {
+        "Code"
+    }
+}
+
+fn build_dev_loop_checklist(
+    files: &[FileInfo],
+    manifest_info: &HashMap<String, JsonValue>,
+    suggested_commands: &[String],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let file_paths: HashSet<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+
+    if file_paths.contains("Cargo.toml") || files.iter().any(|f| f.extension == ".rs") {
+        out.push("cargo fmt".to_string());
+        out.push("cargo clippy --all-targets --all-features -- -D warnings".to_string());
+        out.push("cargo test".to_string());
+    }
+
+    if let Some(JsonValue::Object(scripts)) = manifest_info.get("scripts") {
+        if scripts.contains_key("lint") {
+            out.push("npm run lint".to_string());
+        }
+        if scripts.contains_key("test") {
+            out.push("npm test".to_string());
+        }
+        if scripts.contains_key("build") {
+            out.push("npm run build".to_string());
+        }
+    }
+
+    if files.iter().any(|f| f.language == "python") {
+        out.push("pytest".to_string());
+    }
+
+    for command in suggested_commands {
+        if !out.contains(command) {
+            out.push(command.clone());
+        }
+    }
+
+    out.truncate(8);
+    out
 }

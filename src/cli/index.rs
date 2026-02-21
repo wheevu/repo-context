@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
+use git2::Repository;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -10,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use super::cache::remote_index_cache_db_path;
 use super::utils::parse_csv;
 use crate::chunk::{chunk_content, coalesce_small_chunks_with_max};
 use crate::config::{load_config, merge_cli_with_config, CliOverrides};
@@ -120,6 +122,19 @@ pub fn run(args: IndexArgs) -> Result<()> {
         ..CliOverrides::default()
     };
     let merged = merge_cli_with_config(file_config, cli_overrides);
+    let config_hash = index_config_hash(&merged);
+    let default_db = PathBuf::from(".repo-context/index.sqlite");
+    let mut db_path = args.db.clone();
+    if merged.repo_url.is_some() && args.db == default_db {
+        if let Some(cache_db) = remote_index_cache_db_path(
+            merged.repo_url.as_deref(),
+            merged.ref_.as_deref(),
+            &config_hash,
+        ) {
+            db_path = cache_db;
+            println!("info: using remote index cache at {}", db_path.display());
+        }
+    }
 
     if merged.path.is_none() && merged.repo_url.is_none() {
         anyhow::bail!("Either --path or --repo must be specified");
@@ -146,10 +161,17 @@ pub fn run(args: IndexArgs) -> Result<()> {
     let selected_files = apply_byte_budget(ranked_files, Some(merged.max_total_bytes), &mut stats);
 
     let summary = write_index(
-        &args.db,
+        &db_path,
         &root_path,
         &selected_files,
         &stats,
+        IndexMetadata {
+            repo: merged.repo_url.clone(),
+            ref_: merged.ref_.clone(),
+            git_commit: discover_git_commit(&root_path),
+            config_hash,
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        },
         IndexBuildOptions {
             chunk_tokens: merged.chunk_tokens,
             chunk_overlap: merged.chunk_overlap,
@@ -158,7 +180,7 @@ pub fn run(args: IndexArgs) -> Result<()> {
         },
     )?;
 
-    println!("Index created at {}", args.db.display());
+    println!("Index created at {}", db_path.display());
     println!("  files indexed: {}", summary.files_indexed);
     println!("  chunks indexed: {}", summary.chunks_indexed);
     println!("  files reindexed: {}", summary.files_reindexed);
@@ -183,6 +205,7 @@ fn write_index(
     root_path: &Path,
     files: &[FileInfo],
     stats: &ScanStats,
+    metadata_ctx: IndexMetadata,
     build: IndexBuildOptions,
 ) -> Result<IndexSummary> {
     if let Some(parent) = db_path.parent() {
@@ -337,6 +360,20 @@ fn write_index(
         ("files_indexed".to_string(), files_indexed.to_string()),
         ("chunks_indexed".to_string(), chunks_indexed.to_string()),
         ("languages".to_string(), json!(stats.languages_detected).to_string()),
+        (
+            "repo_url".to_string(),
+            metadata_ctx.repo.clone().unwrap_or_else(|| root_path.to_string_lossy().to_string()),
+        ),
+        (
+            "repo_ref".to_string(),
+            metadata_ctx.ref_.clone().unwrap_or_else(|| "unknown".to_string()),
+        ),
+        (
+            "git_commit".to_string(),
+            metadata_ctx.git_commit.clone().unwrap_or_else(|| "unknown".to_string()),
+        ),
+        ("config_hash".to_string(), metadata_ctx.config_hash),
+        ("tool_version".to_string(), metadata_ctx.tool_version),
     ];
     for (key, value) in metadata {
         tx.execute("INSERT INTO metadata (key, value) VALUES (?1, ?2)", params![key, value])?;
@@ -543,11 +580,42 @@ struct IndexBuildOptions {
     lsp_enabled: bool,
 }
 
+#[derive(Debug, Clone)]
+struct IndexMetadata {
+    repo: Option<String>,
+    ref_: Option<String>,
+    git_commit: Option<String>,
+    config_hash: String,
+    tool_version: String,
+}
+
 fn sha256_hex(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     let digest = hasher.finalize();
     format!("{digest:x}")
+}
+
+fn discover_git_commit(root_path: &Path) -> Option<String> {
+    Repository::discover(root_path).ok()?.head().ok()?.target().map(|oid| oid.to_string())
+}
+
+fn index_config_hash(config: &crate::domain::Config) -> String {
+    let payload = json!({
+        "include_extensions": config.include_extensions,
+        "exclude_globs": config.exclude_globs,
+        "max_file_bytes": config.max_file_bytes,
+        "max_total_bytes": config.max_total_bytes,
+        "respect_gitignore": config.respect_gitignore,
+        "follow_symlinks": config.follow_symlinks,
+        "skip_minified": config.skip_minified,
+        "chunk_tokens": config.chunk_tokens,
+        "chunk_overlap": config.chunk_overlap,
+        "min_chunk_tokens": config.min_chunk_tokens,
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&payload).unwrap_or_default());
+    format!("{:x}", hasher.finalize())
 }
 
 fn apply_byte_budget(

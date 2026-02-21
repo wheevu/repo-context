@@ -121,6 +121,18 @@ fn normalize_report(mut report: Value, fixture_root: &Path) -> Value {
         );
     }
 
+    if let Some(provenance) = report.get_mut("provenance").and_then(Value::as_object_mut) {
+        provenance.insert("path".to_string(), Value::String("/<FIXTURE_ROOT>".to_string()));
+        if provenance.get("repo").is_some() {
+            provenance.insert("repo".to_string(), Value::String("<FIXTURE_REPO>".to_string()));
+        }
+        provenance.insert("fingerprint".to_string(), Value::String("<FINGERPRINT>".to_string()));
+        provenance.insert("config_hash".to_string(), Value::String("<CONFIG_HASH>".to_string()));
+    }
+    if let Some(coverage) = report.get_mut("coverage").and_then(Value::as_object_mut) {
+        coverage.insert("fingerprint".to_string(), Value::String("<FINGERPRINT>".to_string()));
+    }
+
     report
 }
 

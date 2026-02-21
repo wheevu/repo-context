@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use tracing::Level;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+mod cache;
 mod codeintel;
 mod diff;
 mod export;

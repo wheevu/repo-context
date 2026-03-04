@@ -12,11 +12,15 @@ pub mod code_chunker;
 pub mod line_chunker;
 pub mod markdown_chunker;
 
+/// Chunk a file with default options (800 tokens, 120 overlap).
+///
+/// This is a convenience wrapper around [`chunk_file_with_options`].
 #[allow(dead_code)]
 pub fn chunk_file(file_info: &FileInfo) -> Result<Vec<Chunk>> {
     chunk_file_with_options(file_info, 800, 120)
 }
 
+#[allow(dead_code)]
 pub fn chunk_file_with_options(
     file_info: &FileInfo,
     max_tokens: usize,
@@ -69,6 +73,10 @@ pub fn chunk_content(
     }])
 }
 
+/// Coalesce small chunks with default max tokens (800).
+///
+/// This is a convenience wrapper around [`coalesce_small_chunks_with_max`]
+/// with fixed parameters (min_tokens=200, max_tokens=800).
 #[allow(dead_code)]
 pub fn coalesce_small_chunks(chunks: Vec<Chunk>, _min_tokens: usize) -> Vec<Chunk> {
     coalesce_small_chunks_with_max(chunks, 200, 800)

@@ -157,18 +157,21 @@ impl Redactor {
     }
 
     #[allow(dead_code)]
+    #[must_use]
     pub fn with_entropy_detection(mut self, enabled: bool) -> Self {
         self.redact_high_entropy = enabled;
         self
     }
 
     #[allow(dead_code)]
+    #[must_use]
     pub fn with_structure_safe(mut self, enabled: bool) -> Self {
         self.structure_safe = enabled;
         self
     }
 
     #[allow(dead_code)]
+    #[must_use]
     pub fn with_paranoid_mode(mut self, enabled: bool) -> Self {
         self.paranoid_mode = enabled;
         self

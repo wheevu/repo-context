@@ -8,15 +8,17 @@ pub fn calculate_entropy(s: &str) -> f64 {
     }
 
     let mut counts: HashMap<char, usize> = HashMap::new();
+    let mut len = 0usize;
     for ch in s.chars() {
         *counts.entry(ch).or_insert(0) += 1;
+        len += 1;
     }
 
-    let len = s.chars().count() as f64;
+    let len_f = len as f64;
     counts
         .values()
         .map(|count| {
-            let p = *count as f64 / len;
+            let p = *count as f64 / len_f;
             -(p * p.log2())
         })
         .sum()

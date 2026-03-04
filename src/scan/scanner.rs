@@ -47,36 +47,42 @@ impl FileScanner {
     }
 
     /// Set file extensions to include (e.g., ".rs", ".py")
+    #[must_use]
     pub fn include_extensions(mut self, extensions: Vec<String>) -> Self {
         self.include_extensions = extensions;
         self
     }
 
     /// Set glob patterns to exclude
+    #[must_use]
     pub fn exclude_globs(mut self, globs: Vec<String>) -> Self {
         self.exclude_globs = globs;
         self
     }
 
     /// Set maximum file size in bytes
+    #[must_use]
     pub fn max_file_bytes(mut self, max_bytes: u64) -> Self {
         self.max_file_bytes = max_bytes;
         self
     }
 
     /// Set whether to respect gitignore files
+    #[must_use]
     pub fn respect_gitignore(mut self, respect: bool) -> Self {
         self.respect_gitignore = respect;
         self
     }
 
     /// Set whether to follow symbolic links
+    #[must_use]
     pub fn follow_symlinks(mut self, follow: bool) -> Self {
         self.follow_symlinks = follow;
         self
     }
 
     /// Set whether to skip minified files
+    #[must_use]
     pub fn skip_minified(mut self, skip: bool) -> Self {
         self.skip_minified = skip;
         self
@@ -123,7 +129,8 @@ impl FileScanner {
     pub fn scan(&mut self) -> Result<Vec<FileInfo>> {
         self.stats = ScanStats::default();
 
-        let mut files: Vec<(PathBuf, String)> = Vec::new();
+        // Pre-allocate with reasonable capacity to avoid reallocations during growth
+        let mut files: Vec<(PathBuf, String)> = Vec::with_capacity(1024);
         let exclude_globset = self.build_exclude_globset()?;
 
         // Directory filter function matching Python's _walk_files behavior
@@ -264,7 +271,8 @@ impl FileScanner {
         files.sort_by(|a, b| a.1.cmp(&b.1));
 
         // Convert to FileInfo objects
-        let mut result = Vec::new();
+        // Pre-allocate result with known capacity to avoid reallocations
+        let mut result = Vec::with_capacity(files.len());
         for (path, rel_path) in files {
             let metadata = match path.metadata() {
                 Ok(m) => m,

@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 /// Context for a repository being processed
+#[derive(Debug)]
 pub struct RepoContext {
     pub root_path: PathBuf,
     pub is_temp: bool,
@@ -17,7 +18,13 @@ impl RepoContext {
 impl Drop for RepoContext {
     fn drop(&mut self) {
         if self.is_temp {
-            let _ = std::fs::remove_dir_all(&self.root_path);
+            if let Err(e) = std::fs::remove_dir_all(&self.root_path) {
+                tracing::warn!(
+                    "Failed to clean up temp directory {}: {}",
+                    self.root_path.display(),
+                    e
+                );
+            }
         }
     }
 }

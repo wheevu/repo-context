@@ -1,10 +1,12 @@
 //! Token estimation
 
-/// Estimate tokens using a simple heuristic (chars / 4).
+/// Estimate tokens using a simple heuristic (bytes / 4).
 ///
-/// Matches Python's fallback: `len(text) // 4` where `len` counts Unicode
-/// code points, not bytes.  Using byte length over-counts for multi-byte UTF-8
-/// content (e.g. CJK text, emoji).
+/// Uses byte length for O(1) performance instead of O(n) char counting.
+/// This is a fast approximation that may slightly over-count for multi-byte
+/// UTF-8 content (e.g. CJK text, emoji), but is accurate enough for token
+/// budgeting purposes and significantly faster for large files.
+#[inline]
 pub fn estimate_tokens(text: &str) -> usize {
-    text.chars().count() / 4
+    text.len() / 4
 }

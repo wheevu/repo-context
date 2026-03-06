@@ -62,11 +62,19 @@ cargo install --path .
 ## Quick start
 
 Export a local repo:
+
+
+![CLI local 2](assets/2.png)
+
 ```bash
 repo-context export --path .
 ```
 
 Export from a remote repo:
+
+![CLI repo 3](assets/4.png)
+
+
 ```bash
 repo-context export --repo https://github.com/owner/repo
 ```
@@ -78,12 +86,18 @@ repo-context info .
 
 ## Guided mode (default)
 
+![CLI local 1](assets/1.png)
+
+
 `repo-context export` is interactive by default in terminals:
 
 -   **Quick scan** (fast, high-signal defaults)
 -   **Architecture overview** (stronger dependency/system context)
 -   **Deep dive specific areas** (repo-specific focus selection)
 -   **Full context** (largest practical context bundle)
+
+![CLI repo 1](assets/3.png)
+
 
 In non-interactive sessions (CI/pipes), it automatically falls back to quick defaults.
 

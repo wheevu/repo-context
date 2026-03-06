@@ -185,8 +185,6 @@ pub struct ExportArgs {
 }
 
 pub fn run(args: ExportArgs) -> Result<()> {
-    let start_time = Instant::now();
-
     let interactive_terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let guided_enabled = !args.quick && interactive_terminal;
     if !args.quick && !interactive_terminal {
@@ -360,10 +358,10 @@ pub fn run(args: ExportArgs) -> Result<()> {
         })
         .collect();
 
-    if guided_enabled {
-        let plan = choose_guided_plan(&root_path, &stats, &ranked_files)?;
-        apply_guided_plan(&mut merged, &args, &plan);
-    }
+    let processing_start =
+        apply_guided_plan_and_start_timer(&mut merged, &args, guided_enabled, || {
+            choose_guided_plan(&root_path, &stats, &ranked_files)
+        })?;
 
     let pin_plan = if contribution_mode {
         Some(build_pin_plan(
@@ -762,7 +760,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
 
     let report_path = output_dir.join(prefixed_output_file_name(&repo_name, "report.json"));
     // Record processing time before writing the report so the value is correct in report.json.
-    stats.processing_time_seconds = start_time.elapsed().as_secs_f64();
+    stats.processing_time_seconds = processing_start.elapsed().as_secs_f64();
 
     // Build curated config dict for report.json.
     let config_dict = {
@@ -1034,6 +1032,23 @@ fn apply_guided_plan(merged: &mut crate::domain::Config, args: &ExportArgs, plan
             merged.rerank_top_k = rerank_top_k;
         }
     }
+}
+
+fn apply_guided_plan_and_start_timer<F>(
+    merged: &mut crate::domain::Config,
+    args: &ExportArgs,
+    guided_enabled: bool,
+    guided_plan: F,
+) -> Result<Instant>
+where
+    F: FnOnce() -> Result<GuidedPlan>,
+{
+    if guided_enabled {
+        let plan = guided_plan()?;
+        apply_guided_plan(merged, args, &plan);
+    }
+
+    Ok(Instant::now())
 }
 
 fn prefixed_output_file_name(repo_name: &str, base_name: &str) -> String {
@@ -2118,8 +2133,9 @@ fn apply_byte_budget(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_guided_plan, build_pin_plan, most_imported_not_included, repo_name_for_output,
-        repo_name_from_remote_url, sort_chunks_for_stitch_story, ExportArgs, GuidedPlan, PinTier,
+        apply_guided_plan, apply_guided_plan_and_start_timer, build_pin_plan,
+        most_imported_not_included, repo_name_for_output, repo_name_from_remote_url,
+        sort_chunks_for_stitch_story, ExportArgs, GuidedPlan, PinTier,
     };
     use crate::domain::{Chunk, Config, OutputMode};
     use crate::rank::StitchTier;
@@ -2311,6 +2327,31 @@ mod tests {
         assert_eq!(cfg.stitch_budget_fraction, 0.2);
         assert_eq!(cfg.stitch_top_n, 10);
         assert_eq!(cfg.rerank_top_k, 42);
+    }
+
+    #[test]
+    fn processing_timer_starts_after_guided_selection() {
+        let mut cfg = Config::default();
+        let args = default_args();
+
+        let processing_start = apply_guided_plan_and_start_timer(&mut cfg, &args, true, || {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            Ok(GuidedPlan {
+                mode: Some(OutputMode::Both),
+                max_tokens: Some(140_000),
+                task_query: Some("architecture and dependencies".to_string()),
+                stitch_budget_fraction: Some(0.45),
+                stitch_top_n: Some(40),
+                rerank_top_k: Some(300),
+            })
+        })
+        .expect("processing timer");
+
+        assert!(
+            processing_start.elapsed() < std::time::Duration::from_millis(40),
+            "processing timer should start after guided selection completes"
+        );
+        assert_eq!(cfg.max_tokens, Some(140_000));
     }
 
     #[test]

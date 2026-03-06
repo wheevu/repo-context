@@ -6,6 +6,9 @@ Turn a code repository into a tidy "context pack" you can paste into an LLM — 
 
 [![CI](https://github.com/wheevu/repo-context/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wheevu/repo-context/actions/workflows/ci.yml)
 
+![CLI Demo](assets/cli.gif)
+
+
 ## What it does
 
 `repo-context` scans a repository and exports **high-signal text bundles**:

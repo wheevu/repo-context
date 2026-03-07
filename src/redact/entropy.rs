@@ -2,6 +2,16 @@
 
 use std::collections::HashMap;
 
+/// Calculates the Shannon entropy of a string.
+///
+/// Higher entropy indicates more randomness, which can indicate
+/// potential secrets or API keys.
+///
+/// # Arguments
+/// * `s` - The string to analyze
+///
+/// # Returns
+/// Entropy value (0.0 for constant strings, higher for random strings)
 pub fn calculate_entropy(s: &str) -> f64 {
     if s.is_empty() {
         return 0.0;

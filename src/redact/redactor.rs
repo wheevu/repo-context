@@ -69,6 +69,7 @@ fn glob_match(pattern: &str, value: &str) -> bool {
     inner(pattern.as_bytes(), value.as_bytes())
 }
 
+/// Main redactor that applies secret detection rules to text content.
 pub struct Redactor {
     rules: Vec<RedactionRule>,
     redact_high_entropy: bool,
@@ -86,8 +87,11 @@ pub struct Redactor {
     allowlist_strings: Vec<String>,
 }
 
+/// Result of a redaction operation.
 pub struct RedactionOutcome {
+    /// The redacted text content.
     pub content: String,
+    /// Count of matches per rule name.
     pub counts: BTreeMap<String, usize>,
 }
 
@@ -200,6 +204,17 @@ impl Redactor {
             || matches_glob_pattern(rel_path, &self.safe_file_patterns)
     }
 
+    /// Redacts text with full context and returns detailed report.
+    ///
+    /// # Arguments
+    /// * `text` - Text to redact
+    /// * `language` - Programming language
+    /// * `extension` - File extension
+    /// * `filename` - File name
+    /// * `rel_path` - Relative file path
+    ///
+    /// # Returns
+    /// RedactionOutcome containing redacted content and counts
     pub fn redact_with_language_report(
         &self,
         text: &str,

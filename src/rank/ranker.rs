@@ -42,6 +42,10 @@ const IMPORTANT_CONFIG_FILES: &[&str] = &[
     "setup.cfg",
 ];
 
+/// Ranks files by importance based on various signals.
+///
+/// Analyzes repository structure, manifest files, and file paths to assign
+/// priority scores that reflect file importance.
 pub struct FileRanker {
     root_path: PathBuf,
     scanned_files: HashSet<String>,
@@ -63,6 +67,15 @@ impl FileRanker {
         Self::with_weights(root_path, scanned_files, RankingWeights::default())
     }
 
+    /// Creates a new FileRanker with custom weights.
+    ///
+    /// # Arguments
+    /// * `root_path` - Path to the repository root
+    /// * `scanned_files` - Set of file paths that were scanned
+    /// * `weights` - Custom ranking weights
+    ///
+    /// # Returns
+    /// A new FileRanker instance
     #[must_use]
     pub fn with_weights(
         root_path: &Path,
@@ -84,6 +97,10 @@ impl FileRanker {
         ranker
     }
 
+    /// Assigns a priority score to a single file.
+    ///
+    /// # Arguments
+    /// * `file` - The file to rank (modified in place)
     pub fn rank_file(&self, file: &mut FileInfo) {
         let rel_normalized = normalize_path(&file.relative_path);
         let rel_lower = rel_normalized.to_lowercase();
@@ -147,6 +164,12 @@ impl FileRanker {
         }
     }
 
+    /// Ranks all files in the provided slice.
+    ///
+    /// Modifies files in place with priority scores, then sorts by priority.
+    ///
+    /// # Arguments
+    /// * `files` - Files to rank (modified and sorted in place)
     pub fn rank_files(&self, files: &mut [FileInfo]) {
         for file in files.iter_mut() {
             self.rank_file(file);
@@ -178,6 +201,10 @@ impl FileRanker {
         &self.detected_languages
     }
 
+    /// Returns manifest information extracted during ranking.
+    ///
+    /// # Returns
+    /// Map of manifest file names to their parsed content
     #[must_use]
     pub fn get_manifest_info(&self) -> &HashMap<String, JsonValue> {
         &self.manifest_info

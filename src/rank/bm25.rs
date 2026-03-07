@@ -6,6 +6,17 @@ use std::collections::{HashMap, HashSet};
 const K1: f64 = 1.5;
 const B: f64 = 0.75;
 
+/// Scores chunks against a query using BM25 algorithm.
+///
+/// BM25 is a probabilistic retrieval function that ranks chunks based on
+/// query term frequency and document length normalization.
+///
+/// # Arguments
+/// * `chunks` - Chunks to score
+/// * `query` - Query string
+///
+/// # Returns
+/// Vector of scores (higher = more relevant)
 pub fn score_query_against_chunks(chunks: &[Chunk], query: &str) -> Vec<f64> {
     if chunks.is_empty() {
         return Vec::new();

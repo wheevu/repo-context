@@ -11,6 +11,21 @@ use std::path::Path;
 use super::guardrails::{build_claims, build_missing_pieces, render_guardrails};
 use super::pr_context::render_pr_context;
 
+/// Renders the context pack markdown document.
+///
+/// # Arguments
+/// * `root_path` - Path to the repository root
+/// * `files` - List of files included in the pack
+/// * `chunks` - List of chunks to include
+/// * `stats` - Scan statistics
+/// * `tree` - Directory tree string
+/// * `manifest_info` - Manifest information from various build files
+/// * `task_query` - Optional task query for relevance highlighting
+/// * `pr_context` - Optional PR context report
+/// * `include_timestamp` - Whether to include generation timestamp
+///
+/// # Returns
+/// Markdown-formatted context pack string
 #[allow(clippy::too_many_arguments)]
 pub fn render_context_pack(
     root_path: &Path,

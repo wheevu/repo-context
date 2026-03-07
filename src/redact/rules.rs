@@ -7,13 +7,22 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+/// A single redaction rule defining a pattern and replacement.
 #[derive(Clone)]
 pub struct RedactionRule {
+    /// Rule name for identification and reporting.
     pub name: &'static str,
+    /// Regex pattern to match secrets.
     pub pattern: Regex,
+    /// Replacement string (can use capture groups like ${1}).
     pub replacement: &'static str,
 }
 
+/// Default set of redaction rules for common secret patterns.
+///
+/// This includes patterns for AWS, GitHub, Slack, Stripe, JWT, private keys,
+/// connection strings, API keys, and more. Rules are ordered so specific
+/// patterns match before generic ones.
 pub static DEFAULT_RULES: Lazy<Vec<RedactionRule>> = Lazy::new(|| {
     vec![
         // ── AWS ──────────────────────────────────────────────────────────────────

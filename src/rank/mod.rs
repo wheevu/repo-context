@@ -128,6 +128,20 @@ pub fn rerank_chunks_by_task(
     file_scores
 }
 
+/// Stitches related context bundles for the top-ranked chunks.
+///
+/// Collects related code context (definitions, callees, callers) for the
+/// top-N seed chunks, respecting a token budget.
+///
+/// # Arguments
+/// * `chunks` - All available chunks
+/// * `top_n_seeds` - Number of top chunks to use as seeds
+/// * `stitch_budget_tokens` - Token budget for stitched context
+/// * `loader` - Optional lazy chunk loader for database-backed chunks
+/// * `workspace_members` - List of workspace member paths
+///
+/// # Returns
+/// A StitchedBundle containing seeds, stitched chunks, and metadata
 pub fn stitch_thread_bundles(
     chunks: &[Chunk],
     top_n_seeds: usize,
@@ -751,10 +765,33 @@ fn is_cross_crate_candidate(
     !seed_member_roots.is_empty() && !seed_member_roots.contains(member)
 }
 
+/// Ranks files by importance using default weights.
+///
+/// # Arguments
+/// * `root_path` - Path to the repository root
+/// * `files` - Files to rank (modified in place)
+///
+/// # Returns
+/// Ranked list of files sorted by priority
+///
+/// # Errors
+/// Returns an error if manifest parsing fails
 pub fn rank_files(root_path: &Path, files: Vec<FileInfo>) -> Result<Vec<FileInfo>> {
     rank_files_with_weights(root_path, files, RankingWeights::default())
 }
 
+/// Ranks files by importance with custom weights.
+///
+/// # Arguments
+/// * `root_path` - Path to the repository root
+/// * `files` - Files to rank (modified in place)
+/// * `weights` - Custom ranking weights
+///
+/// # Returns
+/// Ranked list of files sorted by priority
+///
+/// # Errors
+/// Returns an error if manifest parsing fails
 pub fn rank_files_with_weights(
     root_path: &Path,
     mut files: Vec<FileInfo>,

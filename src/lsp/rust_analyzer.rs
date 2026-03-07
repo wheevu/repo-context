@@ -168,6 +168,21 @@ pub fn analyze_workspace_symbols(
     Ok(WorkspaceAnalysis { symbols, reference_paths })
 }
 
+/// Analyzes symbol references in the workspace.
+///
+/// Uses rust-analyzer LSP to find references to symbols defined in the given seeds.
+///
+/// # Arguments
+/// * `root` - Workspace root path
+/// * `seeds` - Symbol seeds to find references for
+/// * `max_symbols` - Maximum number of symbols to analyze
+/// * `max_refs_per_symbol` - Maximum references to collect per symbol
+///
+/// # Returns
+/// Vector of symbol references found in the workspace
+///
+/// # Errors
+/// Returns an error if rust-analyzer is not available or analysis fails
 pub fn analyze_symbol_references(
     root: &Path,
     seeds: &[SymbolSeed],

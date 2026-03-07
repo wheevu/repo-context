@@ -1,9 +1,7 @@
 # repo-context
 [![CI](https://github.com/wheevu/repo-context/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wheevu/repo-context/actions/workflows/ci.yml)
 
-<div style="text-align: center;">
-  <img src="assets/title.svg" alt="CLI Demo" style="width: 80%;">
-</div>
+<img src="assets/title.svg" alt="CLI Demo" style="width: 80%;">
 
 Turn a code repository into a tidy "context pack" you can paste into an LLM — or feed into a RAG pipeline.
 
@@ -64,9 +62,7 @@ cargo install --path .
 
 Export a local repo:
 
-<div style="text-align: center;">
-  <img src="assets/2.png" alt="CLI Demo" style="width: 80%;">
-</div>
+<img src="assets/2.png" alt="CLI Demo" style="width: 80%;">
 
 ```bash
 repo-context export --path .
@@ -75,9 +71,7 @@ repo-context export --path .
 Export from a remote repo:
 
 
-<div style="text-align: center;">
-  <img src="assets/4.png" alt="CLI Demo" style="width: 80%;">
-</div>
+<img src="assets/4.png" alt="CLI Demo" style="width: 80%;">
 
 ```bash
 repo-context export --repo https://github.com/owner/repo
@@ -90,10 +84,7 @@ repo-context info .
 
 ## Guided mode (default)
 
-
-<div style="text-align: center;">
-  <img src="assets/1.png" alt="CLI Demo" style="width: 80%;">
-</div>
+<img src="assets/1.png" alt="CLI Demo" style="width: 80%;">
 
 
 
@@ -105,9 +96,7 @@ repo-context info .
 -   **Full context** (largest practical context bundle)
 
 
-<div style="text-align: center;">
-  <img src="assets/3.png" alt="CLI Demo" style="width: 80%;">
-</div>
+<img src="assets/3.png" alt="CLI Demo" style="width: 80%;">
 
 In non-interactive sessions (CI/pipes), it automatically falls back to quick defaults.
 

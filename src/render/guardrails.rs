@@ -1,22 +1,38 @@
 //! Guardrail rendering for context pack outputs.
+//!
+//! Provides functionality to detect and report potential gaps in context coverage,
+//! including unresolved symbols, dynamic dispatch patterns, and dropped files.
 
 use crate::domain::{Chunk, ScanStats};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+/// Represents a claimed symbol found in the code.
 pub struct ClaimEntry {
+    /// Symbol name
     pub symbol: String,
+    /// Kind of claim (def, type, impl)
     pub kind: String,
+    /// File path where found
     pub file: String,
+    /// Chunk ID where found
     pub chunk_id: String,
 }
 
+/// Represents a missing piece of context.
 pub struct MissingPiece {
+    /// Type of missing piece
     pub kind: String,
+    /// Description of the missing item
     pub description: String,
+    /// Heuristic used to detect the gap
     pub heuristic: String,
+    /// IDs of chunks referencing this symbol
     pub chunk_ids: Vec<String>,
 }
 
+/// Builds a list of claimed symbols from chunk tags.
+///
+/// Scans chunk tags for definitions, types, and implementations.
 pub fn build_claims(chunks: &[Chunk]) -> Vec<ClaimEntry> {
     let mut claims = Vec::new();
     for chunk in chunks {
@@ -38,6 +54,10 @@ pub fn build_claims(chunks: &[Chunk]) -> Vec<ClaimEntry> {
     claims
 }
 
+/// Builds a list of missing pieces of context.
+///
+/// Detects unresolved symbols, dynamic dispatch patterns, and dropped files
+/// to highlight potential gaps in the exported context.
 pub fn build_missing_pieces(chunks: &[Chunk], stats: &ScanStats) -> Vec<MissingPiece> {
     let mut missing = Vec::new();
 
@@ -109,6 +129,9 @@ pub fn build_missing_pieces(chunks: &[Chunk], stats: &ScanStats) -> Vec<MissingP
     missing
 }
 
+/// Renders guardrail information as markdown.
+///
+/// Returns a markdown-formatted string with claims and missing pieces.
 pub fn render_guardrails(claims: &[ClaimEntry], missing: &[MissingPiece]) -> String {
     let mut out = String::new();
     if !claims.is_empty() {

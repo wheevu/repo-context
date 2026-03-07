@@ -1,9 +1,13 @@
 //! Markdown-aware chunking.
+//!
+//! Chunks Markdown files at heading boundaries for coherent sections.
+//! Falls back to line-based chunking for oversized sections.
 
 use crate::chunk::line_chunker::LineChunker;
 use crate::domain::{Chunk, FileInfo};
 use crate::utils::{estimate_tokens, stable_hash};
 
+/// Markdown-aware chunker that splits at headings.
 pub struct MarkdownChunker;
 
 impl Default for MarkdownChunker {
@@ -13,10 +17,21 @@ impl Default for MarkdownChunker {
 }
 
 impl MarkdownChunker {
+    /// Creates a new MarkdownChunker.
     pub fn new() -> Self {
         Self
     }
 
+    /// Chunks Markdown content at heading boundaries.
+    ///
+    /// # Arguments
+    /// * `file_info` - File metadata
+    /// * `content` - File content
+    /// * `max_tokens` - Maximum tokens per chunk
+    /// * `overlap_tokens` - Overlap between chunks
+    ///
+    /// # Returns
+    /// Vector of chunks, split at heading boundaries
     pub fn chunk(
         &self,
         file_info: &FileInfo,

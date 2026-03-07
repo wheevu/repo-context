@@ -52,6 +52,16 @@ enum Commands {
     Diff(diff::DiffArgs),
 }
 
+/// Entry point for CLI execution.
+///
+/// Parses command line arguments, initializes logging, and dispatches
+/// to the appropriate subcommand handler.
+///
+/// # Returns
+/// Ok(()) on success, or an error if command execution fails
+///
+/// # Errors
+/// Returns an error if any subcommand fails to execute
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
 

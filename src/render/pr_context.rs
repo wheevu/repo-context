@@ -1,7 +1,25 @@
 //! PR-context rendering for context pack outputs.
+//!
+//! Renders PR context reports as markdown for inclusion in context packs.
 
 use crate::analysis::pr::PrContextReport;
 
+/// Renders a PR context report as markdown.
+///
+/// Includes sections for:
+/// - Touch Points
+/// - Entrypoints
+/// - Invariants
+/// - Feature Flags (if present)
+/// - Trait Implementations (if present)
+/// - Error Flows (if present)
+/// - Validation Checklist
+///
+/// # Arguments
+/// * `report` - PR context report to render
+///
+/// # Returns
+/// Markdown formatted string
 pub fn render_pr_context(report: &PrContextReport) -> String {
     let mut out = String::new();
     out.push_str("\n## 🔧 PR Context\n\n");

@@ -32,6 +32,19 @@ pub fn find_repo_root(start: &Path) -> PathBuf {
     start.to_path_buf()
 }
 
+/// Validates a local path as a repository.
+///
+/// # Arguments
+/// * `path` - Path to validate
+///
+/// # Returns
+/// RepoContext if valid, or an error if path doesn't exist or isn't a directory
+///
+/// # Errors
+/// Returns an error if:
+/// - The path doesn't exist
+/// - The path isn't a directory
+/// - The path can't be canonicalized
 pub fn validate_local_path(path: &Path) -> Result<RepoContext> {
     let canonical = path.canonicalize()?;
 

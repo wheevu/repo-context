@@ -4,38 +4,80 @@ use crate::domain::Config;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+/// CLI-provided overrides for configuration values.
+///
+/// All fields are optional, allowing selective overrides of config file settings.
 #[derive(Debug, Default, Clone)]
 pub struct CliOverrides {
+    /// Local path to repository
     pub path: Option<PathBuf>,
+    /// Remote repository URL
     pub repo_url: Option<String>,
+    /// Git reference (branch, tag, commit)
     pub ref_: Option<String>,
+    /// File extensions to include
     pub include_extensions: Option<HashSet<String>>,
+    /// Glob patterns to exclude
     pub exclude_globs: Option<HashSet<String>>,
+    /// Maximum file size in bytes
     pub max_file_bytes: Option<u64>,
+    /// Maximum total size in bytes
     pub max_total_bytes: Option<u64>,
+    /// Whether to respect .gitignore
     pub respect_gitignore: Option<bool>,
+    /// Whether to follow symlinks
     pub follow_symlinks: Option<bool>,
+    /// Whether to skip minified files
     pub skip_minified: Option<bool>,
+    /// Maximum tokens in output
     pub max_tokens: Option<usize>,
+    /// Task query for reranking
     pub task_query: Option<String>,
+    /// Whether to enable semantic reranking
     pub semantic_rerank: Option<bool>,
+    /// Number of top chunks for reranking
     pub rerank_top_k: Option<usize>,
+    /// Semantic model identifier
     pub semantic_model: Option<String>,
+    /// Fraction of budget for stitching
     pub stitch_budget_fraction: Option<f64>,
+    /// Number of seed chunks for stitching
     pub stitch_top_n: Option<usize>,
+    /// Chunk size in tokens
     pub chunk_tokens: Option<usize>,
+    /// Chunk overlap in tokens
     pub chunk_overlap: Option<usize>,
+    /// Minimum chunk size in tokens
     pub min_chunk_tokens: Option<usize>,
+    /// Output mode (prompt, rag, both)
     pub mode: Option<crate::domain::OutputMode>,
+    /// Output directory path
     pub output_dir: Option<PathBuf>,
+    /// Directory tree depth
     pub tree_depth: Option<usize>,
+    /// Whether to redact secrets
     pub redact_secrets: Option<bool>,
+    /// Redaction mode
     pub redaction_mode: Option<crate::domain::RedactionMode>,
+    /// Patterns to always include
     pub always_include_patterns: Option<Vec<String>>,
+    /// Paths to always include
     pub always_include_paths: Option<Vec<String>>,
+    /// Keywords for invariant detection
     pub invariant_keywords: Option<Vec<String>>,
 }
 
+/// Merges CLI overrides into a base configuration.
+///
+/// CLI values take precedence over config file values. The base_config
+/// is modified in place and returned.
+///
+/// # Arguments
+/// * `base_config` - The configuration loaded from file or defaults
+/// * `cli` - CLI-provided overrides
+///
+/// # Returns
+/// The merged configuration
 pub fn merge_cli_with_config(mut base_config: Config, cli: CliOverrides) -> Config {
     if let Some(path) = cli.path {
         base_config.path = Some(path);

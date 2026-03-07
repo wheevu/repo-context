@@ -1,8 +1,12 @@
 //! Line-based chunking.
+//!
+//! Provides simple line-based chunking with overlap and boundary detection
+//! for function/class definitions.
 
 use crate::domain::{Chunk, FileInfo};
 use crate::utils::{estimate_tokens, stable_hash};
 
+/// Line-based chunker for generic text content.
 pub struct LineChunker;
 
 impl Default for LineChunker {
@@ -12,10 +16,21 @@ impl Default for LineChunker {
 }
 
 impl LineChunker {
+    /// Creates a new LineChunker.
     pub fn new() -> Self {
         Self
     }
 
+    /// Chunks content into line-based chunks with overlap.
+    ///
+    /// # Arguments
+    /// * `file_info` - File metadata
+    /// * `content` - File content
+    /// * `max_tokens` - Maximum tokens per chunk
+    /// * `overlap_tokens` - Overlap between chunks
+    ///
+    /// # Returns
+    /// Vector of chunks
     pub fn chunk(
         &self,
         file_info: &FileInfo,

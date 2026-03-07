@@ -1,4 +1,7 @@
 //! Directory tree generation.
+//!
+//! Generates ASCII tree representations of directory structures,
+//! respecting common skip patterns like node_modules and .git.
 
 use crate::utils::normalize_path;
 use anyhow::Result;
@@ -6,6 +9,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Directories to skip when generating tree.
 const SKIPPED_DIRS: &[&str] = &[
     "node_modules",
     "__pycache__",
@@ -20,6 +24,19 @@ const SKIPPED_DIRS: &[&str] = &[
     ".eggs",
 ];
 
+/// Generates an ASCII tree representation of a directory.
+///
+/// # Arguments
+/// * `root_path` - Root path to start from
+/// * `max_depth` - Maximum depth to traverse
+/// * `include_files` - Whether to include files (not just directories)
+/// * `files_to_highlight` - Set of file paths to highlight in output
+///
+/// # Returns
+/// String containing ASCII tree representation
+///
+/// # Errors
+/// Returns an error if directory cannot be read
 pub fn generate_tree(
     root_path: &Path,
     max_depth: usize,

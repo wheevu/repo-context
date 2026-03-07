@@ -1,4 +1,7 @@
 //! rust-analyzer backed symbol lookup.
+//!
+//! Provides integration with rust-analyzer for workspace symbol lookup
+//! and reference analysis.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -7,6 +10,10 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+/// Checks if rust-analyzer is available in PATH.
+///
+/// # Returns
+/// true if rust-analyzer is installed and executable
 pub fn is_available() -> bool {
     Command::new("rust-analyzer")
         .arg("--version")
@@ -17,38 +24,70 @@ pub fn is_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Represents a workspace symbol found by rust-analyzer.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct WorkspaceSymbol {
+    /// Symbol name
     pub name: String,
+    /// File path (relative to workspace)
     pub path: String,
+    /// Full URI to the file
     pub uri: String,
+    /// Line number (0-indexed)
     pub line: u32,
+    /// Column number (0-indexed)
     pub character: u32,
 }
 
+/// Result of workspace symbol analysis.
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceAnalysis {
+    /// Symbols found in workspace
     pub symbols: Vec<WorkspaceSymbol>,
+    /// Paths containing symbol references
     pub reference_paths: Vec<String>,
 }
 
+/// Seed information for symbol lookup.
 #[derive(Debug, Clone)]
 pub struct SymbolSeed {
+    /// Chunk ID containing the symbol
     pub chunk_id: String,
+    /// Symbol name
     pub symbol: String,
+    /// File path
     pub path: String,
+    /// Line number
     pub line: u32,
+    /// Column number
     pub character: u32,
 }
 
+/// Reference to a symbol from another location.
 #[derive(Debug, Clone)]
 pub struct SymbolReference {
+    /// Chunk ID containing the reference
     pub from_chunk_id: String,
+    /// Symbol being referenced
     pub symbol: String,
+    /// File path of the reference
     pub path: String,
+    /// Line number of the reference
     pub line: u32,
 }
 
+/// Analyzes workspace symbols using rust-analyzer.
+///
+/// # Arguments
+/// * `root` - Workspace root path
+/// * `query` - Symbol query string
+/// * `limit` - Maximum number of symbols to return
+///
+/// # Returns
+/// WorkspaceAnalysis containing found symbols and reference paths
+///
+/// # Errors
+/// Returns an error if rust-analyzer is not available or analysis fails
 pub fn analyze_workspace_symbols(
     root: &Path,
     query: &str,

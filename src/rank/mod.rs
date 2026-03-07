@@ -12,15 +12,21 @@ pub mod ranker;
 
 pub use ranker::FileRanker;
 
+/// Tier for context stitching priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StitchTier {
+    /// Symbol definition
     Definition,
+    /// Function being called
     Callee,
+    /// Function calling
     Caller,
+    /// Cross-crate reference
     CrossCrate,
 }
 
 impl StitchTier {
+    /// Returns the string representation of the tier.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Definition => "definition",
@@ -30,6 +36,7 @@ impl StitchTier {
         }
     }
 
+    /// Returns the numeric rank (lower = higher priority).
     fn rank(self) -> u8 {
         match self {
             Self::Definition => 0,
@@ -40,14 +47,30 @@ impl StitchTier {
     }
 }
 
+/// Bundle of stitched context for a seed chunk.
 #[derive(Debug, Default, Clone)]
 pub struct StitchedBundle {
+    /// IDs of seed chunks
     pub seed_ids: BTreeSet<String>,
+    /// Map of stitched chunk IDs to their tier
     pub stitched: HashMap<String, StitchTier>,
+    /// Total tokens used by stitched chunks
     pub tokens_used: usize,
+    /// Lazily loaded chunks for stitched context
     pub lazy_chunks: Vec<Chunk>,
 }
 
+/// Reranks chunks by task query relevance.
+///
+/// Uses BM25 scoring combined with file priority to rerank chunks.
+///
+/// # Arguments
+/// * `chunks` - Chunks to rerank (modified in place)
+/// * `query` - Task query string
+/// * `relevance_weight` - Weight for relevance vs file priority (0.0-1.0)
+///
+/// # Returns
+/// HashMap of file paths to their computed scores
 pub fn rerank_chunks_by_task(
     chunks: &mut [Chunk],
     query: &str,

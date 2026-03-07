@@ -1,9 +1,28 @@
 //! JSONL rendering for RAG
+//!
+//! Provides functionality to render chunks as JSON Lines format for RAG pipelines.
 
 use crate::domain::Chunk;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+/// Renders chunks as JSON Lines format.
+///
+/// Each chunk is serialized as a JSON object with fields:
+/// - `content`: The chunk content
+/// - `end_line`: Ending line number
+/// - `id`: Unique chunk ID
+/// - `lang`: Programming language
+/// - `path`: File path
+/// - `priority`: Priority score (rounded to 3 decimals)
+/// - `start_line`: Starting line number
+/// - `tags`: Array of tags
+///
+/// # Arguments
+/// * `chunks` - Slices of chunks to render
+///
+/// # Returns
+/// JSON Lines formatted string (one JSON object per line)
 pub fn render_jsonl(chunks: &[Chunk]) -> String {
     let mut lines = Vec::with_capacity(chunks.len());
     for chunk in chunks {

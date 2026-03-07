@@ -1,18 +1,27 @@
 //! AST-based symbol usage extraction.
+//!
+//! Provides functionality to extract symbol usages from source code using tree-sitter.
 
 use std::collections::BTreeSet;
 use tree_sitter::{Language, Node, Parser};
 
+/// Kind of symbol usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UsageKind {
+    /// Function/method call
     Call,
+    /// Type annotation or declaration
     TypeUse,
+    /// Import statement
     Import,
+    /// Inheritance (class extends/implements)
     Inherit,
+    /// General reference
     Ref,
 }
 
 impl UsageKind {
+    /// Returns the string representation of the usage kind.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Call => "call",
@@ -24,6 +33,14 @@ impl UsageKind {
     }
 }
 
+/// Extracts symbol usages from source code.
+///
+/// # Arguments
+/// * `content` - Source code content
+/// * `language` - Programming language identifier
+///
+/// # Returns
+/// Vector of (symbol, usage_kind) tuples
 pub fn extract_symbol_usages(content: &str, language: &str) -> Vec<(String, UsageKind)> {
     let ts_language: Language = match language {
         "python" => tree_sitter_python::LANGUAGE.into(),

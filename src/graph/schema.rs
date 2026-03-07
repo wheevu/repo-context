@@ -1,11 +1,24 @@
 //! SQLite schema for retrieval graph.
+//!
+//! Defines database schema and migration logic for the symbol graph database.
 
 use anyhow::{bail, Result};
 use rusqlite::Connection;
 use std::path::Path;
 
+/// Current schema version number.
 pub const SCHEMA_VERSION: i64 = 2;
 
+/// Opens an existing database or creates a new one with the current schema.
+///
+/// # Arguments
+/// * `path` - Path to the SQLite database file
+///
+/// # Returns
+/// A Connection to the database with schema initialized
+///
+/// # Errors
+/// Returns an error if schema version is unsupported or database cannot be opened
 pub fn open_or_create(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(

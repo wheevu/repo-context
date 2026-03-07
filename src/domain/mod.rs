@@ -13,11 +13,16 @@ pub const REPORT_SCHEMA_VERSION: &str = "1.0.0";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputMode {
+    /// Generate a prompt-optimized context pack
     Prompt,
+    /// Generate RAG-optimized chunks
     Rag,
+    /// Generate contribution-oriented context
     Contribution,
+    /// Generate PR context report
     #[serde(rename = "pr-context")]
     PrContext,
+    /// Generate both prompt and RAG outputs (default)
     #[default]
     Both,
 }
@@ -26,10 +31,14 @@ pub enum OutputMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum RedactionMode {
+    /// Fast redaction with minimal safety checks
     Fast,
+    /// Standard redaction with balance of speed and safety (default)
     #[default]
     Standard,
+    /// Aggressive redaction that may have false positives
     Paranoid,
+    /// Redaction with AST validation for syntax safety
     StructureSafe,
 }
 
@@ -313,8 +322,11 @@ pub struct RedactionConfig {
 /// One custom redaction rule from the config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomRedactionRule {
+    /// Name of the rule (optional, defaults to "custom")
     pub name: Option<String>,
+    /// Regex pattern to match secrets
     pub pattern: String,
+    /// Replacement string (default: "[CUSTOM_REDACTED]")
     #[serde(default = "default_custom_replacement")]
     pub replacement: String,
 }
@@ -322,10 +334,13 @@ pub struct CustomRedactionRule {
 /// Entropy detection settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntropyConfig {
+    /// Whether entropy detection is enabled
     #[serde(default)]
     pub enabled: bool,
+    /// Entropy threshold (default: 4.5)
     #[serde(default = "default_entropy_threshold")]
     pub threshold: f64,
+    /// Minimum token length to check (default: 20)
     #[serde(default = "default_entropy_min_length")]
     pub min_length: usize,
 }
@@ -333,8 +348,10 @@ pub struct EntropyConfig {
 /// Paranoid mode settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParanoidConfig {
+    /// Whether paranoid mode is enabled
     #[serde(default)]
     pub enabled: bool,
+    /// Minimum token length for paranoid redaction (default: 32)
     #[serde(default = "default_paranoid_min_length")]
     pub min_length: usize,
 }
@@ -426,30 +443,43 @@ fn default_source_safe_patterns() -> Vec<String> {
 /// Configurable weights for file ranking — mirrors Python's RankingWeights.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RankingWeights {
+    /// Weight for README files (default: 1.00)
     #[serde(default = "w_readme")]
     pub readme: f64,
+    /// Weight for contribution documentation (default: 0.98)
     #[serde(default = "w_contribution_doc")]
     pub contribution_doc: f64,
+    /// Weight for main documentation files (default: 0.95)
     #[serde(default = "w_main_doc")]
     pub main_doc: f64,
+    /// Weight for configuration files (default: 0.90)
     #[serde(default = "w_config")]
     pub config: f64,
+    /// Weight for entrypoint files (default: 0.85)
     #[serde(default = "w_entrypoint")]
     pub entrypoint: f64,
+    /// Weight for API definition files (default: 0.80)
     #[serde(default = "w_api_definition")]
     pub api_definition: f64,
+    /// Weight for core source files (default: 0.75)
     #[serde(default = "w_core_source")]
     pub core_source: f64,
+    /// Weight for example files (default: 0.60)
     #[serde(default = "w_example")]
     pub example: f64,
+    /// Weight for test files (default: 0.50)
     #[serde(default = "w_test")]
     pub test: f64,
+    /// Default weight for other files (default: 0.50)
     #[serde(default = "w_default")]
     pub default: f64,
+    /// Weight for generated files (default: 0.20)
     #[serde(default = "w_generated")]
     pub generated: f64,
+    /// Weight for lock files (default: 0.15)
     #[serde(default = "w_lock_file")]
     pub lock_file: f64,
+    /// Weight for vendored files (default: 0.10)
     #[serde(default = "w_vendored")]
     pub vendored: f64,
 }
@@ -634,17 +664,20 @@ where
 /// Main configuration for repo-context
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    // Input source
+    /// Local path to repository
     #[serde(default)]
     pub path: Option<PathBuf>,
 
+    /// Remote repository URL
     #[serde(default, alias = "repo")]
     pub repo_url: Option<String>,
 
+    /// Git reference (branch, tag, or commit)
     #[serde(default, alias = "ref")]
     pub ref_: Option<String>,
 
     // Filtering options
+    /// File extensions to include (default: common code extensions)
     #[serde(
         default = "default_include_extensions",
         alias = "include_ext",
@@ -652,6 +685,7 @@ pub struct Config {
     )]
     pub include_extensions: HashSet<String>,
 
+    /// Glob patterns to exclude (default: build artifacts, dependencies, etc.)
     #[serde(
         default = "default_exclude_globs",
         alias = "exclude_glob",
@@ -659,22 +693,27 @@ pub struct Config {
     )]
     pub exclude_globs: HashSet<String>,
 
+    /// Maximum file size in bytes (default: 1 MB)
     #[serde(default = "default_max_file_bytes")]
     pub max_file_bytes: u64,
 
+    /// Maximum total output size in bytes (default: 20 MB)
     #[serde(default = "default_max_total_bytes")]
     pub max_total_bytes: u64,
 
+    /// Whether to respect .gitignore files (default: true)
     #[serde(default = "default_true")]
     pub respect_gitignore: bool,
 
+    /// Whether to follow symbolic links (default: false)
     #[serde(default)]
     pub follow_symlinks: bool,
 
+    /// Whether to skip minified files (default: true)
     #[serde(default = "default_true")]
     pub skip_minified: bool,
 
-    // Token budget
+    /// Maximum tokens in output (optional, no limit if None)
     pub max_tokens: Option<usize>,
 
     /// Optional task description used for retrieval-driven reranking.
@@ -701,29 +740,35 @@ pub struct Config {
     #[serde(default = "default_stitch_top_n")]
     pub stitch_top_n: usize,
 
-    // Chunking options
+    /// Chunk size in tokens (default: 800)
     #[serde(default = "default_chunk_tokens")]
     pub chunk_tokens: usize,
 
+    /// Chunk overlap in tokens (default: 120)
     #[serde(default = "default_chunk_overlap")]
     pub chunk_overlap: usize,
 
+    /// Minimum chunk size in tokens (default: 200)
     #[serde(default = "default_min_chunk_tokens")]
     pub min_chunk_tokens: usize,
 
-    // Output options
+    /// Output mode (prompt, rag, both, etc.) (default: Both)
     #[serde(default)]
     pub mode: OutputMode,
 
+    /// Output directory path (default: ./out)
     #[serde(default = "default_output_dir")]
     pub output_dir: PathBuf,
 
+    /// Directory tree depth for display (default: 4)
     #[serde(default = "default_tree_depth")]
     pub tree_depth: usize,
 
+    /// Whether to redact secrets (default: true)
     #[serde(default = "default_true")]
     pub redact_secrets: bool,
 
+    /// Redaction mode (default: Standard)
     #[serde(default)]
     pub redaction_mode: RedactionMode,
 
@@ -848,6 +893,7 @@ fn default_invariant_keywords() -> Vec<String> {
     .collect()
 }
 
+/// Default file extensions to include in scanning
 pub fn default_include_extensions() -> HashSet<String> {
     [
         // Python
@@ -921,6 +967,7 @@ pub fn default_include_extensions() -> HashSet<String> {
     .collect()
 }
 
+/// Default glob patterns to exclude from scanning
 pub fn default_exclude_globs() -> HashSet<String> {
     [
         // Build outputs

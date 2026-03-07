@@ -1,4 +1,7 @@
 //! Code-aware chunking.
+//!
+//! Uses tree-sitter for structure-aware chunking of source code files.
+//! Falls back to line-based chunking for unsupported languages.
 
 use crate::chunk::line_chunker::LineChunker;
 use crate::domain::{Chunk, FileInfo};
@@ -6,10 +9,13 @@ use crate::utils::{estimate_tokens, stable_hash};
 use std::collections::{BTreeSet, HashMap};
 use tree_sitter::{Language, Parser};
 
+/// Code chunker using tree-sitter for structure-aware chunking.
 pub struct CodeChunker;
 
+/// Type alias for symbol tags mapped to line boundaries.
 type SymbolTagsByBoundary = HashMap<usize, BTreeSet<String>>;
 
+/// Returns the list of languages supported by tree-sitter chunking.
 pub fn supported_tree_sitter_languages() -> &'static [&'static str] {
     &["python", "rust", "javascript", "typescript", "go"]
 }
@@ -21,10 +27,21 @@ impl Default for CodeChunker {
 }
 
 impl CodeChunker {
+    /// Creates a new CodeChunker.
     pub fn new() -> Self {
         Self
     }
 
+    /// Chunks source code using tree-sitter or regex-based boundaries.
+    ///
+    /// # Arguments
+    /// * `file_info` - File metadata
+    /// * `content` - File content
+    /// * `max_tokens` - Maximum tokens per chunk
+    /// * `overlap_tokens` - Overlap between chunks
+    ///
+    /// # Returns
+    /// Vector of chunks
     pub fn chunk(
         &self,
         file_info: &FileInfo,

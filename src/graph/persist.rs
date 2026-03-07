@@ -1,4 +1,6 @@
 //! Graph persistence helpers.
+//!
+//! Provides functionality to persist symbol graph data to SQLite database.
 
 use crate::domain::Chunk;
 use crate::graph::symbol_usage::{extract_symbol_usages, UsageKind};
@@ -7,6 +9,18 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
 
+/// Persists symbol graph data to the database.
+///
+/// # Arguments
+/// * `conn` - SQLite connection
+/// * `chunks` - Chunks to extract symbol information from
+///
+/// # Returns
+/// Tuple of (symbol_count, ref_count) representing number of symbols
+/// and references persisted
+///
+/// # Errors
+/// Returns an error if database operations fail
 pub fn persist_graph(conn: &mut Connection, chunks: &[Chunk]) -> Result<(usize, usize)> {
     let tx = conn.transaction()?;
 

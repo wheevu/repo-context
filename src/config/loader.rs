@@ -1,10 +1,25 @@
 //! Config file loading
+//!
+//! Provides functionality to load configuration from TOML or YAML files,
+//! with auto-discovery of config files in the repository.
 
 use crate::domain::Config;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
+/// Loads configuration from a file or discovers one in the repository.
+///
+/// # Arguments
+/// * `repo_root` - Path to the repository root
+/// * `config_path` - Optional explicit path to config file
+///
+/// # Returns
+/// The loaded configuration, or defaults if no config found
+///
+/// # Errors
+/// Returns an error if the config file exists but cannot be parsed
+/// (only when explicitly provided; auto-discovered configs fail silently)
 pub fn load_config(repo_root: &Path, config_path: Option<&Path>) -> Result<Config> {
     let config_path_provided = config_path.is_some();
 

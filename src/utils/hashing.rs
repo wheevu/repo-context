@@ -1,4 +1,7 @@
 //! Stable hashing for chunk IDs
+//!
+//! Provides content-addressable hashing for chunk identifiers,
+//! ensuring deterministic IDs based on content, path, and line numbers.
 
 use sha2::{Digest, Sha256};
 
@@ -18,6 +21,23 @@ fn bytes_to_hex<'a>(bytes: &[u8], buf: &'a mut [u8; HEX_BUF_SIZE]) -> &'a str {
     std::str::from_utf8(&buf[..bytes.len() * 2]).unwrap()
 }
 
+/// Generates a stable hash for a chunk.
+///
+/// The hash is based on:
+/// - File path
+/// - Start and end line numbers
+/// - First 1000 characters of content
+///
+/// This produces deterministic IDs that remain consistent across runs.
+///
+/// # Arguments
+/// * `content` - Chunk content
+/// * `path` - File path
+/// * `start_line` - Starting line number (1-indexed)
+/// * `end_line` - Ending line number (inclusive)
+///
+/// # Returns
+/// 16-character hexadecimal hash string
 pub fn stable_hash(content: &str, path: &str, start_line: usize, end_line: usize) -> String {
     // Match Python: hashlib.sha256(f"{path}:{start_line}-{end_line}:{content[:1000]}".encode()).hexdigest()[:16]
     // content[:1000] in Python slices by character, so use char-boundary-safe truncation.

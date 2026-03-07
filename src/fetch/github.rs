@@ -1,4 +1,6 @@
 //! GitHub repository cloning
+//!
+//! Provides functionality to clone GitHub repositories to temporary directories.
 
 use crate::fetch::RepoContext;
 use anyhow::{Context, Result};
@@ -7,6 +9,17 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Clones a GitHub repository to a temporary directory.
+///
+/// # Arguments
+/// * `url` - GitHub repository URL
+/// * `ref_` - Optional git reference (branch, tag, or commit)
+///
+/// # Returns
+/// RepoContext pointing to the cloned repository
+///
+/// # Errors
+/// Returns an error if cloning fails or temp directory cannot be created
 pub fn clone_repository(url: &str, ref_: Option<&str>) -> Result<RepoContext> {
     let temp_dir = build_temp_repo_dir();
     std::fs::create_dir_all(&temp_dir)

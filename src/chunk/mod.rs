@@ -86,6 +86,20 @@ pub fn coalesce_small_chunks(chunks: Vec<Chunk>, _min_tokens: usize) -> Vec<Chun
     coalesce_small_chunks_with_max(chunks, 200, 800)
 }
 
+/// Coalesce small chunks that are adjacent or overlap.
+///
+/// Merges chunks that are:
+/// - From the same file
+/// - Adjacent or overlapping (next starts within 1 line of previous end)
+/// - At least one is below `min_tokens` AND combined size is below `max_tokens`
+///
+/// # Arguments
+/// * `chunks` - Vector of chunks to process
+/// * `min_tokens` - Minimum token threshold for coalescing
+/// * `max_tokens` - Maximum combined token limit
+///
+/// # Returns
+/// Vector of coalesced chunks
 pub fn coalesce_small_chunks_with_max(
     chunks: Vec<Chunk>,
     min_tokens: usize,

@@ -10,16 +10,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Recognised HuggingFace repo types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HfRepoType {
+    /// HuggingFace Spaces
     Spaces,
+    /// HuggingFace Datasets
     Datasets,
+    /// HuggingFace Models
     Models,
 }
 
 /// Parsed components from a HuggingFace URL.
 pub struct HfParsed {
+    /// Repository owner/organization
     pub owner: String,
+    /// Repository name
     pub repo_name: String,
+    /// Type of repository
     pub repo_type: HfRepoType,
+    /// Git reference (branch, tag, or commit)
     pub ref_: Option<String>,
 }
 

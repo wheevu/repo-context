@@ -5,6 +5,3 @@
 
 pub mod scanner;
 pub mod tree;
-
-/// Re-export of FileScanner for convenience.
-pub use scanner::FileScanner;

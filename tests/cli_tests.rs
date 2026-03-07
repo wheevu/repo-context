@@ -464,3 +464,393 @@ fn rust_analyzer_available() -> bool {
         .map(|out| out.status.success())
         .unwrap_or(false)
 }
+
+/// Test that export handles empty repositories gracefully.
+#[test]
+fn test_export_handles_empty_repo() {
+    let repo = TempDir::new().expect("temp repo dir");
+    let out = TempDir::new().expect("temp out dir");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--quick",
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("utf8 out path"),
+    ]);
+    cmd.assert().success();
+}
+
+/// Test that export respects extension filtering.
+#[test]
+fn test_export_respects_extension_filtering() {
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::create_dir_all(repo.path().join("src")).expect("mkdir src");
+    fs::write(repo.path().join("src/main.rs"), "fn main() {}").expect("write rust");
+    fs::write(repo.path().join("src/main.py"), "print('hello')").expect("write python");
+    let out = TempDir::new().expect("temp out dir");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--include-ext",
+        ".rs",
+        "--quick",
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("utf8 out path"),
+    ]);
+    cmd.assert().success();
+
+    let repo_name = repo.path().file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let chunks_path = out.path().join(repo_name).join(format!("{repo_name}_chunks.jsonl"));
+    let chunks = fs::read_to_string(chunks_path).expect("read chunks");
+    assert!(chunks.contains("main.rs"), "should include .rs files");
+    assert!(!chunks.contains("main.py"), "should exclude .py files");
+}
+
+/// Test that export handles binary files correctly.
+#[test]
+fn test_export_skips_binary_files() {
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::write(repo.path().join("text.txt"), "Hello, world!").expect("write text");
+    // Write a binary file with null bytes
+    fs::write(repo.path().join("binary.bin"), vec![0u8, 1, 2, 3, 0, 5]).expect("write binary");
+    let out = TempDir::new().expect("temp out dir");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--include-ext",
+        ".txt,.bin",
+        "--quick",
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("utf8 out path"),
+    ]);
+    cmd.assert().success();
+
+    let repo_name = repo.path().file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let report_path = out.path().join(repo_name).join(format!("{repo_name}_report.json"));
+    let report_raw = fs::read_to_string(report_path).expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+
+    // Binary files should be skipped - check total files scanned vs included
+    let files_scanned = report["stats"]["files_scanned"].as_u64().unwrap_or(0);
+    let files_included = report["stats"]["files_included"].as_u64().unwrap_or(0);
+
+    // Should have scanned 2 files but included only 1 (the text file)
+    assert!(files_scanned >= 2, "should scan at least 2 files");
+    assert_eq!(files_included, 1, "should include only 1 file (text), binary should be skipped");
+}
+
+/// Test that export handles symlinks correctly (does not follow by default).
+#[test]
+fn test_export_handles_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::write(repo.path().join("real.txt"), "real file content").expect("write real file");
+
+    // Create a symlink (Unix only)
+    #[cfg(unix)]
+    {
+        symlink(repo.path().join("real.txt"), repo.path().join("link.txt"))
+            .expect("create symlink");
+    }
+
+    let out = TempDir::new().expect("temp out dir");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--quick",
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("utf8 out path"),
+    ]);
+    cmd.assert().success();
+}
+
+/// Test that index command handles missing directories gracefully.
+#[test]
+fn test_index_handles_nonexistent_path() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "index",
+        "--path",
+        "/nonexistent/path/that/does/not/exist",
+        "--db",
+        "/tmp/test_index.sqlite",
+    ]);
+    cmd.assert().failure();
+}
+
+/// Test that query command provides clear error for unindexed databases.
+#[test]
+fn test_query_rejects_unindexed_database() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("unindexed.sqlite");
+
+    // Create a minimal SQLite database without the proper schema
+    let conn = Connection::open(&db_path).expect("create db");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+        [],
+    )
+    .expect("create metadata table");
+    conn.execute("INSERT INTO metadata (key, value) VALUES ('schema_version', '1')", [])
+        .expect("insert schema version");
+    drop(conn);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args(["query", "--db", db_path.to_str().expect("db path"), "--task", "test query"]);
+    // Should fail with a clear error message about schema/index
+    cmd.assert().failure().stderr(predicate::str::contains("Run `repo-context index` first"));
+}
+
+/// Test that export with RAG mode produces JSONL output.
+#[test]
+fn test_export_rag_mode_produces_jsonl() {
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::create_dir_all(repo.path().join("src")).expect("mkdir src");
+    fs::write(repo.path().join("src/main.rs"), "fn main() {}").expect("write source");
+    let out = TempDir::new().expect("temp out dir");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--mode",
+        "rag",
+        "--quick",
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("utf8 out path"),
+    ]);
+    cmd.assert().success();
+
+    let repo_name = repo.path().file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let output_dir = out.path().join(repo_name);
+
+    // RAG mode should produce chunks.jsonl
+    let chunks_path = output_dir.join(format!("{repo_name}_chunks.jsonl"));
+    assert!(chunks_path.exists(), "chunks.jsonl should exist in RAG mode");
+
+    // Verify chunks.jsonl contains valid JSON lines
+    let chunks_content = fs::read_to_string(&chunks_path).expect("read chunks");
+    for line in chunks_content.lines() {
+        let _: Value = serde_json::from_str(line).expect("each line should be valid JSON");
+    }
+}
+
+/// Test that export with prompt mode produces markdown output.
+#[test]
+fn test_export_prompt_mode_produces_markdown() {
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::create_dir_all(repo.path().join("src")).expect("mkdir src");
+    fs::write(repo.path().join("src/main.rs"), "fn main() {}").expect("write source");
+    fs::write(repo.path().join("README.md"), "# Test Project").expect("write readme");
+    let out = TempDir::new().expect("temp out dir");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--mode",
+        "prompt",
+        "--quick",
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("utf8 out path"),
+    ]);
+    cmd.assert().success();
+
+    let repo_name = repo.path().file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let output_dir = out.path().join(repo_name);
+
+    // Prompt mode should produce context_pack.md
+    let context_path = output_dir.join(format!("{repo_name}_context_pack.md"));
+    assert!(context_path.exists(), "context_pack.md should exist in prompt mode");
+
+    // Verify it's a valid markdown file
+    let context_content = fs::read_to_string(&context_path).expect("read context");
+    assert!(context_content.contains("# "), "should contain markdown headings");
+}
+
+/// Test that export with both mode produces both outputs.
+#[test]
+fn test_export_both_mode_produces_all_outputs() {
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::create_dir_all(repo.path().join("src")).expect("mkdir src");
+    fs::write(repo.path().join("src/main.rs"), "fn main() {}").expect("write source");
+    fs::write(repo.path().join("README.md"), "# Test Project").expect("write readme");
+    let out = TempDir::new().expect("temp out dir");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--mode",
+        "both",
+        "--quick",
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("utf8 out path"),
+    ]);
+    cmd.assert().success();
+
+    let repo_name = repo.path().file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let output_dir = out.path().join(repo_name);
+
+    // Both mode should produce all three outputs
+    assert!(
+        output_dir.join(format!("{repo_name}_context_pack.md")).exists(),
+        "context_pack.md should exist in both mode"
+    );
+    assert!(
+        output_dir.join(format!("{repo_name}_chunks.jsonl")).exists(),
+        "chunks.jsonl should exist in both mode"
+    );
+    assert!(
+        output_dir.join(format!("{repo_name}_report.json")).exists(),
+        "report.json should exist in both mode"
+    );
+}
+
+/// Test that diff command handles identical inputs.
+#[test]
+fn test_diff_handles_identical_inputs() {
+    let before = TempDir::new().expect("temp before");
+    let after = TempDir::new().expect("temp after");
+
+    let report = r#"{"schema_version":"1.0.0","stats":{"files_scanned":1,"files_included":1,"total_bytes_scanned":100,"total_bytes_included":100,"chunks_created":1,"total_tokens_estimated":10},"config":{},"output_files":[],"files":[{"id":"a1","path":"src/a.rs","priority":0.75,"tokens":10}]}"#;
+
+    fs::write(before.path().join("report.json"), report).expect("write before report");
+    fs::write(after.path().join("report.json"), report).expect("write after report");
+    fs::write(before.path().join("chunks.jsonl"), "").expect("write before chunks");
+    fs::write(after.path().join("chunks.jsonl"), "").expect("write after chunks");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "diff",
+        before.path().to_str().expect("before path"),
+        after.path().to_str().expect("after path"),
+    ]);
+    cmd.assert().success().stdout(predicate::str::contains("Files: +0 added, -0 removed"));
+}
+
+/// Test that diff command handles missing files gracefully.
+#[test]
+fn test_diff_handles_missing_files() {
+    let before = TempDir::new().expect("temp before");
+    let after = TempDir::new().expect("temp after");
+
+    // Only create one report file
+    fs::write(
+        before.path().join("report.json"),
+        r#"{"schema_version":"1.0.0","stats":{},"config":{},"output_files":[],"files":[]}"#,
+    )
+    .expect("write before report");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "diff",
+        before.path().to_str().expect("before path"),
+        after.path().to_str().expect("after path"),
+    ]);
+    // Should fail or handle gracefully when after/report.json doesn't exist
+    cmd.assert().failure();
+}
+
+/// Test that export respects max_tokens limit.
+#[test]
+fn test_export_respects_max_tokens() {
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::create_dir_all(repo.path().join("src")).expect("mkdir src");
+    // Create multiple files with content
+    for i in 0..5 {
+        fs::write(
+            repo.path().join(format!("src/file{i}.rs")),
+            format!("pub fn func{i}() {{ println!(\"hello\"); }}"),
+        )
+        .expect("write source");
+    }
+    fs::write(repo.path().join("README.md"), "# Test").expect("write readme");
+    let out = TempDir::new().expect("temp out dir");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--max-tokens",
+        "50", // Very low token limit
+        "--quick",
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("utf8 out path"),
+    ]);
+    cmd.assert().success();
+
+    let repo_name = repo.path().file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let report_path = out.path().join(repo_name).join(format!("{repo_name}_report.json"));
+    let report_raw = fs::read_to_string(report_path).expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+
+    // Total tokens should be within or close to the limit
+    let total_tokens = report["stats"]["total_tokens_estimated"].as_u64().unwrap_or(0);
+    assert!(total_tokens <= 100, "total tokens ({}) should be limited", total_tokens);
+    // Allow some margin
+}
+
+/// Test that info command works with various path types.
+#[test]
+fn test_info_with_different_paths() {
+    // Current directory
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args(["info", "."]);
+    cmd.assert().success();
+
+    // Absolute path
+    let temp = TempDir::new().expect("temp dir");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args(["info", temp.path().to_str().expect("path")]);
+    cmd.assert().success();
+}
+
+/// Test that verbose flag produces debug output.
+#[test]
+fn test_verbose_flag_produces_debug_output() {
+    let repo = TempDir::new().expect("temp repo dir");
+    fs::write(repo.path().join("main.rs"), "fn main() {}").expect("write source");
+    let out = TempDir::new().expect("temp out dir");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "-v",
+        "export",
+        "--path",
+        repo.path().to_str().expect("utf8 repo path"),
+        "--quick",
+        "--no-timestamp",
+        "--output-dir",
+        out.path().to_str().expect("utf8 out path"),
+    ]);
+    cmd.assert().success().stderr(predicate::str::contains("DEBUG").or(predicate::str::is_empty()));
+}

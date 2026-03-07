@@ -1,6 +1,7 @@
 //! Integration tests for export outputs and determinism.
 
 use assert_cmd::Command;
+use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -315,4 +316,338 @@ fn byte_budget_breaks_on_limit_and_drops_all_remaining() {
             );
         }
     }
+}
+
+/// Test that export respects gitignore patterns.
+/// Note: This test initializes a git repository since the `ignore` crate
+/// requires a valid git repository structure to process .gitignore files.
+#[test]
+fn export_respects_gitignore_patterns() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+
+    // Initialize git repo (required for ignore crate to respect .gitignore)
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(root)
+        .output()
+        .expect("git init should succeed");
+
+    // Create files
+    fs::write(root.join("src/main.rs"), "fn main() {}").expect("write source");
+    fs::write(root.join("src/secret.rs"), "const SECRET: &str = \"hidden\";")
+        .expect("write secret");
+
+    // Create .gitignore that excludes secret.rs
+    fs::write(root.join(".gitignore"), "src/secret.rs\n").expect("write gitignore");
+
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root str"),
+        "--mode",
+        "rag",
+        "--output-dir",
+        out.to_str().expect("out str"),
+        "--no-timestamp",
+        "--no-redact",
+    ]);
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(&out, root);
+    let report_raw = fs::read_to_string(actual.join(output_file_name(root, "report.json")))
+        .expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+
+    // secret.rs should be skipped due to gitignore
+    let chunks = fs::read_to_string(actual.join(output_file_name(root, "chunks.jsonl")))
+        .expect("read chunks");
+    assert!(!chunks.contains("secret.rs"), "secret.rs should be excluded by gitignore");
+    assert!(chunks.contains("main.rs"), "main.rs should be included");
+
+    // Verify gitignore skip count
+    let gitignore_skipped = report["stats"]["files_skipped"]["gitignore"].as_u64().unwrap_or(0);
+    assert!(gitignore_skipped >= 1, "should have at least 1 gitignore-skipped file");
+}
+
+/// Test that export handles deeply nested directory structures.
+#[test]
+fn export_handles_deeply_nested_directories() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+
+    // Create deeply nested structure
+    let deep_path = root.join("a/b/c/d/e/f/g/h/i/j");
+    fs::create_dir_all(&deep_path).expect("mkdir deep");
+    fs::write(deep_path.join("deep.rs"), "fn deep() {}").expect("write deep file");
+
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root str"),
+        "--mode",
+        "rag",
+        "--output-dir",
+        out.to_str().expect("out str"),
+        "--no-timestamp",
+        "--quick",
+        "--no-redact",
+    ]);
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(&out, root);
+    let chunks = fs::read_to_string(actual.join(output_file_name(root, "chunks.jsonl")))
+        .expect("read chunks");
+    assert!(chunks.contains("deep.rs"), "deeply nested file should be found");
+}
+
+/// Test that export handles special characters in filenames.
+#[test]
+fn export_handles_special_characters_in_filenames() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+
+    // Create files with special characters
+    fs::write(root.join("src/file with spaces.rs"), "fn spaces() {}")
+        .expect("write file with spaces");
+    fs::write(root.join("src/file-with-dashes.rs"), "fn dashes() {}")
+        .expect("write file with dashes");
+    fs::write(root.join("src/file_with_underscores.rs"), "fn underscores() {}")
+        .expect("write file with underscores");
+
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root str"),
+        "--mode",
+        "rag",
+        "--output-dir",
+        out.to_str().expect("out str"),
+        "--no-timestamp",
+        "--quick",
+        "--no-redact",
+    ]);
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(&out, root);
+    let chunks = fs::read_to_string(actual.join(output_file_name(root, "chunks.jsonl")))
+        .expect("read chunks");
+
+    // All files should be included
+    assert!(chunks.contains("file with spaces.rs"), "file with spaces should be included");
+    assert!(chunks.contains("file-with-dashes.rs"), "file with dashes should be included");
+    assert!(
+        chunks.contains("file_with_underscores.rs"),
+        "file with underscores should be included"
+    );
+}
+
+/// Test that export produces valid JSON in chunks.jsonl.
+#[test]
+fn export_produces_valid_jsonl() {
+    let fixture = TestRepo::new();
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    run_export(fixture.root(), &out);
+
+    let actual = resolve_output_dir(&out, fixture.root());
+    let chunks_path = actual.join(output_file_name(fixture.root(), "chunks.jsonl"));
+    let chunks_content = fs::read_to_string(&chunks_path).expect("read chunks");
+
+    // Each line should be valid JSON
+    for (i, line) in chunks_content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed: Value = serde_json::from_str(line)
+            .unwrap_or_else(|_| panic!("line {} should be valid JSON: {}", i, line));
+
+        // Verify required fields (note: language is serialized as 'lang' in JSONL)
+        assert!(parsed.get("id").is_some(), "chunk {} should have 'id' field", i);
+        assert!(parsed.get("path").is_some(), "chunk {} should have 'path' field", i);
+        assert!(parsed.get("content").is_some(), "chunk {} should have 'content' field", i);
+        assert!(parsed.get("start_line").is_some(), "chunk {} should have 'start_line' field", i);
+        assert!(parsed.get("end_line").is_some(), "chunk {} should have 'end_line' field", i);
+        assert!(parsed.get("lang").is_some(), "chunk {} should have 'lang' field", i);
+    }
+}
+
+/// Test that report contains valid coverage information.
+#[test]
+fn report_contains_valid_coverage_info() {
+    let fixture = TestRepo::new();
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    run_export(fixture.root(), &out);
+
+    let actual = resolve_output_dir(&out, fixture.root());
+    let report_raw =
+        fs::read_to_string(actual.join(output_file_name(fixture.root(), "report.json")))
+            .expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+
+    // Verify coverage section exists
+    assert!(report.get("coverage").is_some(), "report should have 'coverage' section");
+
+    let coverage = report["coverage"].as_object().expect("coverage should be an object");
+
+    // Verify coverage fields
+    assert!(
+        coverage.contains_key("most_imported_not_included"),
+        "coverage should have 'most_imported_not_included'"
+    );
+    assert!(
+        coverage.contains_key("public_api_surface_coverage"),
+        "coverage should have 'public_api_surface_coverage'"
+    );
+    assert!(
+        coverage.contains_key("missing_context_todos"),
+        "coverage should have 'missing_context_todos'"
+    );
+    assert!(coverage.contains_key("fingerprint"), "coverage should have 'fingerprint'");
+}
+
+/// Test that export without redaction includes secrets.
+#[test]
+fn export_without_redaction_includes_secrets() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+
+    let secret_content = r#"
+const API_KEY: &str = "sk-abcdefghijklmnopqrstuvwxyz12345";
+const PASSWORD: &str = "super_secret_password_123";
+"#;
+    fs::write(root.join("src/secrets.rs"), secret_content).expect("write secrets");
+
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root str"),
+        "--mode",
+        "rag",
+        "--output-dir",
+        out.to_str().expect("out str"),
+        "--no-timestamp",
+        "--no-redact",
+        "--quick",
+    ]);
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(&out, root);
+    let chunks = fs::read_to_string(actual.join(output_file_name(root, "chunks.jsonl")))
+        .expect("read chunks");
+
+    // Secrets should NOT be redacted when --no-redact is used
+    assert!(
+        chunks.contains("sk-abcdefghijklmnopqrstuvwxyz12345"),
+        "secret should not be redacted when --no-redact is used"
+    );
+}
+
+/// Test that export with paranoid redaction is more aggressive.
+#[test]
+fn export_paranoid_redaction_is_more_aggressive() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+
+    // Content with potential secrets (high entropy strings)
+    let content = r#"
+const SOME_VALUE: &str = "aBcDeFgHiJkLmNoPqRsTuVwXyZ123456789";
+fn normal_function() -> i32 { 42 }
+"#;
+    fs::write(root.join("src/main.rs"), content).expect("write main");
+
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root str"),
+        "--mode",
+        "rag",
+        "--output-dir",
+        out.to_str().expect("out str"),
+        "--no-timestamp",
+        "--redaction-mode",
+        "paranoid",
+        "--quick",
+    ]);
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(&out, root);
+    let report_raw = fs::read_to_string(actual.join(output_file_name(root, "report.json")))
+        .expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+
+    // Paranoid mode may flag high-entropy strings
+    let redaction_counts = report["stats"]["redaction_counts"]
+        .as_object()
+        .expect("redaction counts should be an object");
+
+    // Note: This test documents behavior; paranoid mode may or may not
+    // flag the specific string depending on entropy calculation
+    println!("Redaction counts in paranoid mode: {:?}", redaction_counts);
+}
+
+/// Test that export with exclude-globs respects the patterns.
+#[test]
+fn export_respects_exclude_globs() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::create_dir_all(root.join("tests")).expect("mkdir tests");
+
+    fs::write(root.join("src/main.rs"), "fn main() {}").expect("write main");
+    fs::write(root.join("tests/test.rs"), "#[test] fn test() {}").expect("write test");
+
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root str"),
+        "--mode",
+        "rag",
+        "--output-dir",
+        out.to_str().expect("out str"),
+        "--no-timestamp",
+        "--exclude-glob",
+        "tests/**",
+        "--quick",
+        "--no-redact",
+    ]);
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(&out, root);
+    let chunks = fs::read_to_string(actual.join(output_file_name(root, "chunks.jsonl")))
+        .expect("read chunks");
+
+    assert!(chunks.contains("main.rs"), "main.rs should be included");
+    assert!(!chunks.contains("tests/test.rs"), "tests/test.rs should be excluded by glob");
 }

@@ -1,12 +1,13 @@
 # repo-context
+[![CI](https://github.com/wheevu/repo-context/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wheevu/repo-context/actions/workflows/ci.yml)
 
-*(Was previously 'repo-to-prompt', written in python, which was okay. But now the thing's charged with the Speed Force ⚡️🏃🏻)*
+<div style="text-align: center;">
+  <img src="assets/title.svg" alt="CLI Demo" style="width: 80%;">
+</div>
 
 Turn a code repository into a tidy "context pack" you can paste into an LLM — or feed into a RAG pipeline.
 
-[![CI](https://github.com/wheevu/repo-context/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wheevu/repo-context/actions/workflows/ci.yml)
 
-![CLI Demo](assets/cli.gif)
 
 
 ## What it does
@@ -63,8 +64,9 @@ cargo install --path .
 
 Export a local repo:
 
-
-![CLI local 2](assets/2.png)
+<div style="text-align: center;">
+  <img src="assets/2.png" alt="CLI Demo" style="width: 80%;">
+</div>
 
 ```bash
 repo-context export --path .
@@ -72,8 +74,10 @@ repo-context export --path .
 
 Export from a remote repo:
 
-![CLI repo 3](assets/4.png)
 
+<div style="text-align: center;">
+  <img src="assets/4.png" alt="CLI Demo" style="width: 80%;">
+</div>
 
 ```bash
 repo-context export --repo https://github.com/owner/repo
@@ -86,7 +90,11 @@ repo-context info .
 
 ## Guided mode (default)
 
-![CLI local 1](assets/1.png)
+
+<div style="text-align: center;">
+  <img src="assets/1.png" alt="CLI Demo" style="width: 80%;">
+</div>
+
 
 
 `repo-context export` is interactive by default in terminals:
@@ -96,8 +104,10 @@ repo-context info .
 -   **Deep dive specific areas** (repo-specific focus selection)
 -   **Full context** (largest practical context bundle)
 
-![CLI repo 1](assets/3.png)
 
+<div style="text-align: center;">
+  <img src="assets/3.png" alt="CLI Demo" style="width: 80%;">
+</div>
 
 In non-interactive sessions (CI/pipes), it automatically falls back to quick defaults.
 

@@ -1,65 +1,117 @@
 //! PR-oriented context synthesis.
+//!
+//! This module provides analysis capabilities for generating PR-focused context reports,
+//! including touch points, entrypoints, invariants, feature flags, trait implementations,
+//! and error flow signals.
 
 use crate::domain::{Chunk, FileInfo};
 use crate::rank::{dependency_graph, symbol_definitions};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+/// Comprehensive report for PR context analysis.
 #[derive(Debug, Clone)]
 pub struct PrContextReport {
+    /// Points of contact where changes affect the codebase
     pub touch_points: Vec<TouchPoint>,
+    /// Entry surfaces (CLI, API, config) that may be affected
     pub entrypoints: Vec<EntrypointSurface>,
+    /// Invariants detected in the code (tests, safety checks, error types)
     pub invariants: Vec<Invariant>,
+    /// Feature flag boundaries found in the code
     pub feature_flags: Vec<FeatureFlagBoundary>,
+    /// Trait implementation edges
     pub trait_impls: Vec<TraitImplEdge>,
+    /// Error handling flow signals
     pub error_flows: Vec<ErrorFlowSignal>,
+    /// Whether a symbol graph was available for analysis
     pub graph_available: bool,
 }
 
+/// Represents a point where changes touch the codebase.
 #[derive(Debug, Clone)]
 pub struct TouchPoint {
+    /// File path where the touch occurs
     pub path: String,
+    /// Reason for the touch point classification
     pub reason: String,
+    /// IDs of relevant chunks
     pub chunk_ids: Vec<String>,
 }
 
+/// Represents an entry surface in the codebase.
 #[derive(Debug, Clone)]
 pub struct EntrypointSurface {
+    /// Type of entry (CLI, Config, API, etc.)
     pub kind: &'static str,
+    /// File path of the entrypoint
     pub path: String,
+    /// Symbol name
     pub symbol: String,
+    /// Evidence for this classification
     pub evidence: String,
 }
 
+/// Represents a code invariant detected during analysis.
 #[derive(Debug, Clone)]
 pub struct Invariant {
+    /// Type of invariant (Test, SafetyCheck, ErrorType, FeatureFlag)
     pub kind: &'static str,
+    /// File path where the invariant is found
     pub path: String,
+    /// Symbol or description of the invariant
     pub symbol: String,
+    /// ID of the chunk containing the invariant
     pub chunk_id: String,
 }
 
+/// Represents a feature flag boundary.
 #[derive(Debug, Clone)]
 pub struct FeatureFlagBoundary {
+    /// File path where the feature flag is used
     pub path: String,
+    /// Name of the feature
     pub feature: String,
+    /// ID of the chunk containing the feature flag
     pub chunk_id: String,
 }
 
+/// Represents a trait implementation relationship.
 #[derive(Debug, Clone)]
 pub struct TraitImplEdge {
+    /// File path of the implementation
     pub path: String,
+    /// Name of the trait being implemented
     pub trait_name: String,
+    /// Target type receiving the implementation
     pub target_type: String,
+    /// ID of the chunk containing the implementation
     pub chunk_id: String,
 }
 
+/// Represents an error flow signal in the code.
 #[derive(Debug, Clone)]
 pub struct ErrorFlowSignal {
+    /// File path where the signal is found
     pub path: String,
+    /// Evidence of error handling (e.g., "thiserror type", "anyhow context")
     pub evidence: String,
+    /// ID of the chunk containing the signal
     pub chunk_id: String,
 }
 
+/// Builds a PR context report from files and chunks.
+///
+/// Analyzes the codebase to identify touch points, entrypoints, invariants,
+/// feature flags, trait implementations, and error flows relevant to a PR.
+///
+/// # Arguments
+/// * `files` - List of file information
+/// * `chunks` - List of code chunks to analyze
+/// * `task_query` - Optional task query for relevance scoring
+/// * `graph_available` - Whether symbol graph data is available
+///
+/// # Returns
+/// A comprehensive PR context report
 pub fn build_pr_context(
     files: &[FileInfo],
     chunks: &[Chunk],
@@ -264,6 +316,7 @@ pub fn build_pr_context(
     }
 }
 
+/// Extracts feature names from cfg attribute lines.
 fn extract_feature_names(content: &str) -> Vec<String> {
     let mut out = BTreeSet::new();
     for line in content.lines() {
@@ -284,6 +337,7 @@ fn extract_feature_names(content: &str) -> Vec<String> {
     out.into_iter().collect()
 }
 
+/// Extracts trait implementations from impl blocks.
 fn extract_trait_impls(content: &str) -> Vec<(String, String)> {
     let mut out = BTreeSet::new();
     for line in content.lines() {
@@ -305,6 +359,7 @@ fn extract_trait_impls(content: &str) -> Vec<(String, String)> {
     out.into_iter().collect()
 }
 
+/// Extracts error flow signals from code content.
 fn extract_error_flow_signals(content: &str) -> Vec<String> {
     let mut out = BTreeSet::new();
     let lower = content.to_ascii_lowercase();

@@ -6,13 +6,29 @@ use chrono::Utc;
 use serde_json::{json, Map, Value};
 use std::path::Path;
 
+/// Options for report generation.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ReportOptions<'a> {
+    /// Whether to include a timestamp in the report
     pub include_timestamp: bool,
+    /// Optional provenance information
     pub provenance: Option<&'a Value>,
+    /// Optional coverage information
     pub coverage: Option<&'a Value>,
 }
 
+/// Writes a JSON report to the specified path.
+///
+/// # Arguments
+/// * `report_path` - Path where the report will be written
+/// * `stats` - Scan statistics
+/// * `files` - List of files included in the export
+/// * `output_files` - List of output files generated
+/// * `config` - Configuration used for the export
+/// * `options` - Report generation options
+///
+/// # Returns
+/// Ok(()) on success, or an error if writing fails
 pub fn write_report(
     report_path: &Path,
     stats: &ScanStats,
@@ -72,6 +88,7 @@ pub fn write_report(
     Ok(())
 }
 
+/// Rounds priority to 3 decimal places for cleaner output.
 fn round_priority(priority: f64) -> f64 {
     (priority * 1000.0).round() / 1000.0
 }

@@ -5,18 +5,27 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::BTreeSet;
 
+/// Patterns that indicate async runtime boundaries in code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AsyncPattern {
+    /// `.await` expression
     Await,
+    /// `tokio::spawn` or similar task spawning
     TokioSpawn,
+    /// Channel usage (mpsc, oneshot, broadcast, watch)
     Channel,
+    /// `async fn` declaration
     AsyncFn,
+    /// `tokio::select!` or `futures::select!` macro
     SelectMacro,
+    /// `#[async_trait]` attribute
     AsyncTrait,
+    /// `#[tokio::main]` or `#[tokio::test]` entry point
     TokioEntry,
 }
 
 impl AsyncPattern {
+    /// Returns the tag string for this pattern.
     pub fn tag(self) -> &'static str {
         match self {
             Self::Await => "async:await",
@@ -30,9 +39,12 @@ impl AsyncPattern {
     }
 }
 
+/// Represents an async boundary found in a code chunk.
 #[derive(Debug, Clone)]
 pub struct AsyncBoundary {
+    /// ID of the chunk containing async patterns
     pub chunk_id: String,
+    /// Set of async patterns detected in the chunk
     pub patterns: BTreeSet<AsyncPattern>,
 }
 
@@ -52,6 +64,9 @@ static ASYNC_TRAIT_RE: Lazy<Regex> =
 static TOKIO_ENTRY_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"#\[\s*tokio::(?:main|test)").expect("valid tokio entry regex"));
 
+/// Detects async boundaries in code chunks by scanning for async patterns.
+///
+/// Returns a vector of async boundaries, one per chunk that contains async patterns.
 pub fn detect_async_boundaries(chunks: &[Chunk]) -> Vec<AsyncBoundary> {
     let mut boundaries = Vec::new();
     for chunk in chunks {

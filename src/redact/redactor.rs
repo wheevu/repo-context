@@ -9,8 +9,6 @@ use rustpython_parser::ast;
 use rustpython_parser::Parse;
 use std::collections::BTreeMap;
 
-#[allow(dead_code)]
-const ENTROPY_THRESHOLD: f64 = 4.5;
 const ENTROPY_MIN_LEN: usize = 20;
 
 /// Patterns for safe (non-secret) strings that should not be flagged by entropy detection.
@@ -101,17 +99,10 @@ fn build_entropy_regex(min_len: usize) -> Regex {
 
 impl Default for Redactor {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Redactor {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
         Self {
             rules: DEFAULT_RULES.clone(),
             redact_high_entropy: false,
-            entropy_threshold: ENTROPY_THRESHOLD,
+            entropy_threshold: 4.5,
             entropy_min_len: ENTROPY_MIN_LEN,
             entropy_token_regex: build_entropy_regex(ENTROPY_MIN_LEN),
             structure_safe: false,
@@ -123,7 +114,9 @@ impl Redactor {
             allowlist_strings: Vec::new(),
         }
     }
+}
 
+impl Redactor {
     /// Build a `Redactor` from a `RedactionConfig` (loaded from config file).
     pub fn from_config(
         mode_entropy: bool,
@@ -154,27 +147,6 @@ impl Redactor {
             allowlist_patterns: cfg.allowlist_patterns.clone(),
             allowlist_strings: cfg.allowlist_strings.clone(),
         }
-    }
-
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn with_entropy_detection(mut self, enabled: bool) -> Self {
-        self.redact_high_entropy = enabled;
-        self
-    }
-
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn with_structure_safe(mut self, enabled: bool) -> Self {
-        self.structure_safe = enabled;
-        self
-    }
-
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn with_paranoid_mode(mut self, enabled: bool) -> Self {
-        self.paranoid_mode = enabled;
-        self
     }
 
     /// Returns true if the file (by name or path) matches allowlist patterns.
@@ -226,16 +198,6 @@ impl Redactor {
     fn is_file_safe(&self, filename: &str, rel_path: &str) -> bool {
         matches_glob_pattern(filename, &self.safe_file_patterns)
             || matches_glob_pattern(rel_path, &self.safe_file_patterns)
-    }
-
-    #[allow(dead_code)]
-    pub fn redact(&self, text: &str) -> String {
-        self.redact_inner(text, "", "", "", "", false).content
-    }
-
-    #[allow(dead_code)]
-    pub fn redact_with_language(&self, text: &str, language: &str) -> String {
-        self.redact_with_language_report(text, language, "", "", "").content
     }
 
     pub fn redact_with_language_report(
@@ -381,6 +343,45 @@ impl Redactor {
             })
             .into_owned();
         (output, count)
+    }
+}
+
+#[cfg(test)]
+impl Redactor {
+    /// Create a new Redactor with default settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable or disable entropy-based secret detection.
+    #[must_use]
+    pub fn with_entropy_detection(mut self, enabled: bool) -> Self {
+        self.redact_high_entropy = enabled;
+        self
+    }
+
+    /// Enable or disable structure-safe redaction.
+    #[must_use]
+    pub fn with_structure_safe(mut self, enabled: bool) -> Self {
+        self.structure_safe = enabled;
+        self
+    }
+
+    /// Enable or disable paranoid redaction mode.
+    #[must_use]
+    pub fn with_paranoid_mode(mut self, enabled: bool) -> Self {
+        self.paranoid_mode = enabled;
+        self
+    }
+
+    /// Redact text without language-specific handling.
+    pub fn redact(&self, text: &str) -> String {
+        self.redact_inner(text, "", "", "", "", false).content
+    }
+
+    /// Redact text with language context but without file path information.
+    pub fn redact_with_language(&self, text: &str, language: &str) -> String {
+        self.redact_with_language_report(text, language, "", "", "").content
     }
 }
 

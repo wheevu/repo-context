@@ -54,7 +54,10 @@ pub struct FileRanker {
 }
 
 impl FileRanker {
-    #[allow(dead_code)]
+    /// Create a new FileRanker with default weights.
+    ///
+    /// This is primarily used in tests. In production, prefer [`Self::with_weights`].
+    #[cfg(test)]
     #[must_use]
     pub fn new(root_path: &Path, scanned_files: HashSet<String>) -> Self {
         Self::with_weights(root_path, scanned_files, RankingWeights::default())
@@ -157,25 +160,33 @@ impl FileRanker {
         });
     }
 
-    #[allow(dead_code)]
+    /// Returns entrypoints detected from manifest files.
+    ///
+    /// This is currently only used in tests but is part of the public API.
+    #[cfg(test)]
     #[must_use]
     pub fn get_entrypoints(&self) -> &HashSet<String> {
         &self.entrypoints
     }
 
-    #[allow(dead_code)]
+    /// Returns the detected languages from manifest parsing.
+    ///
+    /// This is currently only used in tests but is part of the public API.
+    #[cfg(test)]
     #[must_use]
     pub fn get_detected_languages(&self) -> &HashSet<String> {
         &self.detected_languages
     }
 
-    #[allow(dead_code)]
     #[must_use]
     pub fn get_manifest_info(&self) -> &HashMap<String, JsonValue> {
         &self.manifest_info
     }
 
-    #[allow(dead_code)]
+    /// Returns workspace members detected from Cargo.toml or similar.
+    ///
+    /// This is currently only used in tests but is part of the public API.
+    #[cfg(test)]
     #[must_use]
     pub fn get_workspace_members(&self) -> &[String] {
         &self.workspace_members

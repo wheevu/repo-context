@@ -1,7 +1,9 @@
 //! Content chunking strategies
 
 use crate::domain::{Chunk, FileInfo};
-use crate::utils::{estimate_tokens, read_file_safe, stable_hash};
+#[cfg(test)]
+use crate::utils::read_file_safe;
+use crate::utils::{estimate_tokens, stable_hash};
 use anyhow::Result;
 
 use code_chunker::CodeChunker;
@@ -14,13 +16,16 @@ pub mod markdown_chunker;
 
 /// Chunk a file with default options (800 tokens, 120 overlap).
 ///
-/// This is a convenience wrapper around [`chunk_file_with_options`].
-#[allow(dead_code)]
+/// This is primarily used in tests. In production, use [`chunk_content`] with pre-read content.
+#[cfg(test)]
 pub fn chunk_file(file_info: &FileInfo) -> Result<Vec<Chunk>> {
     chunk_file_with_options(file_info, 800, 120)
 }
 
-#[allow(dead_code)]
+/// Chunk a file with custom token limits.
+///
+/// This is primarily used in tests. In production, use [`chunk_content`] with pre-read content.
+#[cfg(test)]
 pub fn chunk_file_with_options(
     file_info: &FileInfo,
     max_tokens: usize,
@@ -75,9 +80,8 @@ pub fn chunk_content(
 
 /// Coalesce small chunks with default max tokens (800).
 ///
-/// This is a convenience wrapper around [`coalesce_small_chunks_with_max`]
-/// with fixed parameters (min_tokens=200, max_tokens=800).
-#[allow(dead_code)]
+/// This is primarily used in tests. In production, use [`coalesce_small_chunks_with_max`].
+#[cfg(test)]
 pub fn coalesce_small_chunks(chunks: Vec<Chunk>, _min_tokens: usize) -> Vec<Chunk> {
     coalesce_small_chunks_with_max(chunks, 200, 800)
 }

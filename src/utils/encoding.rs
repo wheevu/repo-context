@@ -219,7 +219,7 @@ fn try_read_with_encoding(
 ///
 /// # Returns
 /// A vector of lines (preserving original line endings) in the requested range
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn stream_file_lines(
     path: &Path,
     encoding: Option<&str>,

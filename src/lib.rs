@@ -3,6 +3,8 @@
 //! This library provides utilities for scanning, analyzing, and converting
 //! code repositories into formats optimized for Large Language Models.
 
+#![warn(missing_docs)]
+
 pub mod analysis;
 pub mod chunk;
 pub mod cli;

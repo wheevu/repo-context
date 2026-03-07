@@ -196,6 +196,7 @@ impl FileRanker {
     ///
     /// This is currently only used in tests but is part of the public API.
     #[cfg(test)]
+    #[allow(dead_code)]
     #[must_use]
     pub fn get_detected_languages(&self) -> &HashSet<String> {
         &self.detected_languages
@@ -214,6 +215,7 @@ impl FileRanker {
     ///
     /// This is currently only used in tests but is part of the public API.
     #[cfg(test)]
+    #[allow(dead_code)]
     #[must_use]
     pub fn get_workspace_members(&self) -> &[String] {
         &self.workspace_members

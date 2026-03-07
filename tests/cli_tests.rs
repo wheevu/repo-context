@@ -552,6 +552,8 @@ fn test_export_skips_binary_files() {
 }
 
 /// Test that export handles symlinks correctly (does not follow by default).
+/// This test only runs on Unix platforms.
+#[cfg(unix)]
 #[test]
 fn test_export_handles_symlinks() {
     use std::os::unix::fs::symlink;
@@ -559,12 +561,8 @@ fn test_export_handles_symlinks() {
     let repo = TempDir::new().expect("temp repo dir");
     fs::write(repo.path().join("real.txt"), "real file content").expect("write real file");
 
-    // Create a symlink (Unix only)
-    #[cfg(unix)]
-    {
-        symlink(repo.path().join("real.txt"), repo.path().join("link.txt"))
-            .expect("create symlink");
-    }
+    // Create a symlink
+    symlink(repo.path().join("real.txt"), repo.path().join("link.txt")).expect("create symlink");
 
     let out = TempDir::new().expect("temp out dir");
 

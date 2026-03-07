@@ -376,6 +376,7 @@ impl Redactor {
     }
 
     /// Enable or disable structure-safe redaction.
+    #[allow(dead_code)]
     #[must_use]
     pub fn with_structure_safe(mut self, enabled: bool) -> Self {
         self.structure_safe = enabled;

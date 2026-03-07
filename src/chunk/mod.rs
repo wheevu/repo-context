@@ -18,6 +18,7 @@ pub mod markdown_chunker;
 ///
 /// This is primarily used in tests. In production, use [`chunk_content`] with pre-read content.
 #[cfg(test)]
+#[allow(dead_code)]
 pub fn chunk_file(file_info: &FileInfo) -> Result<Vec<Chunk>> {
     chunk_file_with_options(file_info, 800, 120)
 }
@@ -26,6 +27,7 @@ pub fn chunk_file(file_info: &FileInfo) -> Result<Vec<Chunk>> {
 ///
 /// This is primarily used in tests. In production, use [`chunk_content`] with pre-read content.
 #[cfg(test)]
+#[allow(dead_code)]
 pub fn chunk_file_with_options(
     file_info: &FileInfo,
     max_tokens: usize,
@@ -82,6 +84,7 @@ pub fn chunk_content(
 ///
 /// This is primarily used in tests. In production, use [`coalesce_small_chunks_with_max`].
 #[cfg(test)]
+#[allow(dead_code)]
 pub fn coalesce_small_chunks(chunks: Vec<Chunk>, _min_tokens: usize) -> Vec<Chunk> {
     coalesce_small_chunks_with_max(chunks, 200, 800)
 }

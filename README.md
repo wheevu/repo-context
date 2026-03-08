@@ -1,50 +1,72 @@
 # repo-context
 [![CI](https://github.com/wheevu/repo-context/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wheevu/repo-context/actions/workflows/ci.yml)
 
+<div style="text-align: center;">
 <img src="assets/title.svg" alt="CLI Demo" style="width: 80%;">
+</div>
 
-Turn a code repository into a tidy "context pack" you can paste into an LLM — or feed into a RAG pipeline.
+Turn a code repository into a tidy "context pack" for LLMs — or feed into a RAG pipeline. It's pretty fast:
 
+<div style="text-align: center;">
+<img src="assets/4.png" alt="CLI Demo" style="width: 80%;">
 
-
+(*0.27s for 100k tokens* baby! 🏃🏻⚡️🦀)
+</div>
 
 ## What it does
 
-`repo-context` scans a repository and exports **high-signal text bundles**:
+Scans a repository and exports **high-signal text bundles**:
 
--   **`context_pack.md`** — a structured markdown doc you can paste into ChatGPT/Claude/etc.
--   **`chunks.jsonl`** — one chunk per line (great for embeddings + retrieval)
--   **`report.json`** — stats + what got included/skipped
+- **`context_pack.md`** — structured markdown for ChatGPT/Claude/etc.
+- **`chunks.jsonl`** — one chunk per line (for embeddings + retrieval)
+- **`report.json`** — stats + what got included/skipped
+- **`symbol_graph.db`** — SQLite symbol graph for local analysis
 
-It tries to keep the *important* stuff (READMEs, configs, entrypoints, core source) and skip the less impactful resources (generated files, vendor folders, giant binaries).
+Prioritizes important files (READMEs, configs, entrypoints) over generated code, vendor folders, and binaries.
 
-## Why you'd use it
 
--   You want an LLM to help with a repo **without** dumping your whole codebase into chat. 🫩
--   You want **repeatable** outputs (stable ordering + stable chunk IDs).
--   You want basic protection against accidentally leaking secrets (optional redaction).
+- **Focused context** — don't dump your entire codebase into chat
+- **Repeatable** — stable ordering + deterministic chunk IDs
+- **Safe** — optional secret redaction with multiple safety modes
+
+## Demo
+
+<div style="text-align: center;">
+<img src="assets/demo.png" alt="CLI Demo" style="width: 70%;">
+</div>
 
 ## Features
 
--   **Picks important files first** (docs + entrypoints beat tests + build artifacts)
--   **Chunks code in a sane way** (tries to split at functions/classes/modules when possible)
--   **Respects `.gitignore`** by default
--   **Can clone remote repos** (GitHub / HuggingFace)
--   **Optional secret redaction** (tokens/keys/password-y strings)
--   **Task-aware retrieval** (`--task`) with symbol/dependency expansion
--   **Two-phase retrieval** (BM25 + semantic rerank) with audit tags in output
--   **Module thread stitching** with reserved token budget for related definitions/import-neighbors
--   **PR-focused mode** (`--mode pr-context`) with Touch Points / Entrypoints / Invariants
--   **SQLite symbol graph** export (`symbol_graph.db`) for local graph-aware workflows
--   **Guardrails in context packs** (Claims Index + Missing Pieces heuristics)
--   **Local index workflow** (`index` / `query`) + portable code-intel export (`codeintel`)
--   **Context diff mode** (`diff`) with text/markdown/json output formats
+**Core Export**
+- File ranking (docs > configs > entrypoints > tests > generated)
+- Language-aware chunking (splits at functions/classes when possible)
+- Respects `.gitignore` by default
+- Remote repo cloning (GitHub / HuggingFace)
+
+**Advanced Retrieval**
+- Task-aware ranking (`--task`) with BM25 + optional semantic rerank
+- Thread stitching: reserves token budget for related definitions/importers
+- Always-include paths/globs that survive token budgets
+
+**Local Index Workflow**
+- `index` — build SQLite index with FTS + symbol tables
+- `query` — task-driven chunk retrieval with LSP enrichment
+- `codeintel` — export portable SCIP-like JSON
+
+**Contribution & PR Mode**
+- `--mode pr-context` — Touch Points, Entrypoints, and Invariants analysis
+- Invariant discovery with configurable keywords
+- Strict budget handling for protected pins
+
+**Safety**
+- Secret redaction: `fast`, `standard`, `paranoid`, or `structure-safe` modes
+- Reproducible outputs (`--no-timestamp`)
 
 ## Install
 
-### Pre-built binaries (recommended)
+### Pre-built binaries
 
-Grab the latest release from the GitHub Releases page and put `repo-context` somewhere on your `PATH`.
+Grab the latest release from [GitHub Releases](https://github.com/wheevu/repo-context/releases) and add to your `PATH`.
 
 ### Build from source
 
@@ -52,77 +74,57 @@ Grab the latest release from the GitHub Releases page and put `repo-context` som
 git clone https://github.com/wheevu/repo-context.git
 cd repo-context
 cargo build --release
-# The binary will be at: target/release/repo-context
+# Binary: target/release/repo-context
 
-# Or install to ~/.cargo/bin
+# Or install to ~/.cargo/bin:
 cargo install --path .
 ```
 
 ## Quick start
 
-Export a local repo:
-
-<img src="assets/2.png" alt="CLI Demo" style="width: 80%;">
-
+**Export local repo:**
 ```bash
 repo-context export --path .
 ```
 
-Export from a remote repo:
-
-
-<img src="assets/4.png" alt="CLI Demo" style="width: 80%;">
-
+**Export remote repo:**
 ```bash
 repo-context export --repo https://github.com/owner/repo
 ```
 
-Show repo stats only (no export files):
+**Show repo stats only:**
 ```bash
 repo-context info .
 ```
 
-## Guided mode (default)
-
-<img src="assets/1.png" alt="CLI Demo" style="width: 80%;">
-
-
+## Guided mode
 
 `repo-context export` is interactive by default in terminals:
 
--   **Quick scan** (fast, high-signal defaults)
--   **Architecture overview** (stronger dependency/system context)
--   **Deep dive specific areas** (repo-specific focus selection)
--   **Full context** (largest practical context bundle)
+<div style="text-align: center;">
+<img src="assets/1.png" alt="Guided mode" style="width: 80%;">
+</div>
 
+Choose from:
+- **Quick scan** — fast, high-signal defaults
+- **Architecture overview** — stronger dependency/system context
+- **Deep dive** — repo-specific focus selection
+- **Full context** — largest practical bundle
 
-<img src="assets/3.png" alt="CLI Demo" style="width: 80%;">
+In non-interactive sessions (CI/pipes), it automatically falls back to quick defaults. Skip explicitly with `--quick`.
 
-In non-interactive sessions (CI/pipes), it automatically falls back to quick defaults.
+## Use cases
 
-Skip prompts explicitly:
+**Quick export (non-interactive)**
 ```bash
-repo-context export --path . --quick
-```
-
-## Use-case playbook
-
-**Small + high-signal export (non-interactive)**
-```bash
-repo-context export -p . \
-  --quick \
+repo-context export -p . --quick \
   --include-ext ".rs,.toml,.md" \
   --exclude-glob "tests/**,target/**"
 ```
 
-**Architecture understanding for an unfamiliar repo**
+**Architecture understanding**
 ```bash
-repo-context export -p . --task "overall architecture and dependencies" --mode both
-```
-
-**Deep dive into a feature path**
-```bash
-repo-context export -p . --task "trace auth refresh and token validation flow"
+repo-context export -p . --task "overall architecture" --mode both
 ```
 
 **RAG-only output**
@@ -130,172 +132,122 @@ repo-context export -p . --task "trace auth refresh and token validation flow"
 repo-context export -p . --mode rag -o ./embeddings
 ```
 
-**Reproducible outputs for version-to-version diffs**
-```bash
-repo-context export -p . --no-timestamp
-```
-
-**Strict token-budget handling with always-include files**
-```bash
-# hard-error if always-include files alone exceed --max-tokens
-repo-context export -p . --max-tokens 50000
-
-# explicitly allow always-include overflow
-repo-context export -p . --max-tokens 50000 --allow-over-budget
-```
-
-**Best stitching quality (index first, export second)**
+**Index-based workflow (best quality)**
 ```bash
 repo-context index -p .
-repo-context export -p . --task "trace auth refresh flow"
+repo-context export -p . --task "trace auth flow" --from-index
+repo-context query --task "where are retries handled?" --expand
 ```
 
-**Build local index and query it repeatedly**
+**Always-include critical files**
 ```bash
-repo-context index -p .
-repo-context query --task "where are retries and backoff handled?" --expand
+repo-context export -p . \
+  --always-include-path "src/critical.rs,config/core.toml" \
+  --always-include-glob "**/important/**" \
+  --max-tokens 50000
 ```
 
-**Portable code-intel output from local index**
+**PR/Contribution context**
 ```bash
-repo-context codeintel --db .repo-context/index.sqlite --out .repo-context/codeintel.json
+repo-context export -p . --mode pr-context --task "review auth changes"
 ```
 
-**Compare two exports**
+**Compare exports**
 ```bash
-repo-context diff out/repo-a out/repo-b
-repo-context diff out/repo-a out/repo-b --format markdown
-repo-context diff out/repo-a out/repo-b --format json
+repo-context diff out/v1 out/v2 --format markdown
 ```
 
-## Command manual
+## Commands
 
-### Top-level commands
+```
+repo-context [OPTIONS] <COMMAND>
 
--   `export` - create context artifacts (`context_pack`, `chunks`, report, graph)
--   `info` - scan + ranking summary only
--   `index` - build local SQLite retrieval/symbol index
--   `query` - retrieve task-relevant chunks from index
--   `codeintel` - export portable SCIP-like JSON from index
--   `diff` - compare two exports
+Commands:
+  export     Export repository as LLM-friendly context pack
+  info       Show repository statistics
+  index      Build local SQLite index
+  query      Retrieve task-relevant chunks from index
+  codeintel  Export portable code-intel JSON (SCIP-lite)
+  diff       Compare two export outputs
 
-### `export` options
+Options:
+  -v, --verbose  Enable DEBUG logging
+  -h, --help     Print help
+  -V, --version  Print version
+```
 
-**Input source**
--   `-p, --path <PATH>` local repository path
--   `-r, --repo <URL>` remote repository URL (GitHub/HuggingFace)
--   `--ref <REF>` branch/tag/SHA when using `--repo`
--   `-c, --config <FILE>` config file path
+Run `repo-context <command> --help` for full option listings.
 
-**Scope and filtering**
--   `-i, --include-ext <EXTS>` extension allowlist (`.rs,.toml,.md`)
--   `-e, --exclude-glob <GLOBS>` exclude globs
--   `--max-file-bytes <BYTES>` per-file size cap
--   `--max-total-bytes <BYTES>` total scan byte cap
--   `--no-gitignore` ignore `.gitignore`
--   `--follow-symlinks` follow symlinks
--   `--include-minified` include minified/bundled files
+### Common `export` options
 
-**Retrieval and ranking**
--   `-t, --max-tokens <TOKENS>` output token budget
--   `--allow-over-budget` allow always-include overflow
--   `--task <TEXT>` task-aware reranking query
--   `--no-semantic-rerank` disable semantic rerank stage
--   `--semantic-model <MODEL>` semantic model identifier
--   `--rerank-top-k <N>` number of chunks for semantic reranking
--   `--stitch-budget-fraction <FLOAT>` reserved budget for stitched context
--   `--stitch-top-n <N>` top-ranked seed chunks for stitching
-
-**Chunking**
--   `--chunk-tokens <TOKENS>` target chunk size
--   `--chunk-overlap <TOKENS>` chunk overlap
--   `--min-chunk-tokens <TOKENS>` coalescing threshold
-
-**Output and rendering**
--   `-m, --mode <MODE>` `prompt|rag|contribution|pr-context|both`
--   `-o, --output-dir <DIR>` output base directory
--   `--no-timestamp` reproducible output (no timestamp fields)
--   `--tree-depth <DEPTH>` tree depth in rendered context pack
--   `--no-graph` skip `symbol_graph.db` output
--   `--quick` skip guided menu and run non-interactive defaults
-
-**Redaction**
--   `--no-redact` disable secret redaction
--   `--redaction-mode <MODE>` `fast|standard|paranoid|structure-safe`
-
-### `info` options
-
--   `<PATH>` repo path to inspect
--   `-i, --include-ext <EXTS>` extension allowlist
--   `-e, --exclude-glob <GLOBS>` exclude globs
--   `--max-file-bytes <BYTES>` per-file size cap
--   `--no-gitignore` ignore `.gitignore`
--   `--follow-symlinks` follow symlinks
--   `--include-minified` include minified/bundled files
+| Option | Description |
+|--------|-------------|
+| `-p, --path <PATH>` | Local repository path |
+| `-r, --repo <URL>` | Remote URL (GitHub/HuggingFace) |
+| `--ref <REF>` | Branch/tag/SHA for `--repo` |
+| `-i, --include-ext <EXTS>` | Extension allowlist (`.rs,.toml`) |
+| `-e, --exclude-glob <GLOBS>` | Exclude patterns |
+| `-t, --max-tokens <N>` | Token budget cap |
+| `--allow-over-budget` | Allow always-include files to exceed budget |
+| `--strict-budget` | Hard error if always-include exceeds budget |
+| `--always-include-path <PATHS>` | Paths to always include (survive budget) |
+| `--always-include-glob <GLOBS>` | Globs to always include (survive budget) |
+| `--task <TEXT>` | Task query for ranking |
+| `--no-semantic-rerank` | Disable semantic rerank stage |
+| `--from-index` | Use local index dataset instead of rescanning |
+| `--require-fresh-index` | Require fresh index with `--from-index` |
+| `-m, --mode <MODE>` | `prompt`, `rag`, `both`, `contribution`, `pr-context` |
+| `--no-timestamp` | Reproducible output (no timestamps) |
+| `--quick` | Skip guided menu, use defaults |
+| `--no-redact` | Disable secret redaction |
+| `--redaction-mode <MODE>` | `fast`, `standard`, `paranoid`, `structure-safe` |
 
 ### `index` options
 
--   `-p, --path <PATH>` local path to index
--   `-r, --repo <URL>` remote URL to clone and index
--   `--ref <REF>` branch/tag/SHA for `--repo`
--   `-c, --config <FILE>` config file path
--   `--db <FILE>` SQLite output path (default: `.repo-context/index.sqlite`)
--   `-i, --include-ext <EXTS>` extension allowlist
--   `-e, --exclude-glob <GLOBS>` exclude globs
--   `--max-file-bytes <BYTES>` per-file size cap
--   `--max-total-bytes <BYTES>` total scan byte cap
--   `--no-gitignore` ignore `.gitignore`
--   `--follow-symlinks` follow symlinks
--   `--include-minified` include minified/bundled files
--   `--chunk-tokens <TOKENS>` chunk size target
--   `--chunk-overlap <TOKENS>` chunk overlap
--   `--min-chunk-tokens <TOKENS>` coalescing threshold
--   `--lsp` enrich with rust-analyzer symbol references
+| Option | Description |
+|--------|-------------|
+| `-p, --path <PATH>` | Local path to index |
+| `-r, --repo <URL>` | Remote URL to clone |
+| `--db <FILE>` | Output path (default: `.repo-context/index.sqlite`) |
+| `--lsp` | Enrich with rust-analyzer symbol references |
 
 ### `query` options
 
--   `--db <FILE>` index database path
--   `--task <TEXT>` required retrieval query text
--   `-n, --limit <COUNT>` max hits to show
--   `--lsp-backend <MODE>` `off|auto|rust-analyzer`
--   `--expand` include definitions/callers/tests/docs expansions
+| Option | Description |
+|--------|-------------|
+| `--db <FILE>` | Index database path |
+| `--task <TEXT>` | Retrieval query (required) |
+| `-n, --limit <N>` | Max results (default: 20) |
+| `--lsp-backend <MODE>` | `off`, `auto`, `rust-analyzer` |
+| `--expand` | Expand into definitions/callers/tests/docs |
 
 ### `codeintel` options
 
--   `--db <FILE>` index database path
--   `--out <FILE>` output JSON path
+| Option | Description |
+|--------|-------------|
+| `--db <FILE>` | Index database (default: `.repo-context/index.sqlite`) |
+| `--out <FILE>` | Output JSON (default: `.repo-context/codeintel.json`) |
 
-### `diff` options
+## Output
 
--   `<BEFORE> <AFTER>` directories containing prior/current exports
--   `--format <FORMAT>` `text|markdown|json`
+Files written to `<output-dir>/<repo-name>/`:
 
-### Global options
-
--   `-v, --verbose` set log level to DEBUG
--   `-h, --help` and `-V, --version`
-
-## Output (what you get)
-
-Outputs go to: `<output-dir>/<repo-name>/`
-
-**Files:**
--   `<repo-name>_context_pack.md` — overview + tree + key files + chunked content
--   `<repo-name>_chunks.jsonl` — `{ id, path, lang, start_line, end_line, content, ... }`
--   `<repo-name>_report.json` — scan/export stats + skip reasons
--   `<repo-name>_symbol_graph.db` — persisted symbol/import graph (unless `--no-graph`)
+- `<repo>_context_pack.md` — overview, tree, key files, chunked content
+- `<repo>_chunks.jsonl` — JSON lines with metadata
+- `<repo>_report.json` — scan stats, config, skip reasons
+- `<repo>_symbol_graph.db` — SQLite symbol graph (unless `--no-graph`)
 
 ## Configuration
 
-By default, it looks for one of these files in the repository root:
--   `repo-context.toml`, `.repo-context.toml`
--   `r2p.toml`, `.r2p.toml`
--   `r2p.yml`/`.yaml`, `.r2p.yml`/`.yaml`
+Auto-discovers config files in repo root:
+- `repo-context.toml`, `.repo-context.toml`
+- `r2p.toml`, `.r2p.toml`
+- `r2p.yml`/`.yaml`, `.r2p.yml`/`.yaml`
 
 CLI flags override config values.
 
 <details>
-<summary>Example config (`r2p.toml`)</summary>
+<summary>Example config (<code>r2p.toml</code>)</summary>
 
 ```toml
 [repo-context]
@@ -312,12 +264,17 @@ redact_secrets     = true
 ```
 </details>
 
-## Secret redaction (optional)
+## Secret redaction
 
-By default, `repo-context` can detect and replace common secrets with placeholders like:
-`[AWS_ACCESS_KEY_REDACTED]`
+Enabled by default. Detects and replaces common secrets with placeholders like `[AWS_ACCESS_KEY_REDACTED]`.
 
-You can also allowlist paths/strings or add your own patterns via config.
+**Modes:**
+- `fast` — minimal safety checks
+- `standard` — balanced (default)
+- `paranoid` — aggressive, more false positives
+- `structure-safe` — AST-validated for Python
+
+Allowlist paths/strings and add custom patterns via config file.
 
 ## Development
 

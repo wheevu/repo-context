@@ -1,17 +1,19 @@
 # repo-context
 [![CI](https://github.com/wheevu/repo-context/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wheevu/repo-context/actions/workflows/ci.yml)
 
-<div style="text-align: center;">
-<img src="assets/title.svg" alt="CLI Demo" style="width: 80%;">
-</div>
+<p align="center">
+  <img src="assets/title.svg" alt="repo-context title" width="80%">
+</p>
 
-Turn a code repository into a tidy "context pack" for LLMs — or feed into a RAG pipeline. It's pretty fast:
+<p align="center">
+Turn a code repository into a tidy <b>context pack</b> for LLMs — or feed into a RAG pipeline.
+</p>
 
-<div style="text-align: center;">
-<img src="assets/4.png" alt="CLI Demo" style="width: 80%;">
-
-(*0.27s for 100k tokens* baby! 🏃🏻⚡️🦀)
-</div>
+<p align="center">
+  <img src="assets/4.png" alt="CLI Demo" width="80%">
+  <br>
+  <em>(0.27s for 100k tokens baby! 🏃🏻⚡️🦀)</em>
+</p>
 
 ## What it does
 
@@ -24,16 +26,15 @@ Scans a repository and exports **high-signal text bundles**:
 
 Prioritizes important files (READMEs, configs, entrypoints) over generated code, vendor folders, and binaries.
 
-
-- **Focused context** — don't dump your entire codebase into chat
-- **Repeatable** — stable ordering + deterministic chunk IDs
-- **Safe** — optional secret redaction with multiple safety modes
+- **Focused context** — don't dump your entire codebase into chat  
+- **Repeatable** — stable ordering + deterministic chunk IDs  
+- **Safe** — optional secret redaction with multiple safety modes  
 
 ## Demo
 
-<div style="text-align: center;">
-<img src="assets/demo.png" alt="CLI Demo" style="width: 70%;">
-</div>
+<p align="center">
+  <img src="assets/demo.png" alt="CLI Demo" width="70%">
+</p>
 
 ## Features
 
@@ -101,10 +102,10 @@ repo-context info .
 
 `repo-context export` is interactive by default in terminals:
 
-<div style="text-align: center;">
+<p align="center">
 <img src="assets/1.png" alt="Guided mode" style="width: 80%;">
-</div>
-
+<p>
+  
 Choose from:
 - **Quick scan** — fast, high-signal defaults
 - **Architecture overview** — stronger dependency/system context

@@ -114,6 +114,12 @@ Choose from:
 
 In non-interactive sessions (CI/pipes), it automatically falls back to quick defaults. Skip explicitly with `--quick`.
 
+## License
+MIT
+
+<details>
+<summary><strong>More details</strong></summary>
+
 ## Use cases
 
 **Quick export (non-interactive)**
@@ -285,3 +291,4 @@ cargo fmt
 cargo clippy --all-targets --all-features
 cargo build --release
 ```
+</details>

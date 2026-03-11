@@ -63,22 +63,12 @@ Prioritizes important files (READMEs, configs, entrypoints) over generated code,
 - Secret redaction: `fast`, `standard`, `paranoid`, or `structure-safe` modes
 - Reproducible outputs (`--no-timestamp`)
 
-## Install
-
-### Pre-built binaries
-
-Grab the latest release from [GitHub Releases](https://github.com/wheevu/repo-context/releases) and add to your `PATH`.
-
-### Build from source
+## Build locally
 
 ```bash
 git clone https://github.com/wheevu/repo-context.git
 cd repo-context
 cargo build --release
-# Binary: target/release/repo-context
-
-# Or install to ~/.cargo/bin:
-cargo install --path .
 ```
 
 ## Quick start

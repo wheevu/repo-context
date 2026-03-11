@@ -1,5 +1,9 @@
 # repo-context
 
+<p align="center">
+<img src=assets/title.svg width=70%>
+</p>
+
 `repo-context` is a Rust CLI that turns a code repository into deterministic, high-signal
 context artifacts for LLM workflows.
 
@@ -48,13 +52,6 @@ repo-context export --path . --mode rag
 # Reproducible output
 repo-context export --path . --no-timestamp
 ```
-
-## Product boundaries
-
-This tool is intentionally scoped.
-
-It does **not** claim semantic code understanding, full code intelligence, or automated PR review.
-Report fields are designed to describe what was selected, skipped, dropped, and emitted.
 
 ## Development
 

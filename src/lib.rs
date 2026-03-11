@@ -31,17 +31,13 @@
 
 #![warn(missing_docs)]
 
-pub mod analysis;
 pub mod chunk;
 pub mod cli;
 pub mod config;
 pub mod domain;
 pub mod fetch;
-pub mod graph;
-pub mod lsp;
 pub mod rank;
 pub mod redact;
 pub mod render;
-pub mod rerank;
 pub mod scan;
 pub mod utils;

@@ -1,20 +1,16 @@
-//! Command-line interface for repo-context
+//! Command-line interface for repo-context.
 //!
-//! Provides `export`, `index`, and `info` subcommands.
+//! Stable commands:
+//! - `export`: build a deterministic context pack from a repository
+//! - `info`: inspect repository composition without exporting
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::Level;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-mod cache;
-mod codeintel;
-mod diff;
 mod export;
-mod guided;
-mod index;
 mod info;
-mod query;
 mod utils;
 
 /// Convert repositories into LLM-friendly context packs
@@ -38,18 +34,6 @@ enum Commands {
 
     /// Display repository information without exporting
     Info(info::InfoArgs),
-
-    /// Build a local SQLite index for query-time retrieval
-    Index(index::IndexArgs),
-
-    /// Query a local SQLite index for task-relevant chunks
-    Query(query::QueryArgs),
-
-    /// Export portable code-intel JSON (SCIP-lite)
-    Codeintel(codeintel::CodeIntelArgs),
-
-    /// Compare two export outputs and show structural diffs
-    Diff(diff::DiffArgs),
 }
 
 /// Entry point for CLI execution.
@@ -80,9 +64,5 @@ pub fn run() -> Result<()> {
     match cli.command {
         Commands::Export(args) => export::run(*args),
         Commands::Info(args) => info::run(args),
-        Commands::Index(args) => index::run(args),
-        Commands::Query(args) => query::run(args),
-        Commands::Codeintel(args) => codeintel::run(args),
-        Commands::Diff(args) => diff::run(args),
     }
 }

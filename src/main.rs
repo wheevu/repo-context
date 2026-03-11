@@ -5,18 +5,14 @@
 
 use anyhow::Result;
 
-mod analysis;
 mod chunk;
 mod cli;
 mod config;
 mod domain;
 mod fetch;
-mod graph;
-mod lsp;
 mod rank;
 mod redact;
 mod render;
-mod rerank;
 mod scan;
 mod utils;
 

@@ -1,15 +1,13 @@
 //! Context pack Markdown rendering
 
-use crate::analysis::pr::PrContextReport;
 use crate::domain::{Chunk, FileInfo, ScanStats};
 use crate::utils::{format_with_commas, read_file_safe};
 use chrono::Utc;
 use serde_json::Value as JsonValue;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::guardrails::{build_claims, build_missing_pieces, render_guardrails};
-use super::pr_context::render_pr_context;
 
 /// Renders the context pack markdown document.
 ///
@@ -21,7 +19,6 @@ use super::pr_context::render_pr_context;
 /// * `tree` - Directory tree string
 /// * `manifest_info` - Manifest information from various build files
 /// * `task_query` - Optional task query for relevance highlighting
-/// * `pr_context` - Optional PR context report
 /// * `include_timestamp` - Whether to include generation timestamp
 ///
 /// # Returns
@@ -35,7 +32,6 @@ pub fn render_context_pack(
     tree: &str,
     manifest_info: &HashMap<String, JsonValue>,
     task_query: Option<&str>,
-    pr_context: Option<&PrContextReport>,
     include_timestamp: bool,
 ) -> String {
     let mut out = String::new();
@@ -64,95 +60,6 @@ pub fn render_context_pack(
         out.push_str(&format!("> Task Context: {}\n", task.trim()));
     }
     out.push_str("\n---\n\n");
-
-    let mut contribution_files: Vec<&FileInfo> = files
-        .iter()
-        .filter(|f| {
-            f.tags.contains("contribution") || f.relative_path.starts_with(".github/workflows/")
-        })
-        .collect();
-    contribution_files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    if !contribution_files.is_empty() {
-        out.push_str("## 🤝 Contribution Guide\n\n");
-        out.push_str("**Key contribution files:**\n");
-        for file in contribution_files.iter().take(10) {
-            out.push_str(&format!("- `{}`\n", file.relative_path));
-        }
-
-        let mut suggested_commands: Vec<String> = Vec::new();
-        for file in &contribution_files {
-            if let Ok((content, _)) = read_file_safe(&file.path, Some(10_000), None) {
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() || trimmed.len() > 120 {
-                        continue;
-                    }
-                    if [
-                        "cargo test",
-                        "cargo build",
-                        "npm test",
-                        "pnpm test",
-                        "yarn test",
-                        "pytest",
-                        "go test",
-                        "make test",
-                        "just test",
-                    ]
-                    .iter()
-                    .any(|needle| trimmed.contains(needle))
-                    {
-                        suggested_commands.push(trimmed.to_string());
-                    }
-                }
-            }
-        }
-        suggested_commands.sort();
-        suggested_commands.dedup();
-        if !suggested_commands.is_empty() {
-            out.push_str("\n**Build/Test commands (detected):**\n");
-            for command in suggested_commands.iter().take(8) {
-                out.push_str(&format!("- `{}`\n", command));
-            }
-        }
-
-        let dev_loop = build_dev_loop_checklist(files, manifest_info, &suggested_commands);
-        if !dev_loop.is_empty() {
-            out.push_str("\n**Local dev loop checklist:**\n");
-            for step in dev_loop {
-                out.push_str(&format!("- `{}`\n", step));
-            }
-        }
-
-        if let Some(task) = task_query {
-            let task_map = build_task_touch_map(task, files, chunks);
-            if !task_map.is_empty() {
-                out.push_str("\n**Where to change this task:**\n");
-                for row in task_map.iter().take(10) {
-                    out.push_str(&format!(
-                        "- **{}** `{}` (lines {}-{}, matched: {})\n",
-                        row.kind,
-                        row.path,
-                        row.start_line,
-                        row.end_line,
-                        row.matched.join(", ")
-                    ));
-                }
-            }
-        }
-
-        let workflow_files: Vec<&FileInfo> = contribution_files
-            .iter()
-            .copied()
-            .filter(|f| f.relative_path.starts_with(".github/workflows/"))
-            .collect();
-        if !workflow_files.is_empty() {
-            out.push_str("\n**How changes are reviewed (CI/workflows):**\n");
-            for workflow in workflow_files.iter().take(5) {
-                out.push_str(&format!("- `{}`\n", workflow.relative_path));
-            }
-        }
-        out.push('\n');
-    }
 
     // ── Repository Overview ──────────────────────────────────────────────────
     out.push_str("## 📋 Repository Overview\n\n");
@@ -335,10 +242,6 @@ pub fn render_context_pack(
         out.push('\n');
     }
 
-    if let Some(async_section) = render_async_topology(chunks) {
-        out.push_str(&async_section);
-    }
-
     // ── File Contents ────────────────────────────────────────────────────────
     out.push_str("## 📄 File Contents\n\n");
 
@@ -412,10 +315,6 @@ pub fn render_context_pack(
     let missing = build_missing_pieces(chunks, stats);
     out.push_str(&render_guardrails(&claims, &missing));
 
-    if let Some(report) = pr_context {
-        out.push_str(&render_pr_context(report));
-    }
-
     out
 }
 
@@ -425,187 +324,4 @@ fn capitalize(s: &str) -> String {
         None => String::new(),
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
-}
-
-fn render_async_topology(chunks: &[Chunk]) -> Option<String> {
-    let mut async_rows: Vec<&Chunk> = chunks
-        .iter()
-        .filter(|chunk| chunk.tags.iter().any(|tag| tag.starts_with("async:")))
-        .collect();
-    if async_rows.len() < 3 {
-        return None;
-    }
-
-    async_rows.sort_by(|a, b| {
-        a.path
-            .cmp(&b.path)
-            .then_with(|| a.start_line.cmp(&b.start_line))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-
-    let mut out = String::new();
-    out.push_str("## ⚡ Async Topology\n\n");
-    out.push_str("| File | Patterns | Lines |\n");
-    out.push_str("|---|---|---|\n");
-    for chunk in &async_rows {
-        let mut patterns: Vec<&str> =
-            chunk.tags.iter().filter_map(|tag| tag.strip_prefix("async:")).collect();
-        patterns.sort_unstable();
-        patterns.dedup();
-        out.push_str(&format!(
-            "| `{}` | {} | {}-{} |\n",
-            chunk.path,
-            patterns.join(", "),
-            chunk.start_line,
-            chunk.end_line
-        ));
-    }
-
-    let entrypoints: Vec<&Chunk> =
-        async_rows.iter().copied().filter(|chunk| chunk.tags.contains("async:entry")).collect();
-    if !entrypoints.is_empty() {
-        out.push_str("\n**Async entry points:**\n");
-        for chunk in entrypoints {
-            out.push_str(&format!(
-                "- `{}` (Lines {}-{})\n",
-                chunk.path, chunk.start_line, chunk.end_line
-            ));
-        }
-    }
-    out.push('\n');
-    Some(out)
-}
-
-#[derive(Debug)]
-struct TaskTouchRow {
-    kind: &'static str,
-    path: String,
-    start_line: usize,
-    end_line: usize,
-    matched: Vec<String>,
-    score: usize,
-    priority: f64,
-}
-
-fn build_task_touch_map(task: &str, files: &[FileInfo], chunks: &[Chunk]) -> Vec<TaskTouchRow> {
-    let query_tokens = tokenize_task(task);
-    if query_tokens.is_empty() {
-        return Vec::new();
-    }
-
-    let mut file_priority: HashMap<&str, f64> = HashMap::new();
-    for file in files {
-        file_priority.insert(file.relative_path.as_str(), file.priority);
-    }
-
-    let mut best_by_path: HashMap<&str, TaskTouchRow> = HashMap::new();
-    for chunk in chunks {
-        let mut matched: BTreeSet<String> = BTreeSet::new();
-        let lower = chunk.content.to_ascii_lowercase();
-        for token in &query_tokens {
-            if lower.contains(token) || chunk.path.to_ascii_lowercase().contains(token) {
-                matched.insert(token.clone());
-            }
-        }
-        if matched.is_empty() {
-            continue;
-        }
-
-        let kind = classify_path_kind(&chunk.path);
-        let row = TaskTouchRow {
-            kind,
-            path: chunk.path.clone(),
-            start_line: chunk.start_line,
-            end_line: chunk.end_line,
-            matched: matched.into_iter().collect(),
-            score: matched_len(&lower, &query_tokens),
-            priority: file_priority.get(chunk.path.as_str()).copied().unwrap_or(0.0),
-        };
-
-        match best_by_path.get(chunk.path.as_str()) {
-            None => {
-                best_by_path.insert(chunk.path.as_str(), row);
-            }
-            Some(existing) => {
-                if row.score > existing.score
-                    || (row.score == existing.score && row.priority > existing.priority)
-                {
-                    best_by_path.insert(chunk.path.as_str(), row);
-                }
-            }
-        }
-    }
-
-    let mut rows: Vec<TaskTouchRow> = best_by_path.into_values().collect();
-    rows.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal))
-            .then_with(|| a.path.cmp(&b.path))
-    });
-    rows
-}
-
-fn matched_len(content_lower: &str, tokens: &HashSet<String>) -> usize {
-    tokens.iter().filter(|t| content_lower.contains(t.as_str())).count()
-}
-
-fn tokenize_task(task: &str) -> HashSet<String> {
-    task.split(|c: char| !c.is_alphanumeric() && c != '_')
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| s.len() >= 3)
-        .collect()
-}
-
-fn classify_path_kind(path: &str) -> &'static str {
-    let lower = path.to_ascii_lowercase();
-    if lower.starts_with("tests/") || lower.contains("/tests/") || lower.contains("_test") {
-        "Test"
-    } else if lower.starts_with("docs/") || lower.ends_with(".md") || lower.ends_with(".rst") {
-        "Docs"
-    } else if lower.contains("workflow") || lower.starts_with(".github/") {
-        "CI"
-    } else {
-        "Code"
-    }
-}
-
-fn build_dev_loop_checklist(
-    files: &[FileInfo],
-    manifest_info: &HashMap<String, JsonValue>,
-    suggested_commands: &[String],
-) -> Vec<String> {
-    let mut out = Vec::new();
-    let file_paths: HashSet<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
-
-    if file_paths.contains("Cargo.toml") || files.iter().any(|f| f.extension == ".rs") {
-        out.push("cargo fmt".to_string());
-        out.push("cargo clippy --all-targets --all-features -- -D warnings".to_string());
-        out.push("cargo test".to_string());
-    }
-
-    if let Some(JsonValue::Object(scripts)) = manifest_info.get("scripts") {
-        if scripts.contains_key("lint") {
-            out.push("npm run lint".to_string());
-        }
-        if scripts.contains_key("test") {
-            out.push("npm test".to_string());
-        }
-        if scripts.contains_key("build") {
-            out.push("npm run build".to_string());
-        }
-    }
-
-    if files.iter().any(|f| f.language == "python") {
-        out.push("pytest".to_string());
-    }
-
-    for command in suggested_commands {
-        if !out.contains(command) {
-            out.push(command.clone());
-        }
-    }
-
-    out.truncate(8);
-    out
 }

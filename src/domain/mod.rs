@@ -17,11 +17,6 @@ pub enum OutputMode {
     Prompt,
     /// Generate RAG-optimized chunks
     Rag,
-    /// Generate contribution-oriented context
-    Contribution,
-    /// Generate PR context report
-    #[serde(rename = "pr-context")]
-    PrContext,
     /// Generate both prompt and RAG outputs (default)
     #[default]
     Both,
@@ -222,7 +217,7 @@ pub struct ScanStats {
     #[serde(default)]
     pub pinned_overflow_tokens: usize,
 
-    /// Protected pin files selected for contribution/pr-context packs.
+    /// Protected pin files selected during budget fallback handling.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pinned_files: Vec<HashMap<String, serde_json::Value>>,
 }
@@ -780,7 +775,7 @@ pub struct Config {
     #[serde(default)]
     pub always_include_paths: Vec<String>,
 
-    /// Keywords used by invariant discovery for contribution/pr-context exports.
+    /// Keywords used by invariant discovery heuristics.
     #[serde(default = "default_invariant_keywords")]
     pub invariant_keywords: Vec<String>,
 

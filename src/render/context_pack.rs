@@ -7,8 +7,6 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::guardrails::{build_claims, build_missing_pieces, render_guardrails};
-
 /// Renders the context pack markdown document.
 ///
 /// # Arguments
@@ -18,7 +16,6 @@ use super::guardrails::{build_claims, build_missing_pieces, render_guardrails};
 /// * `stats` - Scan statistics
 /// * `tree` - Directory tree string
 /// * `manifest_info` - Manifest information from various build files
-/// * `task_query` - Optional task query for relevance highlighting
 /// * `include_timestamp` - Whether to include generation timestamp
 ///
 /// # Returns
@@ -31,7 +28,6 @@ pub fn render_context_pack(
     stats: &ScanStats,
     tree: &str,
     manifest_info: &HashMap<String, JsonValue>,
-    task_query: Option<&str>,
     include_timestamp: bool,
 ) -> String {
     let mut out = String::new();
@@ -56,9 +52,6 @@ pub fn render_context_pack(
         chunks.len(),
         format_with_commas(stats.total_bytes_included)
     ));
-    if let Some(task) = task_query.filter(|q| !q.trim().is_empty()) {
-        out.push_str(&format!("> Task Context: {}\n", task.trim()));
-    }
     out.push_str("\n---\n\n");
 
     // ── Repository Overview ──────────────────────────────────────────────────
@@ -310,10 +303,6 @@ pub fn render_context_pack(
             out.push_str("```\n\n");
         }
     }
-
-    let claims = build_claims(chunks);
-    let missing = build_missing_pieces(chunks, stats);
-    out.push_str(&render_guardrails(&claims, &missing));
 
     out
 }

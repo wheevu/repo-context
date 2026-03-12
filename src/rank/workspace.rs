@@ -1,7 +1,4 @@
-//! Cargo workspace discovery helpers.
-//!
-//! Provides functionality to discover and analyze Cargo workspaces,
-//! including member crates and path dependencies between them.
+//! Cargo workspace discovery helpers for ranking.
 
 use crate::utils::{normalize_path, read_file_safe};
 use globset::{Glob, GlobSetBuilder};
@@ -12,30 +9,19 @@ use walkdir::WalkDir;
 /// Represents a crate in a Cargo workspace.
 #[derive(Debug, Clone)]
 pub struct CrateNode {
-    /// Crate name
     pub name: String,
-    /// Root path relative to workspace
     pub root: String,
-    /// Path dependencies to other workspace members
     pub path_deps: Vec<String>,
 }
 
 /// Represents a discovered Cargo workspace.
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceGraph {
-    /// Member crates
     pub members: Vec<CrateNode>,
-    /// Set of member root paths
     pub member_roots: BTreeSet<String>,
 }
 
 /// Discovers a Cargo workspace and analyzes its members.
-///
-/// # Arguments
-/// * `root` - Path to workspace root (must contain Cargo.toml with [workspace])
-///
-/// # Returns
-/// WorkspaceGraph if workspace is found, None otherwise
 pub fn discover_workspace_graph(root: &Path) -> Option<WorkspaceGraph> {
     let root_manifest = root.join("Cargo.toml");
     if !root_manifest.exists() {
@@ -113,7 +99,6 @@ pub fn discover_workspace_graph(root: &Path) -> Option<WorkspaceGraph> {
     Some(WorkspaceGraph { members: members_out, member_roots: member_dirs })
 }
 
-/// Parses a member crate's Cargo.toml.
 fn parse_member_manifest(
     root: &Path,
     member_root: &str,
@@ -144,7 +129,6 @@ fn parse_member_manifest(
     Some(CrateNode { name, root: member_root.to_string(), path_deps })
 }
 
-/// Normalizes a path by resolving . and .. components.
 fn clean_path(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {

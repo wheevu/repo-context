@@ -1,83 +1,36 @@
-//! CLI argument merging with config
+#![allow(missing_docs)]
 
-use crate::domain::Config;
+//! CLI argument merging with config.
+
+use crate::domain::{Config, OutputMode, RedactionMode};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// CLI-provided overrides for configuration values.
-///
-/// All fields are optional, allowing selective overrides of config file settings.
 #[derive(Debug, Default, Clone)]
 pub struct CliOverrides {
-    /// Local path to repository
     pub path: Option<PathBuf>,
-    /// Remote repository URL
     pub repo_url: Option<String>,
-    /// Git reference (branch, tag, commit)
     pub ref_: Option<String>,
-    /// File extensions to include
     pub include_extensions: Option<HashSet<String>>,
-    /// Glob patterns to exclude
     pub exclude_globs: Option<HashSet<String>>,
-    /// Maximum file size in bytes
     pub max_file_bytes: Option<u64>,
-    /// Maximum total size in bytes
     pub max_total_bytes: Option<u64>,
-    /// Whether to respect .gitignore
     pub respect_gitignore: Option<bool>,
-    /// Whether to follow symlinks
     pub follow_symlinks: Option<bool>,
-    /// Whether to skip minified files
     pub skip_minified: Option<bool>,
-    /// Maximum tokens in output
     pub max_tokens: Option<usize>,
-    /// Task query for reranking
-    pub task_query: Option<String>,
-    /// Whether to enable semantic reranking
-    pub semantic_rerank: Option<bool>,
-    /// Number of top chunks for reranking
-    pub rerank_top_k: Option<usize>,
-    /// Semantic model identifier
-    pub semantic_model: Option<String>,
-    /// Fraction of budget for stitching
-    pub stitch_budget_fraction: Option<f64>,
-    /// Number of seed chunks for stitching
-    pub stitch_top_n: Option<usize>,
-    /// Chunk size in tokens
     pub chunk_tokens: Option<usize>,
-    /// Chunk overlap in tokens
     pub chunk_overlap: Option<usize>,
-    /// Minimum chunk size in tokens
     pub min_chunk_tokens: Option<usize>,
-    /// Output mode (prompt, rag, both)
-    pub mode: Option<crate::domain::OutputMode>,
-    /// Output directory path
+    pub mode: Option<OutputMode>,
     pub output_dir: Option<PathBuf>,
-    /// Directory tree depth
     pub tree_depth: Option<usize>,
-    /// Whether to redact secrets
     pub redact_secrets: Option<bool>,
-    /// Redaction mode
-    pub redaction_mode: Option<crate::domain::RedactionMode>,
-    /// Patterns to always include
-    pub always_include_patterns: Option<Vec<String>>,
-    /// Paths to always include
-    pub always_include_paths: Option<Vec<String>>,
-    /// Keywords for invariant detection
-    pub invariant_keywords: Option<Vec<String>>,
+    pub redaction_mode: Option<RedactionMode>,
 }
 
 /// Merges CLI overrides into a base configuration.
-///
-/// CLI values take precedence over config file values. The base_config
-/// is modified in place and returned.
-///
-/// # Arguments
-/// * `base_config` - The configuration loaded from file or defaults
-/// * `cli` - CLI-provided overrides
-///
-/// # Returns
-/// The merged configuration
 pub fn merge_cli_with_config(mut base_config: Config, cli: CliOverrides) -> Config {
     if let Some(path) = cli.path {
         base_config.path = Some(path);
@@ -117,24 +70,6 @@ pub fn merge_cli_with_config(mut base_config: Config, cli: CliOverrides) -> Conf
     if let Some(max_tokens) = cli.max_tokens {
         base_config.max_tokens = Some(max_tokens);
     }
-    if let Some(task_query) = cli.task_query {
-        base_config.task_query = Some(task_query);
-    }
-    if let Some(semantic_rerank) = cli.semantic_rerank {
-        base_config.semantic_rerank = semantic_rerank;
-    }
-    if let Some(rerank_top_k) = cli.rerank_top_k {
-        base_config.rerank_top_k = rerank_top_k;
-    }
-    if let Some(semantic_model) = cli.semantic_model {
-        base_config.semantic_model = Some(semantic_model);
-    }
-    if let Some(stitch_budget_fraction) = cli.stitch_budget_fraction {
-        base_config.stitch_budget_fraction = stitch_budget_fraction;
-    }
-    if let Some(stitch_top_n) = cli.stitch_top_n {
-        base_config.stitch_top_n = stitch_top_n;
-    }
     if let Some(chunk_tokens) = cli.chunk_tokens {
         base_config.chunk_tokens = chunk_tokens;
     }
@@ -159,15 +94,6 @@ pub fn merge_cli_with_config(mut base_config: Config, cli: CliOverrides) -> Conf
     }
     if let Some(redaction_mode) = cli.redaction_mode {
         base_config.redaction_mode = redaction_mode;
-    }
-    if let Some(always_include_patterns) = cli.always_include_patterns {
-        base_config.always_include_patterns = always_include_patterns;
-    }
-    if let Some(always_include_paths) = cli.always_include_paths {
-        base_config.always_include_paths = always_include_paths;
-    }
-    if let Some(invariant_keywords) = cli.invariant_keywords {
-        base_config.invariant_keywords = invariant_keywords;
     }
 
     base_config

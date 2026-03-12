@@ -163,26 +163,18 @@ pub fn read_file_safe(
     }
 
     // Last resort: UTF-8 with replacement
-    let content = std::fs::read_to_string(path)
-        .or_else(|_| {
-            let bytes = std::fs::read(path)?;
-            let (cow, _, _) = UTF_8.decode(&bytes);
-            Ok::<_, std::io::Error>(cow.into_owned())
-        })
+    let bytes = read_bytes(path, max_bytes)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
+    let (cow, _, _) = UTF_8.decode(&bytes);
+    let content = cow.into_owned();
 
     Ok((content, "utf-8".to_string()))
 }
 
 fn try_read_utf8_strict(path: &Path, max_bytes: Option<usize>) -> Result<String> {
-    let bytes = std::fs::read(path)?;
+    let bytes = read_bytes(path, max_bytes)?;
     let content = std::str::from_utf8(&bytes).context("Not valid UTF-8")?.to_string();
-
-    if let Some(limit) = max_bytes {
-        Ok(content.chars().take(limit).collect())
-    } else {
-        Ok(content)
-    }
+    Ok(content)
 }
 
 fn try_read_with_encoding(
@@ -193,20 +185,27 @@ fn try_read_with_encoding(
     // Try to find the encoding
     let encoding = Encoding::for_label(encoding_name.as_bytes())?;
 
-    // Read the file bytes
-    let bytes = std::fs::read(path).ok()?;
+    // Read bounded file bytes
+    let bytes = read_bytes(path, max_bytes).ok()?;
 
     // Decode with replacement for invalid sequences
     let (decoded, _encoding_used, _had_errors) = encoding.decode(&bytes);
 
-    let content = if let Some(limit) = max_bytes {
-        decoded.chars().take(limit).collect()
-    } else {
-        decoded.into_owned()
-    };
+    let content = decoded.into_owned();
 
     // Return the content and the encoding name
     Some((content, encoding.name().to_lowercase()))
+}
+
+fn read_bytes(path: &Path, max_bytes: Option<usize>) -> Result<Vec<u8>> {
+    if let Some(limit) = max_bytes {
+        let file = File::open(path)?;
+        let mut buf = Vec::new();
+        file.take(limit as u64).read_to_end(&mut buf)?;
+        Ok(buf)
+    } else {
+        Ok(std::fs::read(path)?)
+    }
 }
 
 /// Read a specific line range from a file without loading it entirely.

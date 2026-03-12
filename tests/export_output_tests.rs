@@ -34,6 +34,29 @@ fn export_is_deterministic_without_timestamp() {
         fs::read_to_string(actual2.join(output_file_name(fixture.root(), "chunks.jsonl")))
             .expect("read chunks 2");
     assert_eq!(chunks1, chunks2);
+
+    let report1_raw =
+        fs::read_to_string(actual1.join(output_file_name(fixture.root(), "report.json")))
+            .expect("read report 1");
+    let report2_raw =
+        fs::read_to_string(actual2.join(output_file_name(fixture.root(), "report.json")))
+            .expect("read report 2");
+
+    let mut report1: Value = serde_json::from_str(&report1_raw).expect("parse report 1");
+    let mut report2: Value = serde_json::from_str(&report2_raw).expect("parse report 2");
+
+    report1["config"]["output_dir"] = Value::String("<normalized>".to_string());
+    report2["config"]["output_dir"] = Value::String("<normalized>".to_string());
+    report1["output_files"] = Value::Array(vec![
+        Value::String("<normalized-context>".to_string()),
+        Value::String("<normalized-chunks>".to_string()),
+    ]);
+    report2["output_files"] = Value::Array(vec![
+        Value::String("<normalized-context>".to_string()),
+        Value::String("<normalized-chunks>".to_string()),
+    ]);
+
+    assert_eq!(report1, report2);
 }
 
 #[test]
@@ -84,13 +107,15 @@ fn export_report_contains_trustworthy_core_fields() {
             .expect("read report");
     let report: Value = serde_json::from_str(&report_raw).expect("parse report");
 
-    assert_eq!(report["schema_version"], Value::String("1.0.0".to_string()));
+    assert_eq!(report["schema_version"], Value::String("1.1.0".to_string()));
     assert!(report.get("generated_at").is_none());
     assert!(report.get("stats").is_some());
     assert!(report.get("config").is_some());
     assert!(report.get("provenance").is_some());
     assert!(report.get("files").is_some());
     assert!(report.get("coverage").is_none());
+    assert!(report["config"].get("heuristics").is_none());
+    assert!(report["config"].get("task_query").is_none());
 }
 
 #[test]
@@ -107,6 +132,62 @@ fn export_mode_prompt_only_writes_markdown_and_report() {
     assert!(actual.join(format!("{}_context_pack.md", repo_name)).exists());
     assert!(!actual.join(format!("{}_chunks.jsonl", repo_name)).exists());
     assert!(actual.join(format!("{}_report.json", repo_name)).exists());
+}
+
+#[test]
+fn export_mode_rag_only_writes_jsonl_and_report() {
+    let fixture = TestRepo::new();
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    run_export(fixture.root(), &out, "rag", false);
+
+    let actual = resolve_output_dir(&out, fixture.root());
+    let repo_name = fixture.root().file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+
+    assert!(!actual.join(format!("{}_context_pack.md", repo_name)).exists());
+    assert!(actual.join(format!("{}_chunks.jsonl", repo_name)).exists());
+    assert!(actual.join(format!("{}_report.json", repo_name)).exists());
+}
+
+#[test]
+fn redaction_catches_secret_spanning_small_chunks() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("README.md"), "# Demo\n").expect("write readme");
+    fs::write(
+        root.join("src/main.py"),
+        "def main():\n    token = \"sk-abcdefghijklmnopqrstuvwxyz12345\"\n    return token\n",
+    )
+    .expect("write main.py");
+
+    let out = TempDir::new().expect("out dir");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root"),
+        "--mode",
+        "rag",
+        "--output-dir",
+        out.path().to_str().expect("out"),
+        "--no-timestamp",
+        "--chunk-tokens",
+        "8",
+        "--chunk-overlap",
+        "0",
+        "--min-chunk-tokens",
+        "4",
+    ]);
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(out.path(), root);
+    let repo_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let chunks = fs::read_to_string(actual.join(format!("{}_chunks.jsonl", repo_name)))
+        .expect("read chunks");
+
+    assert!(!chunks.contains("sk-abcdefghijklmnopqrstuvwxyz12345"));
 }
 
 fn run_export(repo_root: &Path, output_dir: &Path, mode: &str, no_redact: bool) {

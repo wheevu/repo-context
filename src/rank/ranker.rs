@@ -1,7 +1,7 @@
 //! File ranker implementation with manifest-aware entrypoint detection.
 
 use crate::domain::{FileInfo, RankingWeights};
-use crate::fetch::workspace::discover_workspace_graph;
+use crate::rank::workspace::discover_workspace_graph;
 use crate::utils::{
     is_likely_generated, is_lock_file, is_vendored, normalize_path, read_file_safe,
 };
@@ -57,6 +57,24 @@ pub struct FileRanker {
     weights: RankingWeights,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FileSignals {
+    is_readme: bool,
+    is_contribution_doc: bool,
+    is_main_doc: bool,
+    is_vendored: bool,
+    is_lock_file: bool,
+    is_generated: bool,
+    is_config: bool,
+    is_entrypoint: bool,
+    is_test: bool,
+    is_example: bool,
+    is_core_source: bool,
+    is_api_definition: bool,
+    is_ci_workflow: bool,
+    is_doc: bool,
+}
+
 impl FileRanker {
     /// Create a new FileRanker with default weights.
     ///
@@ -106,61 +124,95 @@ impl FileRanker {
         let rel_lower = rel_normalized.to_lowercase();
         let name = file.path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
 
-        file.is_readme = name.starts_with("readme");
-        file.is_config = is_config_file(&name, &rel_normalized);
-        file.is_doc = is_doc_file(&name, &rel_normalized);
-
         let content_sample =
             read_file_safe(&file.path, Some(2000), None).map(|(s, _)| s).unwrap_or_default();
 
-        let mut priority: f64 = self.weights.default;
-        if file.is_readme {
-            priority = self.weights.readme;
-        } else if is_contribution_doc(&rel_normalized, &name) {
-            priority = self.weights.contribution_doc;
-        } else if is_important_doc(&rel_normalized, &name) {
-            priority = self.weights.main_doc;
-        } else if is_vendored(&file.path) {
-            priority = self.weights.vendored;
-        } else if is_lock_file(&file.path) {
-            priority = self.weights.lock_file;
-        } else if is_likely_generated(&file.path, &content_sample) {
-            priority = self.weights.generated;
-        } else if is_ci_workflow(&rel_lower) || file.is_config {
-            priority = self.weights.config;
-        } else if self.entrypoints.contains(&rel_normalized) || is_common_entrypoint(&name) {
-            priority = self.weights.entrypoint;
-        } else if is_test_file(&name, &rel_lower) {
-            priority = self.weights.test;
-        } else if is_example_file(&rel_lower) {
-            priority = self.weights.example;
-        } else if is_core_source(&rel_lower) {
-            priority = self.weights.core_source;
-        } else if is_api_definition(&name) {
-            priority = self.weights.api_definition;
-        }
+        let signals =
+            self.collect_signals(file, &name, &rel_normalized, &rel_lower, &content_sample);
 
-        file.priority = priority;
+        file.is_readme = signals.is_readme;
+        file.is_config = signals.is_config;
+        file.is_doc = signals.is_doc;
+        file.priority = self.score_signals(signals);
 
-        if file.is_readme {
+        if signals.is_readme {
             file.tags.insert("readme".to_string());
         }
-        if file.is_config {
+        if signals.is_config {
             file.tags.insert("config".to_string());
         }
-        if is_contribution_doc(&rel_normalized, &name) {
+        if signals.is_contribution_doc {
             file.tags.insert("contribution".to_string());
         }
-        if is_ci_workflow(&rel_lower) {
+        if signals.is_ci_workflow {
             file.tags.insert("workflow".to_string());
         }
-        // NOTE: Python does NOT add a "docs" tag in rank_file — is_doc only affects
-        // priority score. We intentionally omit the "docs" tag to match Python behavior.
-        if self.entrypoints.contains(&rel_normalized) {
+        if signals.is_entrypoint {
             file.tags.insert("entrypoint".to_string());
         }
-        if is_lock_file(&file.path) {
+        if signals.is_lock_file {
             file.tags.insert("lock-file".to_string());
+        }
+    }
+
+    fn collect_signals(
+        &self,
+        file: &FileInfo,
+        name: &str,
+        rel_normalized: &str,
+        rel_lower: &str,
+        content_sample: &str,
+    ) -> FileSignals {
+        let is_readme = name.starts_with("readme");
+        let is_config = is_config_file(name, rel_normalized);
+        let is_doc = is_doc_file(name, rel_normalized);
+        let is_entrypoint = self.entrypoints.contains(rel_normalized) || is_common_entrypoint(name);
+
+        FileSignals {
+            is_readme,
+            is_contribution_doc: is_contribution_doc(rel_normalized, name),
+            is_main_doc: is_important_doc(rel_normalized, name),
+            is_vendored: is_vendored(&file.path),
+            is_lock_file: is_lock_file(&file.path),
+            is_generated: is_likely_generated(&file.path, content_sample),
+            is_config,
+            is_entrypoint,
+            is_test: is_test_file(name, rel_lower),
+            is_example: is_example_file(rel_lower),
+            is_core_source: is_core_source(rel_lower),
+            is_api_definition: is_api_definition(name),
+            is_ci_workflow: is_ci_workflow(rel_lower),
+            is_doc,
+        }
+    }
+
+    fn score_signals(&self, s: FileSignals) -> f64 {
+        if s.is_readme {
+            self.weights.readme
+        } else if s.is_contribution_doc {
+            self.weights.contribution_doc
+        } else if s.is_main_doc {
+            self.weights.main_doc
+        } else if s.is_vendored {
+            self.weights.vendored
+        } else if s.is_lock_file {
+            self.weights.lock_file
+        } else if s.is_generated {
+            self.weights.generated
+        } else if s.is_ci_workflow || s.is_config {
+            self.weights.config
+        } else if s.is_entrypoint {
+            self.weights.entrypoint
+        } else if s.is_test {
+            self.weights.test
+        } else if s.is_example {
+            self.weights.example
+        } else if s.is_core_source {
+            self.weights.core_source
+        } else if s.is_api_definition {
+            self.weights.api_definition
+        } else {
+            self.weights.default
         }
     }
 

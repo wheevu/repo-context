@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 
+mod app;
 mod chunk;
 mod cli;
 mod config;

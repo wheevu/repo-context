@@ -178,3 +178,69 @@ fn chunker_for_language(language: &str) -> ChunkerKind {
         _ => ChunkerKind::Line,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::coalesce_small_chunks_with_max;
+    use crate::domain::Chunk;
+    use std::collections::BTreeSet;
+
+    fn mk_chunk(
+        id: &str,
+        path: &str,
+        start: usize,
+        end: usize,
+        content: &str,
+        tokens: usize,
+    ) -> Chunk {
+        Chunk {
+            id: id.to_string(),
+            path: path.to_string(),
+            language: "rust".to_string(),
+            start_line: start,
+            end_line: end,
+            content: content.to_string(),
+            priority: 0.5,
+            tags: BTreeSet::new(),
+            token_estimate: tokens,
+        }
+    }
+
+    #[test]
+    fn coalesce_merges_adjacent_small_chunks() {
+        let chunks = vec![
+            mk_chunk("a", "src/main.rs", 1, 3, "fn a() {}\n", 10),
+            mk_chunk("b", "src/main.rs", 4, 6, "fn b() {}\n", 10),
+        ];
+
+        let merged = coalesce_small_chunks_with_max(chunks, 20, 100);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].start_line, 1);
+        assert_eq!(merged[0].end_line, 6);
+        assert!(merged[0].content.contains("fn a()"));
+        assert!(merged[0].content.contains("fn b()"));
+    }
+
+    #[test]
+    fn coalesce_does_not_merge_when_combined_exceeds_max() {
+        let chunks = vec![
+            mk_chunk("a", "src/main.rs", 1, 3, "fn a() {}\n", 60),
+            mk_chunk("b", "src/main.rs", 4, 6, "fn b() {}\n", 60),
+        ];
+
+        let merged = coalesce_small_chunks_with_max(chunks, 80, 100);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn coalesce_produces_stable_ids_for_same_input() {
+        let chunks = vec![
+            mk_chunk("a", "src/main.rs", 1, 3, "fn a() {}\n", 10),
+            mk_chunk("b", "src/main.rs", 4, 6, "fn b() {}\n", 10),
+        ];
+
+        let first = coalesce_small_chunks_with_max(chunks.clone(), 20, 100);
+        let second = coalesce_small_chunks_with_max(chunks, 20, 100);
+        assert_eq!(first[0].id, second[0].id);
+    }
+}

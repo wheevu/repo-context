@@ -31,6 +31,7 @@
 
 #![warn(missing_docs)]
 
+pub mod app;
 pub mod chunk;
 pub mod cli;
 pub mod config;

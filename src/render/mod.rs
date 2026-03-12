@@ -1,7 +1,6 @@
 //! Output rendering (Markdown, JSONL, reports)
 
 pub mod context_pack;
-pub mod guardrails;
 pub mod jsonl;
 pub mod report;
 

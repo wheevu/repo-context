@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use super::utils::parse_csv;
 use crate::chunk::code_chunker::supported_tree_sitter_languages;
+use crate::config::{merge_cli_with_config, CliOverrides};
+use crate::domain::Config;
 use crate::rank::rank_files;
 use crate::scan::scanner::FileScanner;
 use crate::scan::tree::generate_tree;
@@ -52,18 +54,27 @@ pub fn run(args: InfoArgs) -> Result<()> {
     let include_ext = parse_csv(&args.include_ext);
     let exclude_glob = parse_csv(&args.exclude_glob);
 
-    let mut scanner = FileScanner::new(root.clone())
-        .max_file_bytes(args.max_file_bytes.unwrap_or(1_048_576))
-        .respect_gitignore(!args.no_gitignore)
-        .follow_symlinks(args.follow_symlinks)
-        .skip_minified(!args.include_minified);
+    let config = merge_cli_with_config(
+        Config::default(),
+        CliOverrides {
+            path: Some(root.clone()),
+            include_extensions: include_ext.map(|v| v.into_iter().collect()),
+            exclude_globs: exclude_glob.map(|v| v.into_iter().collect()),
+            max_file_bytes: args.max_file_bytes,
+            respect_gitignore: if args.no_gitignore { Some(false) } else { None },
+            follow_symlinks: if args.follow_symlinks { Some(true) } else { None },
+            skip_minified: if args.include_minified { Some(false) } else { None },
+            ..CliOverrides::default()
+        },
+    );
 
-    if let Some(extensions) = include_ext {
-        scanner = scanner.include_extensions(extensions);
-    }
-    if let Some(globs) = exclude_glob {
-        scanner = scanner.exclude_globs(globs);
-    }
+    let mut scanner = FileScanner::new(root.clone())
+        .max_file_bytes(config.max_file_bytes)
+        .respect_gitignore(config.respect_gitignore)
+        .follow_symlinks(config.follow_symlinks)
+        .skip_minified(config.skip_minified)
+        .include_extensions(config.include_extensions.iter().cloned().collect())
+        .exclude_globs(config.exclude_globs.iter().cloned().collect());
 
     let scanned_files = scanner.scan()?;
     let stats = scanner.stats().clone();

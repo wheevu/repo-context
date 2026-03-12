@@ -10,7 +10,12 @@ context artifacts for LLM workflows.
 It focuses on one core job: package source code into clean prompt and retrieval inputs with
 predictable output.
 
-## What it outputs
+## Commands
+
+- `export` - build context artifacts
+- `info` - inspect repository composition without exporting
+
+## What `export` writes
 
 For each export run, the tool writes:
 
@@ -18,10 +23,25 @@ For each export run, the tool writes:
 - `<repo>_chunks.jsonl` (chunked records for retrieval pipelines)
 - `<repo>_report.json` (selection stats, skips, drops, and run metadata)
 
-## Stable commands
+Artifact generation depends on `--mode`:
 
-- `export` - build context artifacts
-- `info` - inspect repository composition without exporting
+- `--mode prompt` -> context pack + report
+- `--mode rag` -> chunks + report
+- `--mode both` (default) -> context pack + chunks + report
+
+By default outputs are written under `./out/<repo>/`.
+
+## Export pipeline (contract)
+
+`export` follows this deterministic flow:
+
+1. fetch repository (local path or remote URL)
+2. scan candidate files
+3. rank high-signal files
+4. redact file content (enabled by default)
+5. chunk redacted content
+6. render artifacts and report
+
 
 ## Quick start
 
@@ -51,6 +71,9 @@ repo-context export --path . --mode rag
 
 # Reproducible output
 repo-context export --path . --no-timestamp
+
+# Disable secret redaction (not recommended)
+repo-context export --path . --no-redact
 ```
 
 ## Development

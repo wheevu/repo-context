@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub mod ranker;
+mod workspace;
 
 pub use ranker::FileRanker;
 

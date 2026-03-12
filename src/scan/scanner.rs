@@ -155,30 +155,6 @@ impl FileScanner {
             true
         };
 
-        // Count raw files (no gitignore) so we can derive files_skipped_gitignore.
-        // We use a separate walk that ignores gitignore rules.
-        // IMPORTANT: Apply the same directory filter to maintain consistent counts.
-        let raw_file_count = if self.respect_gitignore {
-            let mut raw_builder = WalkBuilder::new(&self.root_path);
-            raw_builder
-                .git_ignore(false)
-                .git_global(false)
-                .git_exclude(false)
-                .follow_links(self.follow_symlinks)
-                .hidden(false)
-                .parents(false)
-                .filter_entry(dir_filter);
-            let mut count = 0usize;
-            for entry in raw_builder.build().flatten() {
-                if !entry.path().is_dir() {
-                    count += 1;
-                }
-            }
-            count
-        } else {
-            0
-        };
-
         // Build walker with gitignore support using the `ignore` crate
         let mut builder = WalkBuilder::new(&self.root_path);
         builder
@@ -191,9 +167,6 @@ impl FileScanner {
             .filter_entry(dir_filter);
 
         let walker = builder.build();
-
-        // Count files seen after gitignore filtering (before our own filters).
-        let mut gitignore_filtered_count = 0usize;
 
         // Collect all files
         for entry_result in walker {
@@ -209,8 +182,7 @@ impl FileScanner {
                 continue;
             }
 
-            // Count this file toward files_scanned (Python only counts files, not dirs).
-            gitignore_filtered_count += 1;
+            // Count this file toward files_scanned (files only, not directories).
             self.stats.files_scanned += 1;
 
             // Get relative path
@@ -260,12 +232,9 @@ impl FileScanner {
             files.push((path.to_path_buf(), rel_path));
         }
 
-        // Derive gitignore-skipped count from the difference between the raw walk
-        // and the gitignore-respecting walk.
-        if self.respect_gitignore {
-            self.stats.files_skipped_gitignore =
-                raw_file_count.saturating_sub(gitignore_filtered_count);
-        }
+        // files_skipped_gitignore is no longer derived from a second full repository walk.
+        // We report only directly-observed skips from scanner filters.
+        self.stats.files_skipped_gitignore = 0;
 
         // Sort by relative path for deterministic ordering
         files.sort_by(|a, b| a.1.cmp(&b.1));

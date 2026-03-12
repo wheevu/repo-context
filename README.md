@@ -4,10 +4,16 @@
 <img src=assets/title.svg width=70%>
 </p>
 
-`repo-context` is a Rust CLI that turns a code repository into deterministic, high-signal
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white">
+  <img src="https://img.shields.io/badge/CLI-111111">
+  <img src="https://img.shields.io/badge/MIT-111111">
+</p>
+
+`repo-context` is a Rust CLI that turns a repo into high-signal
 context artifacts for LLM workflows.
 
-It focuses on one core job: package source code into clean prompt and retrieval inputs with
+It focuses on: package source code into clean prompt & retrieval inputs with
 predictable output.
 
 ## Commands

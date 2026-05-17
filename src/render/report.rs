@@ -1,6 +1,6 @@
 //! Report JSON generation.
 
-use crate::domain::{FileInfo, ScanStats, REPORT_SCHEMA_VERSION};
+use crate::domain::{FileDisposition, FileInfo, ScanStats, REPORT_SCHEMA_VERSION};
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::{json, Map, Value};
@@ -33,6 +33,7 @@ pub fn write_report(
     files: &[FileInfo],
     output_files: &[String],
     config: &Value,
+    dispositions: &[FileDisposition],
     options: ReportOptions<'_>,
 ) -> Result<()> {
     let mut sorted_output_files = output_files.to_vec();
@@ -75,6 +76,9 @@ pub fn write_report(
     if !file_manifest.is_empty() {
         report.insert("files".to_string(), serde_json::to_value(file_manifest)?);
     }
+    let mut sorted_dispositions = dispositions.to_vec();
+    sorted_dispositions.sort_by(|a, b| a.path.cmp(&b.path));
+    report.insert("file_dispositions".to_string(), serde_json::to_value(sorted_dispositions)?);
 
     if let Some(parent) = report_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -152,6 +156,7 @@ mod tests {
             &[file],
             &["out/chunks.jsonl".to_string()],
             &json!({"mode":"rag"}),
+            &[],
             ReportOptions { include_timestamp: false, provenance: None },
         )
         .expect("write report");

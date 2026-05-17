@@ -5,6 +5,7 @@ use crate::domain::{Chunk, FileInfo};
 use crate::utils::read_file_safe;
 use crate::utils::{estimate_tokens, stable_hash};
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 
 use code_chunker::CodeChunker;
 use line_chunker::LineChunker;
@@ -47,7 +48,7 @@ pub fn chunk_content(
     overlap_tokens: usize,
 ) -> Result<Vec<Chunk>> {
     let chunker_kind = chunker_for_language(&file_info.language);
-    let chunks = match chunker_kind {
+    let mut chunks = match chunker_kind {
         ChunkerKind::Markdown => {
             MarkdownChunker::new().chunk(file_info, content, max_tokens, overlap_tokens)
         }
@@ -60,6 +61,7 @@ pub fn chunk_content(
     };
 
     if !chunks.is_empty() {
+        enrich_chunks(&mut chunks, file_info, content);
         return Ok(chunks);
     }
 
@@ -67,6 +69,7 @@ pub fn chunk_content(
     let token_estimate = estimate_tokens(content);
     let id = stable_hash(content, &file_info.relative_path, 1, line_count);
 
+    let content_sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
     Ok(vec![Chunk {
         id,
         path: file_info.relative_path.clone(),
@@ -77,7 +80,59 @@ pub fn chunk_content(
         priority: file_info.priority,
         tags: file_info.tags.clone(),
         token_estimate,
+        file_id: file_info.id.clone(),
+        chunk_index: 0,
+        chunks_in_file: 1,
+        byte_start: Some(0),
+        byte_end: Some(content.len()),
+        content_sha256: content_sha256.clone(),
+        file_sha256: content_sha256,
     }])
+}
+
+fn enrich_chunks(chunks: &mut [Chunk], file_info: &FileInfo, file_content: &str) {
+    let file_sha256 = format!("{:x}", Sha256::digest(file_content.as_bytes()));
+    let total = chunks.len();
+    for (idx, chunk) in chunks.iter_mut().enumerate() {
+        chunk.file_id = file_info.id.clone();
+        chunk.chunk_index = idx;
+        chunk.chunks_in_file = total;
+        chunk.content_sha256 = format!("{:x}", Sha256::digest(chunk.content.as_bytes()));
+        chunk.file_sha256 = file_sha256.clone();
+        let start_byte = line_to_byte_offset(file_content, chunk.start_line);
+        let end_byte = line_end_to_byte_offset(file_content, chunk.end_line);
+        chunk.byte_start = Some(start_byte);
+        chunk.byte_end = Some(end_byte);
+    }
+}
+
+fn line_to_byte_offset(content: &str, line: usize) -> usize {
+    if line <= 1 {
+        return 0;
+    }
+    let mut current_line = 1usize;
+    for (idx, ch) in content.char_indices() {
+        if current_line == line {
+            return idx;
+        }
+        if ch == '\n' {
+            current_line += 1;
+        }
+    }
+    content.len()
+}
+
+fn line_end_to_byte_offset(content: &str, line: usize) -> usize {
+    let mut current_line = 1usize;
+    for (idx, ch) in content.char_indices() {
+        if current_line == line && ch == '\n' {
+            return idx + ch.len_utf8();
+        }
+        if ch == '\n' {
+            current_line += 1;
+        }
+    }
+    content.len()
 }
 
 /// Coalesce small chunks with default max tokens (800).
@@ -135,6 +190,9 @@ pub fn coalesce_small_chunks_with_max(
                     last.token_estimate = estimate_tokens(&merged_content);
                     last.id =
                         stable_hash(&merged_content, &last.path, last.start_line, last.end_line);
+                    last.byte_end = chunk.byte_end;
+                    last.content_sha256 =
+                        format!("{:x}", Sha256::digest(merged_content.as_bytes()));
                     continue;
                 }
             }
@@ -203,6 +261,13 @@ mod tests {
             priority: 0.5,
             tags: BTreeSet::new(),
             token_estimate: tokens,
+            file_id: String::new(),
+            chunk_index: 0,
+            chunks_in_file: 0,
+            byte_start: None,
+            byte_end: None,
+            content_sha256: String::new(),
+            file_sha256: String::new(),
         }
     }
 

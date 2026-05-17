@@ -1,6 +1,6 @@
 //! File scanner implementation with gitignore support
 
-use crate::domain::{FileInfo, ScanStats};
+use crate::domain::{FileDisposition, FileDispositionReason, FileInfo, ScanStats};
 use crate::utils::{is_binary_file, is_likely_minified, normalize_path};
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -22,6 +22,7 @@ pub struct FileScanner {
     skip_minified: bool,
     max_line_length: usize,
     stats: ScanStats,
+    dispositions: Vec<FileDisposition>,
 }
 
 impl FileScanner {
@@ -43,6 +44,7 @@ impl FileScanner {
             skip_minified: true,
             max_line_length: 5000,
             stats: ScanStats::default(),
+            dispositions: Vec::new(),
         }
     }
 
@@ -100,6 +102,9 @@ impl FileScanner {
 
     /// Check if a file extension should be included
     fn should_include_extension(&self, path: &Path) -> bool {
+        if is_special_repo_file(path) {
+            return true;
+        }
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
 
@@ -128,6 +133,7 @@ impl FileScanner {
     /// Files are returned in deterministic sorted order by relative path.
     pub fn scan(&mut self) -> Result<Vec<FileInfo>> {
         self.stats = ScanStats::default();
+        self.dispositions.clear();
 
         // Pre-allocate with reasonable capacity to avoid reallocations during growth
         let mut files: Vec<(PathBuf, String)> = Vec::with_capacity(1024);
@@ -184,6 +190,7 @@ impl FileScanner {
 
             // Count this file toward files_scanned (files only, not directories).
             self.stats.files_scanned += 1;
+            self.stats.files_discovered += 1;
 
             // Get relative path
             let rel_path = match path.strip_prefix(&self.root_path) {
@@ -191,50 +198,69 @@ impl FileScanner {
                 Err(_) => continue,
             };
 
+            let metadata = match path.metadata() {
+                Ok(m) => m,
+                Err(_) => {
+                    self.record_path(
+                        path,
+                        rel_path,
+                        FileDispositionReason::ErrorReadingMetadata,
+                        None,
+                    );
+                    continue;
+                }
+            };
+
+            let size = metadata.len();
+            self.stats.total_bytes_scanned += size;
+            self.stats.total_bytes_discovered += size;
+
             // Check explicit exclude globs
             if exclude_globset.is_match(&rel_path) {
                 self.stats.files_skipped_glob += 1;
+                self.record_path(path, rel_path, FileDispositionReason::SkippedGlob, Some(size));
                 continue;
             }
 
             // Check extension
             if !self.should_include_extension(path) {
                 self.stats.files_skipped_extension += 1;
+                self.record_path(
+                    path,
+                    rel_path,
+                    FileDispositionReason::SkippedExtension,
+                    Some(size),
+                );
                 continue;
             }
 
-            // Check file size
-            let metadata = match path.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
-            let size = metadata.len();
-            self.stats.total_bytes_scanned += size;
-
             if size > self.max_file_bytes {
                 self.stats.files_skipped_size += 1;
+                self.record_path(path, rel_path, FileDispositionReason::SkippedSize, Some(size));
                 continue;
             }
 
             // Check if binary
             if is_binary_file(path, DEFAULT_SAMPLE_SIZE) {
                 self.stats.files_skipped_binary += 1;
+                self.record_path(path, rel_path, FileDispositionReason::SkippedBinary, Some(size));
                 continue;
             }
 
             // Check if minified
             if self.skip_minified && is_likely_minified(path, self.max_line_length) {
                 self.stats.files_skipped_glob += 1;
+                self.record_path(
+                    path,
+                    rel_path,
+                    FileDispositionReason::SkippedMinified,
+                    Some(size),
+                );
                 continue;
             }
 
             files.push((path.to_path_buf(), rel_path));
         }
-
-        // files_skipped_gitignore is no longer derived from a second full repository walk.
-        // We report only directly-observed skips from scanner filters.
-        self.stats.files_skipped_gitignore = 0;
 
         // Sort by relative path for deterministic ordering
         files.sort_by(|a, b| a.1.cmp(&b.1));
@@ -282,9 +308,16 @@ impl FileScanner {
 
             self.stats.files_included += 1;
             self.stats.total_bytes_included += size;
+            self.stats.candidate_files += 1;
+            self.stats.total_bytes_candidates += size;
+            self.record_file(&file_info, FileDispositionReason::IncludedFull);
 
             result.push(file_info);
         }
+
+        // Add disposition records for files hidden from the ignore walker by gitignore or
+        // directory filters so report inventory can reconcile with discovered files.
+        self.record_unseen_files();
 
         self.stats.files_skipped = self.stats.files_skipped_size
             + self.stats.files_skipped_binary
@@ -299,6 +332,184 @@ impl FileScanner {
     pub fn stats(&self) -> &ScanStats {
         &self.stats
     }
+
+    /// Get a complete disposition inventory for files observed by the scanner.
+    pub fn dispositions(&self) -> &[FileDisposition] {
+        &self.dispositions
+    }
+
+    fn record_path(
+        &mut self,
+        path: &Path,
+        rel_path: String,
+        reason: FileDispositionReason,
+        size: Option<u64>,
+    ) {
+        let ext = extension_with_dot(path);
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let language = crate::domain::get_language(&ext, filename);
+        let mut disposition = FileDisposition::new(rel_path, reason);
+        disposition.size_bytes = size;
+        disposition.extension = ext;
+        disposition.language = language;
+        self.dispositions.push(disposition);
+    }
+
+    fn record_file(&mut self, file: &FileInfo, reason: FileDispositionReason) {
+        let mut disposition = FileDisposition::new(file.relative_path.clone(), reason);
+        disposition.size_bytes = Some(file.size_bytes);
+        disposition.extension = file.extension.clone();
+        disposition.language = file.language.clone();
+        disposition.priority = Some(file.priority);
+        self.dispositions.push(disposition);
+    }
+
+    fn record_unseen_files(&mut self) {
+        let mut seen: BTreeSet<String> = self.dispositions.iter().map(|d| d.path.clone()).collect();
+        let mut unseen = collect_regular_files(&self.root_path);
+        unseen.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (rel_path, path) in unseen {
+            if seen.contains(&rel_path) {
+                continue;
+            }
+            let size = path.metadata().map(|m| m.len()).ok();
+            self.stats.files_discovered += 1;
+            if let Some(size) = size {
+                self.stats.total_bytes_discovered += size;
+            }
+            let reason = if is_excluded_noise_path(&rel_path) {
+                FileDispositionReason::ExcludedNoiseDir
+            } else if self.respect_gitignore {
+                self.stats.files_skipped_gitignore += 1;
+                FileDispositionReason::SkippedGitignore
+            } else {
+                FileDispositionReason::ExcludedNoiseDir
+            };
+            self.record_path(&path, rel_path.clone(), reason, size);
+            seen.insert(rel_path);
+        }
+    }
+}
+
+fn collect_regular_files(root: &Path) -> Vec<(String, PathBuf)> {
+    let dir_filter = |entry: &ignore::DirEntry| -> bool {
+        if let Some(file_type) = entry.file_type() {
+            if file_type.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if matches!(
+                        name,
+                        "node_modules"
+                            | "__pycache__"
+                            | ".git"
+                            | ".venv"
+                            | "venv"
+                            | "target"
+                            | "out"
+                            | "dist"
+                            | "build"
+                    ) {
+                        return false;
+                    }
+                    if name.starts_with('.') && name != ".github" {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    };
+
+    let walker = WalkBuilder::new(root)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .hidden(false)
+        .parents(false)
+        .filter_entry(dir_filter)
+        .build();
+
+    let mut files = Vec::new();
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if entry.file_type().is_some_and(|ft| ft.is_file()) {
+            if let Ok(rel) = path.strip_prefix(root) {
+                files.push((normalize_path(rel.to_str().unwrap_or("")), path.to_path_buf()));
+            }
+        }
+    }
+    files
+}
+
+fn is_excluded_noise_path(rel_path: &str) -> bool {
+    rel_path.split('/').any(|part| {
+        matches!(
+            part,
+            "node_modules"
+                | "__pycache__"
+                | ".git"
+                | ".venv"
+                | "venv"
+                | "target"
+                | "out"
+                | "dist"
+                | "build"
+        ) || (part.starts_with('.') && part != ".github")
+    })
+}
+
+fn extension_with_dot(path: &Path) -> String {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if !ext.is_empty() && !ext.starts_with('.') {
+        format!(".{ext}")
+    } else {
+        ext
+    }
+}
+
+/// Returns true when a repository metadata/config file should bypass extension filtering.
+pub fn is_special_repo_file(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+    let special = [
+        "readme",
+        "changelog",
+        "history",
+        "contributing",
+        "security",
+        "code_of_conduct",
+        "license",
+        "notice",
+        "authors",
+        "maintainers",
+        "agents.md",
+        "claude.md",
+        "design.md",
+        "architecture.md",
+        "codeowners",
+        "makefile",
+        "dockerfile",
+        "containerfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "justfile",
+        "taskfile.yml",
+        "taskfile.yaml",
+        "procfile",
+        ".env.example",
+        ".env.sample",
+        ".env.template",
+        "cargo.lock",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "poetry.lock",
+        "uv.lock",
+        "pipfile.lock",
+        "go.sum",
+        "gemfile.lock",
+    ];
+    special.contains(&name.as_str())
+        || special.iter().any(|prefix| name.starts_with(&format!("{prefix}.")))
 }
 
 #[cfg(test)]
@@ -444,7 +655,7 @@ mod tests {
         fs::write(root.join("b.rs"), "fn b() {}").unwrap();
         fs::write(root.join("c.rs"), "fn c() {}").unwrap();
         // 1 .txt file — filtered by extension, but still counted toward files_scanned
-        fs::write(root.join("readme.txt"), "text").unwrap();
+        fs::write(root.join("notes.txt"), "text").unwrap();
 
         let mut scanner = FileScanner::new(root.to_path_buf())
             .include_extensions(vec![".rs".to_string()])
@@ -458,5 +669,28 @@ mod tests {
         assert_eq!(stats.files_scanned, 4, "files_scanned should count all visited files");
         // files_included = only the .rs ones
         assert_eq!(stats.files_included, 3, "files_included should be 3");
+    }
+
+    #[test]
+    fn test_special_extensionless_and_dotfiles_have_dispositions() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        fs::write(root.join("Makefile"), "build:\n\tcargo build\n").unwrap();
+        fs::write(root.join(".env.example"), "TOKEN=example\n").unwrap();
+        fs::write(root.join("image.bin"), [0, 159, 146, 150]).unwrap();
+
+        let mut scanner = FileScanner::new(root.to_path_buf())
+            .include_extensions(vec![".rs".to_string()])
+            .respect_gitignore(false);
+        let files = scanner.scan().unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+
+        assert!(paths.contains(&"Makefile"));
+        assert!(paths.contains(&".env.example"));
+        assert_eq!(scanner.dispositions().len(), 3);
+        assert!(scanner
+            .dispositions()
+            .iter()
+            .any(|d| d.path == "image.bin" && d.reason == FileDispositionReason::SkippedExtension));
     }
 }

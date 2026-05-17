@@ -183,6 +183,17 @@ mod tests {
         assert!(!cfg.respect_gitignore);
     }
 
+    #[test]
+    fn test_deprecated_coverage_profile_config_still_parses() {
+        let tmp = TempDir::new().expect("tmp");
+        let path = tmp.path().join("repo-context.toml");
+        fs::write(&path, "coverage_profile = 'budget'\nmax_tokens = 12000\n").expect("write");
+
+        let cfg = load_config(tmp.path(), None).expect("config");
+
+        assert_eq!(cfg.max_tokens, Some(12000));
+    }
+
     // --- Test 1: Explicit config with invalid type for include_extensions ---
     #[test]
     fn test_explicit_config_invalid_type_returns_err() {

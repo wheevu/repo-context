@@ -92,6 +92,13 @@ impl MarkdownChunker {
                     content: section_content,
                     priority: file_info.priority,
                     tags,
+                    file_id: String::new(),
+                    chunk_index: 0,
+                    chunks_in_file: 0,
+                    byte_start: None,
+                    byte_end: None,
+                    content_sha256: String::new(),
+                    file_sha256: String::new(),
                 });
             } else {
                 let nested =

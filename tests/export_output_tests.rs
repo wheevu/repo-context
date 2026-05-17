@@ -119,6 +119,140 @@ fn export_report_contains_trustworthy_core_fields() {
 }
 
 #[test]
+fn export_report_has_one_disposition_per_discovered_file() {
+    let fixture = TestRepo::new();
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    run_export(fixture.root(), &out, "both", false);
+
+    let actual = resolve_output_dir(&out, fixture.root());
+    let report_raw =
+        fs::read_to_string(actual.join(output_file_name(fixture.root(), "report.json")))
+            .expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+    let dispositions = report["file_dispositions"].as_array().expect("dispositions array");
+
+    assert_eq!(dispositions.len(), report["stats"]["files_discovered"].as_u64().unwrap() as usize);
+    let mut paths =
+        dispositions.iter().map(|d| d["path"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    assert_eq!(paths.len(), dispositions.len());
+    assert!(dispositions.iter().any(|d| d["path"] == "README.md"
+        && d["included_in_prompt"] == true
+        && d["included_in_rag"] == true));
+}
+
+#[test]
+fn prompt_mode_report_does_not_claim_rag_selection() {
+    let fixture = TestRepo::new();
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    run_export(fixture.root(), &out, "prompt", false);
+
+    let actual = resolve_output_dir(&out, fixture.root());
+    let report_raw =
+        fs::read_to_string(actual.join(output_file_name(fixture.root(), "report.json")))
+            .expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+
+    assert_eq!(report["stats"]["files_selected_rag"], 0);
+    assert_eq!(report["stats"]["rag_chunks_rendered"], 0);
+    assert!(report["stats"]["prompt_chunks_rendered"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn default_export_uses_full_strategy_without_token_budget() {
+    let fixture = TestRepo::new();
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    run_export(fixture.root(), &out, "both", false);
+
+    let actual = resolve_output_dir(&out, fixture.root());
+    let report_raw =
+        fs::read_to_string(actual.join(output_file_name(fixture.root(), "report.json")))
+            .expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+
+    assert_eq!(report["config"]["coverage_strategy"], "full");
+    assert!(report["config"].get("coverage_profile").is_none());
+    assert_eq!(report["config"]["max_tokens"], Value::Null);
+}
+
+#[test]
+fn max_tokens_automatically_uses_budget_strategy() {
+    let fixture = TestRepo::new();
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        fixture.root().to_str().expect("repo str"),
+        "--mode",
+        "both",
+        "--output-dir",
+        out.to_str().expect("out str"),
+        "--no-timestamp",
+        "--max-tokens",
+        "20",
+    ]);
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(&out, fixture.root());
+    let report_raw =
+        fs::read_to_string(actual.join(output_file_name(fixture.root(), "report.json")))
+            .expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+
+    assert_eq!(report["config"]["coverage_strategy"], "budget");
+    assert!(report["stats"]["dropped_files"].as_array().is_some_and(|v| !v.is_empty()));
+}
+
+#[test]
+fn lockfile_is_summary_only_by_default() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    fs::write(root.join("README.md"), "# Demo\n").expect("write readme");
+    fs::write(root.join("Cargo.lock"), "# lock\n".to_string() + &"package = \"x\"\n".repeat(200))
+        .expect("write lock");
+
+    let out = TempDir::new().expect("out dir");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root"),
+        "--mode",
+        "both",
+        "--output-dir",
+        out.path().to_str().expect("out"),
+        "--no-timestamp",
+    ]);
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(out.path(), root);
+    let repo_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let context = fs::read_to_string(actual.join(format!("{}_context_pack.md", repo_name)))
+        .expect("read context");
+    let report_raw =
+        fs::read_to_string(actual.join(format!("{}_report.json", repo_name))).expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+
+    assert!(context.contains("Summary only: Cargo.lock"));
+    assert!(!context.contains("package = \"x\"\npackage = \"x\""));
+    assert!(report["file_dispositions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| { d["path"] == "Cargo.lock" && d["reason"] == "included_summary_only" }));
+}
+
+#[test]
 fn export_mode_prompt_only_writes_markdown_and_report() {
     let fixture = TestRepo::new();
     let out_base = TempDir::new().expect("temp out");

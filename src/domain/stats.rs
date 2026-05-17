@@ -9,6 +9,8 @@ pub const REPORT_SCHEMA_VERSION: &str = "1.1.0";
 /// Statistics from scanning and processing.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScanStats {
+    #[serde(default)]
+    pub files_discovered: usize,
     pub files_scanned: usize,
     pub files_included: usize,
     #[serde(default)]
@@ -24,10 +26,28 @@ pub struct ScanStats {
     #[serde(default)]
     pub files_skipped: usize,
     pub files_dropped_budget: usize,
+    #[serde(default)]
+    pub candidate_files: usize,
+    #[serde(default)]
+    pub files_selected_prompt: usize,
+    #[serde(default)]
+    pub files_selected_rag: usize,
     pub total_bytes_scanned: u64,
+    #[serde(default)]
+    pub total_bytes_discovered: u64,
+    #[serde(default)]
+    pub total_bytes_candidates: u64,
     pub total_bytes_included: u64,
     pub chunks_created: usize,
+    #[serde(default)]
+    pub prompt_chunks_rendered: usize,
+    #[serde(default)]
+    pub rag_chunks_rendered: usize,
     pub total_tokens_estimated: usize,
+    #[serde(default)]
+    pub total_tokens_estimated_prompt: usize,
+    #[serde(default)]
+    pub total_tokens_estimated_rag: usize,
     #[serde(default)]
     pub languages_detected: HashMap<String, usize>,
     #[serde(default)]
@@ -61,7 +81,11 @@ impl ScanStats {
 
         let mut value = serde_json::json!({
             "files_scanned": self.files_scanned,
+            "files_discovered": self.files_discovered,
+            "candidate_files": self.candidate_files,
             "files_included": self.files_included,
+            "files_selected_prompt": self.files_selected_prompt,
+            "files_selected_rag": self.files_selected_rag,
             "files_skipped": {
                 "binary": self.files_skipped_binary,
                 "extension": self.files_skipped_extension,
@@ -71,9 +95,15 @@ impl ScanStats {
             },
             "files_dropped_budget": self.files_dropped_budget,
             "total_bytes_scanned": self.total_bytes_scanned,
+            "total_bytes_discovered": self.total_bytes_discovered,
+            "total_bytes_candidates": self.total_bytes_candidates,
             "total_bytes_included": self.total_bytes_included,
             "chunks_created": self.chunks_created,
+            "prompt_chunks_rendered": self.prompt_chunks_rendered,
+            "rag_chunks_rendered": self.rag_chunks_rendered,
             "total_tokens_estimated": self.total_tokens_estimated,
+            "total_tokens_estimated_prompt": self.total_tokens_estimated_prompt,
+            "total_tokens_estimated_rag": self.total_tokens_estimated_rag,
             "languages_detected": languages_detected,
             "top_ignored_patterns": top_ignored_patterns,
             "redaction_counts": self.redaction_counts,

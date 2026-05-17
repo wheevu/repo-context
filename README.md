@@ -72,9 +72,13 @@ Inspect repository only
 cargo run -- info .
 ```
 ##  Examples
-Prompt + RAG outputs (default)
+Prompt + RAG outputs (default, maximum useful coverage)
 ```
-repo-context export --path . --mode both
+repo-context export --path .
+```
+Budgeted output
+```
+repo-context export --path . --max-tokens 12000
 ```
 Prompt-only
 ```

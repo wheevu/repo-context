@@ -106,6 +106,13 @@ mod tests {
                 priority: 0.5,
                 tags: BTreeSet::new(),
                 token_estimate: 20,
+                file_id: String::new(),
+                chunk_index: 0,
+                chunks_in_file: 0,
+                byte_start: None,
+                byte_end: None,
+                content_sha256: String::new(),
+                file_sha256: String::new(),
             },
             Chunk {
                 id: "2".to_string(),
@@ -117,6 +124,13 @@ mod tests {
                 priority: 0.5,
                 tags: BTreeSet::new(),
                 token_estimate: 20,
+                file_id: String::new(),
+                chunk_index: 0,
+                chunks_in_file: 0,
+                byte_start: None,
+                byte_end: None,
+                content_sha256: String::new(),
+                file_sha256: String::new(),
             },
         ];
 

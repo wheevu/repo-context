@@ -20,6 +20,10 @@ const IMPORTANT_DOC_FILES: &[&str] = &[
     "docs/index.md",
     "docs/README.md",
     "documentation/index.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "DESIGN.md",
+    "ARCHITECTURE.md",
 ];
 
 const CONTRIBUTION_DOC_PREFIXES: &[&str] =
@@ -40,6 +44,12 @@ const IMPORTANT_CONFIG_FILES: &[&str] = &[
     ".env.example",
     "tox.ini",
     "setup.cfg",
+    "CODEOWNERS",
+    "Containerfile",
+    "Justfile",
+    "Taskfile.yml",
+    "Taskfile.yaml",
+    "Procfile",
 ];
 
 /// Ranks files by importance based on various signals.
@@ -152,6 +162,12 @@ impl FileRanker {
         }
         if signals.is_lock_file {
             file.tags.insert("lock-file".to_string());
+        }
+        if signals.is_test {
+            file.tags.insert("test".to_string());
+        }
+        if signals.is_generated {
+            file.tags.insert("generated".to_string());
         }
     }
 

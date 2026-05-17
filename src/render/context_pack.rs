@@ -1,6 +1,6 @@
 //! Context pack Markdown rendering
 
-use crate::domain::{Chunk, FileInfo, ScanStats};
+use crate::domain::{Chunk, FileDisposition, FileInfo, ScanStats};
 use crate::utils::{format_with_commas, read_file_safe};
 use chrono::Utc;
 use serde_json::Value as JsonValue;
@@ -28,6 +28,8 @@ pub fn render_context_pack(
     stats: &ScanStats,
     tree: &str,
     manifest_info: &HashMap<String, JsonValue>,
+    dispositions: &[FileDisposition],
+    full_inventory: bool,
     include_timestamp: bool,
 ) -> String {
     let mut out = String::new();
@@ -53,6 +55,8 @@ pub fn render_context_pack(
         format_with_commas(stats.total_bytes_included)
     ));
     out.push_str("\n---\n\n");
+
+    render_inventory(&mut out, stats, files, dispositions, full_inventory);
 
     // ── Repository Overview ──────────────────────────────────────────────────
     out.push_str("## 📋 Repository Overview\n\n");
@@ -270,7 +274,7 @@ pub fn render_context_pack(
             file_chunks.len()
         ));
 
-        for chunk in sorted_chunks {
+        for chunk in dedupe_overlapping_chunks(sorted_chunks.into_iter().copied().collect()) {
             let mut notes: Vec<String> = chunk
                 .tags
                 .iter()
@@ -312,5 +316,126 @@ fn capitalize(s: &str) -> String {
     match chars.next() {
         None => String::new(),
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
+fn render_inventory(
+    out: &mut String,
+    stats: &ScanStats,
+    files: &[FileInfo],
+    dispositions: &[FileDisposition],
+    full_inventory: bool,
+) {
+    out.push_str("## Repository Inventory\n\n");
+    out.push_str(&format!("- total files discovered: {}\n", stats.files_discovered));
+    out.push_str(&format!("- candidate files: {}\n", stats.candidate_files));
+    out.push_str(&format!("- files included in prompt: {}\n", stats.files_selected_prompt));
+    out.push_str(&format!("- files included in RAG: {}\n", stats.files_selected_rag));
+    out.push_str(&format!(
+        "- tests count: {}\n",
+        files.iter().filter(|f| f.tags.contains("test")).count()
+    ));
+    out.push_str(&format!("- docs count: {}\n", files.iter().filter(|f| f.is_doc).count()));
+    let mut by_reason: HashMap<&str, usize> = HashMap::new();
+    for d in dispositions {
+        *by_reason.entry(d.reason.as_str()).or_insert(0) += 1;
+    }
+    let mut reasons: Vec<_> = by_reason.into_iter().collect();
+    reasons.sort_by(|a, b| a.0.cmp(b.0));
+    if !reasons.is_empty() {
+        out.push_str("- skipped/dropped by reason: ");
+        out.push_str(
+            &reasons.iter().map(|(r, c)| format!("{r}={c}")).collect::<Vec<_>>().join(", "),
+        );
+        out.push('\n');
+    }
+    out.push_str(
+        "\n| path | language | role/tags | priority | tokens | prompt/rag/disposition |\n",
+    );
+    out.push_str("| --- | --- | --- | ---: | ---: | --- |\n");
+    let limit = if full_inventory { usize::MAX } else { 100 };
+    for d in dispositions.iter().take(limit) {
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} | {}/{}/{} |\n",
+            d.path,
+            d.language,
+            d.notes.as_deref().unwrap_or(""),
+            d.priority.map(|p| format!("{p:.3}")).unwrap_or_default(),
+            d.token_estimate.map(|t| t.to_string()).unwrap_or_default(),
+            if d.included_in_prompt { "prompt" } else { "-" },
+            if d.included_in_rag { "rag" } else { "-" },
+            d.reason.as_str()
+        ));
+    }
+    if dispositions.len() > limit {
+        out.push_str(&format!(
+            "\n*Inventory table capped at {limit} rows; report JSON contains the complete inventory.*\n"
+        ));
+    }
+    out.push('\n');
+}
+
+fn dedupe_overlapping_chunks(chunks: Vec<&Chunk>) -> Vec<Chunk> {
+    let mut rendered = Vec::new();
+    let mut next_line = 1usize;
+    for chunk in chunks {
+        if chunk.end_line < next_line {
+            continue;
+        }
+        let skip = next_line.saturating_sub(chunk.start_line);
+        let content = if skip == 0 {
+            chunk.content.clone()
+        } else {
+            chunk.content.split_inclusive('\n').skip(skip).collect()
+        };
+        if content.trim().is_empty() {
+            continue;
+        }
+        let mut deduped = chunk.clone();
+        deduped.start_line = chunk.start_line.max(next_line);
+        deduped.content = content;
+        next_line = chunk.end_line + 1;
+        rendered.push(deduped);
+    }
+    rendered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dedupe_overlapping_chunks;
+    use crate::domain::Chunk;
+    use std::collections::BTreeSet;
+
+    fn chunk(id: &str, start: usize, end: usize, content: &str) -> Chunk {
+        Chunk {
+            id: id.to_string(),
+            path: "src/lib.rs".to_string(),
+            language: "rust".to_string(),
+            start_line: start,
+            end_line: end,
+            content: content.to_string(),
+            priority: 0.8,
+            tags: BTreeSet::new(),
+            token_estimate: 10,
+            file_id: "f".to_string(),
+            chunk_index: 0,
+            chunks_in_file: 2,
+            byte_start: None,
+            byte_end: None,
+            content_sha256: String::new(),
+            file_sha256: String::new(),
+        }
+    }
+
+    #[test]
+    fn context_pack_dedupes_overlapping_line_ranges() {
+        let first = chunk("a", 1, 3, "line1\nline2\nline3\n");
+        let second = chunk("b", 3, 5, "line3\nline4\nline5\n");
+
+        let deduped = dedupe_overlapping_chunks(vec![&first, &second]);
+
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[1].start_line, 4);
+        assert_eq!(deduped[1].content, "line4\nline5\n");
     }
 }

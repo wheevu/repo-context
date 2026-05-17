@@ -2,12 +2,17 @@
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::chunk::{chunk_content, coalesce_small_chunks_with_max};
-use crate::domain::{Chunk, Config, FileInfo, OutputMode, RedactionMode, ScanStats};
+use crate::domain::{
+    Chunk, Config, FileDisposition, FileDispositionReason, FileInfo, OutputMode, RedactionMode,
+    ScanStats,
+};
 use crate::fetch::fetch_repository;
 use crate::rank::rank_files_with_manifest;
 use crate::redact::Redactor;
@@ -32,6 +37,7 @@ pub struct ExportOutcome {
 }
 
 pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<ExportOutcome> {
+    let started = Instant::now();
     let repo_ctx = fetch_repository(
         config.path.as_deref(),
         config.repo_url.as_deref(),
@@ -49,10 +55,13 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
 
     let scanned_files = scanner.scan()?;
     let mut stats = scanner.stats().clone();
+    let mut dispositions = scanner.dispositions().to_vec();
 
     let (ranked_files, manifest_info) =
         rank_files_with_manifest(&root_path, scanned_files, config.ranking_weights.clone())?;
-    let selected_files = apply_file_byte_budget(ranked_files, config.max_total_bytes, &mut stats);
+    update_dispositions_from_files(&mut dispositions, &ranked_files);
+    let selected_files =
+        apply_file_byte_budget(ranked_files, config.max_total_bytes, &mut stats, &mut dispositions);
 
     let redactor = if config.redact_secrets {
         Some(build_redactor(config.redaction_mode, &config.redaction))
@@ -78,11 +87,26 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
     let chunks = apply_chunk_token_budget(all_chunks, config.max_tokens, &mut stats);
 
     let file_tokens = file_token_totals(&chunks);
-    let included_files = selected_files_with_tokens(selected_files, &file_tokens);
+    let included_files = selected_files_with_tokens(selected_files.clone(), &file_tokens);
 
     stats.files_included = included_files.len();
     stats.chunks_created = chunks.len();
     stats.total_tokens_estimated = chunks.iter().map(|c| c.token_estimate).sum();
+    stats.total_tokens_estimated_rag = stats.total_tokens_estimated;
+    stats.rag_chunks_rendered =
+        if matches!(config.mode, OutputMode::Rag | OutputMode::Both) { chunks.len() } else { 0 };
+    stats.files_selected_rag = if matches!(config.mode, OutputMode::Rag | OutputMode::Both) {
+        included_files.len()
+    } else {
+        0
+    };
+    stats.files_selected_prompt = if matches!(config.mode, OutputMode::Prompt | OutputMode::Both) {
+        included_files.len()
+    } else {
+        0
+    };
+    update_dispositions_for_outputs(&mut dispositions, &included_files, &chunks, config.mode);
+    mark_token_dropped(&mut dispositions, &selected_files, &included_files);
 
     let highlights: HashSet<String> =
         included_files.iter().take(10).map(|f| f.relative_path.clone()).collect();
@@ -100,6 +124,7 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
 
     match config.mode {
         OutputMode::Prompt => {
+            stats.prompt_chunks_rendered = chunks.len();
             let content = render_context_pack(
                 &root_path,
                 &included_files,
@@ -107,8 +132,11 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
                 &stats,
                 &tree,
                 &manifest_info,
+                &dispositions,
+                config.full_inventory,
                 options.include_timestamp,
             );
+            stats.total_tokens_estimated_prompt = estimate_tokens(&content);
             fs::write(&context_path, content)?;
             output_files.push(context_path.display().to_string());
         }
@@ -118,6 +146,7 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
             output_files.push(jsonl_path.display().to_string());
         }
         OutputMode::Both => {
+            stats.prompt_chunks_rendered = chunks.len();
             let content = render_context_pack(
                 &root_path,
                 &included_files,
@@ -125,8 +154,11 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
                 &stats,
                 &tree,
                 &manifest_info,
+                &dispositions,
+                config.full_inventory,
                 options.include_timestamp,
             );
+            stats.total_tokens_estimated_prompt = estimate_tokens(&content);
             fs::write(&context_path, content)?;
             output_files.push(context_path.display().to_string());
 
@@ -136,6 +168,8 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
         }
     }
 
+    stats.processing_time_seconds =
+        if options.include_timestamp { started.elapsed().as_secs_f64() } else { 0.0 };
     let config_json = build_config_json(&config);
     let provenance = json!({
         "path": root_path.display().to_string(),
@@ -151,6 +185,7 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
         &included_files,
         &output_files,
         &config_json,
+        &dispositions,
         ReportOptions {
             include_timestamp: options.include_timestamp,
             provenance: Some(&provenance),
@@ -197,7 +232,11 @@ fn process_file(
 
     let redacted = !counts.is_empty();
 
-    let raw_chunks = chunk_content(file, &content, config.chunk_tokens, config.chunk_overlap)?;
+    let raw_chunks = if should_prompt_summary_only(file) {
+        vec![summary_chunk(file, &content)]
+    } else {
+        chunk_content(file, &content, config.chunk_tokens, config.chunk_overlap)?
+    };
     let mut chunks =
         coalesce_small_chunks_with_max(raw_chunks, config.min_chunk_tokens, config.chunk_tokens);
 
@@ -212,6 +251,7 @@ fn apply_file_byte_budget(
     ranked_files: Vec<FileInfo>,
     max_total_bytes: u64,
     stats: &mut ScanStats,
+    dispositions: &mut [FileDisposition],
 ) -> Vec<FileInfo> {
     if max_total_bytes == 0 {
         return Vec::new();
@@ -224,6 +264,11 @@ fn apply_file_byte_budget(
         if total + file.size_bytes > max_total_bytes {
             for remaining in &ranked_files[idx..] {
                 stats.files_dropped_budget += 1;
+                set_disposition_reason(
+                    dispositions,
+                    &remaining.relative_path,
+                    FileDispositionReason::DroppedByteBudget,
+                );
                 stats.dropped_files.push(HashMap::from([
                     ("path".to_string(), json!(remaining.relative_path)),
                     ("reason".to_string(), json!("bytes_limit")),
@@ -263,15 +308,35 @@ fn apply_chunk_token_budget(
     let mut used = 0usize;
     let mut dropped_paths: HashSet<String> = HashSet::new();
 
-    for (idx, chunk) in chunks.iter().enumerate() {
+    let mut deferred = Vec::new();
+    for chunk in chunks.iter().filter(|c| is_mandatory_chunk(c)) {
         if used + chunk.token_estimate > limit {
-            for dropped in &chunks[idx..] {
-                dropped_paths.insert(dropped.path.clone());
-            }
             break;
         }
         used += chunk.token_estimate;
         kept.push(chunk.clone());
+    }
+
+    let kept_ids: HashSet<String> = kept.iter().map(|c| c.id.clone()).collect();
+    let mut seen_paths: HashSet<String> = kept.iter().map(|c| c.path.clone()).collect();
+    for chunk in chunks.iter().filter(|c| !kept_ids.contains(&c.id)) {
+        if !seen_paths.contains(&chunk.path) {
+            deferred.push(chunk.clone());
+        }
+    }
+    for chunk in chunks.iter().filter(|c| !kept_ids.contains(&c.id)) {
+        if seen_paths.contains(&chunk.path) {
+            deferred.push(chunk.clone());
+        }
+    }
+    for chunk in deferred {
+        if used + chunk.token_estimate > limit {
+            dropped_paths.insert(chunk.path.clone());
+            continue;
+        }
+        used += chunk.token_estimate;
+        seen_paths.insert(chunk.path.clone());
+        kept.push(chunk);
     }
 
     for path in dropped_paths {
@@ -282,6 +347,111 @@ fn apply_chunk_token_budget(
     }
 
     kept
+}
+
+fn is_mandatory_chunk(chunk: &Chunk) -> bool {
+    chunk.tags.iter().any(|t| matches!(t.as_str(), "readme" | "config" | "entrypoint"))
+}
+
+fn should_prompt_summary_only(file: &FileInfo) -> bool {
+    file.tags.contains("lock-file")
+}
+
+fn summary_chunk(file: &FileInfo, content: &str) -> Chunk {
+    let summary = format!(
+        "Summary only: {}\nlanguage: {}\nbytes: {}\ntokens_estimate: {}\nrole/tags: {}\n",
+        file.relative_path,
+        file.language,
+        file.size_bytes,
+        estimate_tokens(content),
+        file.tags.iter().cloned().collect::<Vec<_>>().join(",")
+    );
+    let id = crate::utils::stable_hash(&summary, &file.relative_path, 1, 1);
+    let content_sha256 = format!("{:x}", Sha256::digest(summary.as_bytes()));
+    let file_sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
+    Chunk {
+        id,
+        path: file.relative_path.clone(),
+        language: file.language.clone(),
+        start_line: 1,
+        end_line: 1,
+        content: summary,
+        priority: file.priority,
+        tags: file.tags.clone(),
+        token_estimate: 64,
+        file_id: file.id.clone(),
+        chunk_index: 0,
+        chunks_in_file: 1,
+        byte_start: Some(0),
+        byte_end: Some(0),
+        content_sha256,
+        file_sha256,
+    }
+}
+
+fn update_dispositions_from_files(dispositions: &mut [FileDisposition], files: &[FileInfo]) {
+    for file in files {
+        if let Some(d) = dispositions.iter_mut().find(|d| d.path == file.relative_path) {
+            d.priority = Some(file.priority);
+            d.token_estimate = Some(file.token_estimate);
+            d.notes = Some(file.tags.iter().cloned().collect::<Vec<_>>().join(","));
+        }
+    }
+}
+
+fn update_dispositions_for_outputs(
+    dispositions: &mut [FileDisposition],
+    files: &[FileInfo],
+    chunks: &[Chunk],
+    mode: OutputMode,
+) {
+    let chunk_paths: HashSet<&str> = chunks.iter().map(|c| c.path.as_str()).collect();
+    for file in files {
+        if let Some(d) = dispositions.iter_mut().find(|d| d.path == file.relative_path) {
+            d.priority = Some(file.priority);
+            d.token_estimate = Some(file.token_estimate);
+            d.included_in_prompt = matches!(mode, OutputMode::Prompt | OutputMode::Both)
+                && chunk_paths.contains(file.relative_path.as_str());
+            d.included_in_rag = matches!(mode, OutputMode::Rag | OutputMode::Both)
+                && chunk_paths.contains(file.relative_path.as_str());
+            d.reason = if should_prompt_summary_only(file) {
+                FileDispositionReason::IncludedSummaryOnly
+            } else if chunks.iter().filter(|c| c.path == file.relative_path).count() > 1 {
+                FileDispositionReason::IncludedChunked
+            } else {
+                FileDispositionReason::IncludedFull
+            };
+        }
+    }
+}
+
+fn set_disposition_reason(
+    dispositions: &mut [FileDisposition],
+    path: &str,
+    reason: FileDispositionReason,
+) {
+    if let Some(d) = dispositions.iter_mut().find(|d| d.path == path) {
+        d.reason = reason;
+        d.included_in_prompt = false;
+        d.included_in_rag = false;
+    }
+}
+
+fn mark_token_dropped(
+    dispositions: &mut [FileDisposition],
+    selected_files: &[FileInfo],
+    included_files: &[FileInfo],
+) {
+    let included: HashSet<&str> = included_files.iter().map(|f| f.relative_path.as_str()).collect();
+    for file in selected_files {
+        if !included.contains(file.relative_path.as_str()) {
+            set_disposition_reason(
+                dispositions,
+                &file.relative_path,
+                FileDispositionReason::DroppedTokenBudget,
+            );
+        }
+    }
 }
 
 fn file_token_totals(chunks: &[Chunk]) -> HashMap<String, usize> {
@@ -369,6 +539,8 @@ fn build_config_json(config: &Config) -> Value {
         RedactionMode::StructureSafe => "structure-safe",
     };
 
+    let coverage_strategy = if config.max_tokens.is_some() { "budget" } else { "full" };
+
     json!({
         "path": config.path,
         "repo": config.repo_url,
@@ -384,6 +556,7 @@ fn build_config_json(config: &Config) -> Value {
         "chunk_tokens": config.chunk_tokens,
         "chunk_overlap": config.chunk_overlap,
         "min_chunk_tokens": config.min_chunk_tokens,
+        "coverage_strategy": coverage_strategy,
         "mode": mode,
         "output_dir": config.output_dir,
         "tree_depth": config.tree_depth,

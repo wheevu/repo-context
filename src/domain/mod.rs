@@ -2,6 +2,7 @@
 
 mod chunk;
 mod config;
+mod disposition;
 mod file;
 mod language;
 mod output;
@@ -11,6 +12,7 @@ mod stats;
 
 pub use chunk::Chunk;
 pub use config::{default_exclude_globs, default_include_extensions, Config};
+pub use disposition::{FileDisposition, FileDispositionReason};
 pub use file::FileInfo;
 pub use language::get_language;
 pub use output::{OutputMode, RedactionMode};

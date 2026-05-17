@@ -79,7 +79,6 @@ pub fn merge_cli_with_config(mut base_config: Config, cli: CliOverrides) -> Conf
     if let Some(min_chunk_tokens) = cli.min_chunk_tokens {
         base_config.min_chunk_tokens = min_chunk_tokens;
     }
-
     if let Some(mode) = cli.mode {
         base_config.mode = mode;
     }

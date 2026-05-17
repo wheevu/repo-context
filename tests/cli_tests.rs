@@ -17,6 +17,17 @@ fn test_cli_help_lists_stable_commands() {
 }
 
 #[test]
+fn test_export_help_hides_coverage_profile_complexity() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args(["export", "--help"]);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("coverage-profile").not())
+        .stdout(predicate::str::contains("full-inventory").not())
+        .stdout(predicate::str::contains("max-tokens"));
+}
+
+#[test]
 fn test_export_requires_path_or_repo() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
     cmd.arg("export");

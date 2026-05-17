@@ -113,7 +113,7 @@ impl MarkdownChunker {
             }
         }
 
-        result.sort_by(|a, b| a.start_line.cmp(&b.start_line));
+        result.sort_by_key(|chunk| chunk.start_line);
         result
     }
 }

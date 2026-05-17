@@ -126,7 +126,7 @@ impl CodeChunker {
             return LineChunker::new().chunk(file_info, content, max_tokens, overlap_tokens);
         }
 
-        chunks.sort_by(|a, b| a.start_line.cmp(&b.start_line));
+        chunks.sort_by_key(|chunk| chunk.start_line);
         chunks
     }
 }
@@ -289,7 +289,7 @@ fn chunk_by_boundaries(
         }
     }
 
-    chunks.sort_by(|a, b| a.start_line.cmp(&b.start_line));
+    chunks.sort_by_key(|chunk| chunk.start_line);
     chunks
 }
 

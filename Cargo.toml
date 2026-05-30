@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 # CLI
 clap = { version = "4.5", features = ["derive", "cargo", "env", "wrap_help"] }
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 
 # Error handling and logging
 anyhow = "1.0"

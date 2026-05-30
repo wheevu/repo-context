@@ -71,6 +71,9 @@ pub struct Config {
     pub ranking_weights: RankingWeights,
     #[serde(default, alias = "redact")]
     pub redaction: RedactionConfig,
+
+    #[serde(default)]
+    pub module: ModuleConfig,
 }
 
 impl Default for Config {
@@ -99,8 +102,17 @@ impl Default for Config {
             redaction_mode: RedactionMode::Standard,
             ranking_weights: RankingWeights::default(),
             redaction: RedactionConfig::default(),
+            module: ModuleConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModuleConfig {
+    #[serde(default)]
+    pub module_roots: Vec<PathBuf>,
+    #[serde(default)]
+    pub css_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -131,7 +143,10 @@ fn default_min_chunk_tokens() -> usize {
     200
 }
 fn default_output_dir() -> PathBuf {
-    PathBuf::from("./out")
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("~"))
+        .join("rc-output")
 }
 fn default_tree_depth() -> usize {
     4

@@ -201,6 +201,7 @@ fn max_tokens_automatically_uses_budget_strategy() {
         "--max-tokens",
         "20",
     ]);
+    cmd.env("HOME", &out);
     cmd.assert().success();
 
     let actual = resolve_output_dir(&out, fixture.root());
@@ -233,6 +234,7 @@ fn lockfile_is_summary_only_by_default() {
         out.path().to_str().expect("out"),
         "--no-timestamp",
     ]);
+    cmd.env("HOME", out.path());
     cmd.assert().success();
 
     let actual = resolve_output_dir(out.path(), root);
@@ -314,6 +316,7 @@ fn redaction_catches_secret_spanning_small_chunks() {
         "--min-chunk-tokens",
         "4",
     ]);
+    cmd.env("HOME", out.path());
     cmd.assert().success();
 
     let actual = resolve_output_dir(out.path(), root);
@@ -347,16 +350,13 @@ fn run_export(repo_root: &Path, output_dir: &Path, mode: &str, no_redact: bool) 
         cmd.arg("--no-redact");
     }
 
+    cmd.env("HOME", output_dir);
     cmd.assert().success();
 }
 
 fn resolve_output_dir(output_dir: &Path, repo_root: &Path) -> std::path::PathBuf {
     let repo_name = repo_root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
-    if output_dir.file_name().and_then(|n| n.to_str()) == Some(repo_name) {
-        output_dir.to_path_buf()
-    } else {
-        output_dir.join(repo_name)
-    }
+    output_dir.join("rc-output").join(repo_name)
 }
 
 fn output_file_name(repo_root: &Path, base_name: &str) -> String {

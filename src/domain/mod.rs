@@ -11,7 +11,7 @@ mod redaction;
 mod stats;
 
 pub use chunk::Chunk;
-pub use config::{default_exclude_globs, default_include_extensions, Config};
+pub use config::{default_exclude_globs, default_include_extensions, Config, ModuleConfig};
 pub use disposition::{FileDisposition, FileDispositionReason};
 pub use file::FileInfo;
 pub use language::get_language;

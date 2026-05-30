@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -14,6 +15,7 @@ use crate::domain::{
     ScanStats,
 };
 use crate::fetch::fetch_repository;
+use crate::module::picker::ScanMode;
 use crate::rank::rank_files_with_manifest;
 use crate::redact::Redactor;
 use crate::render::{render_context_pack, render_jsonl, write_report, ReportOptions};
@@ -57,11 +59,28 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
     let mut stats = scanner.stats().clone();
     let mut dispositions = scanner.dispositions().to_vec();
 
+    let scan_mode = if std::io::stdout().is_terminal() {
+        crate::module::picker::pick_scan_mode()?
+    } else {
+        ScanMode::Full
+    };
+
     let (ranked_files, manifest_info) =
         rank_files_with_manifest(&root_path, scanned_files, config.ranking_weights.clone())?;
+    let module_run = if matches!(scan_mode, ScanMode::Module) {
+        Some(crate::module::run(&root_path, &ranked_files, &config)?)
+    } else {
+        None
+    };
     update_dispositions_from_files(&mut dispositions, &ranked_files);
-    let selected_files =
-        apply_file_byte_budget(ranked_files, config.max_total_bytes, &mut stats, &mut dispositions);
+    let selected_source =
+        module_run.as_ref().map(|module| module.files.clone()).unwrap_or(ranked_files);
+    let selected_files = apply_file_byte_budget(
+        selected_source,
+        config.max_total_bytes,
+        &mut stats,
+        &mut dispositions,
+    );
 
     let redactor = if config.redact_secrets {
         Some(build_redactor(config.redaction_mode, &config.redaction))
@@ -71,8 +90,9 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
 
     let mut all_chunks = Vec::new();
     let mut redaction_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let content_overrides = module_run.as_ref().map(|module| &module.content_overrides);
     for file in &selected_files {
-        let processed = process_file(file, redactor.as_ref(), &config)?;
+        let processed = process_file(file, redactor.as_ref(), &config, content_overrides)?;
         if processed.redacted {
             stats.redacted_files += 1;
             stats.redacted_chunks += processed.chunks.len();
@@ -112,20 +132,24 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
         included_files.iter().take(10).map(|f| f.relative_path.clone()).collect();
     let tree = generate_tree(&root_path, config.tree_depth, true, &highlights)?;
 
-    let output_dir = resolve_output_dir(&config.output_dir, &root_path, config.repo_url.as_deref());
+    let repo_name = repo_name_for_output(&root_path, config.repo_url.as_deref());
+    let module_basename = module_run.as_ref().map(|module| module.entry_basename.as_str());
+    let output_dir = resolve_output_dir(&repo_name, module_basename);
     fs::create_dir_all(&output_dir)?;
 
-    let repo_name = repo_name_for_output(&root_path, config.repo_url.as_deref());
-    let context_path = output_dir.join(format!("{}_context_pack.md", repo_name));
-    let jsonl_path = output_dir.join(format!("{}_chunks.jsonl", repo_name));
-    let report_path = output_dir.join(format!("{}_report.json", repo_name));
+    let output_prefix = module_basename
+        .map(|entry| format!("{repo_name}_module_{entry}"))
+        .unwrap_or_else(|| repo_name.clone());
+    let context_path = output_dir.join(format!("{}_context_pack.md", output_prefix));
+    let jsonl_path = output_dir.join(format!("{}_chunks.jsonl", output_prefix));
+    let report_path = output_dir.join(format!("{}_report.json", output_prefix));
 
     let mut output_files = Vec::new();
 
     match config.mode {
         OutputMode::Prompt => {
             stats.prompt_chunks_rendered = chunks.len();
-            let content = render_context_pack(
+            let mut content = render_context_pack(
                 &root_path,
                 &included_files,
                 &chunks,
@@ -136,6 +160,9 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
                 config.full_inventory,
                 options.include_timestamp,
             );
+            if let Some(module) = &module_run {
+                content = format!("{}{}", module.header, content);
+            }
             stats.total_tokens_estimated_prompt = estimate_tokens(&content);
             fs::write(&context_path, content)?;
             output_files.push(context_path.display().to_string());
@@ -147,7 +174,7 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
         }
         OutputMode::Both => {
             stats.prompt_chunks_rendered = chunks.len();
-            let content = render_context_pack(
+            let mut content = render_context_pack(
                 &root_path,
                 &included_files,
                 &chunks,
@@ -158,6 +185,9 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
                 config.full_inventory,
                 options.include_timestamp,
             );
+            if let Some(module) = &module_run {
+                content = format!("{}{}", module.header, content);
+            }
             stats.total_tokens_estimated_prompt = estimate_tokens(&content);
             fs::write(&context_path, content)?;
             output_files.push(context_path.display().to_string());
@@ -206,9 +236,18 @@ fn process_file(
     file: &FileInfo,
     redactor: Option<&Redactor>,
     config: &Config,
+    content_overrides: Option<&HashMap<PathBuf, String>>,
 ) -> Result<ProcessedFile> {
-    let (raw_content, _) = read_file_safe(&file.path, None, None)
-        .with_context(|| format!("Failed to read {}", file.relative_path))?;
+    let canonical_path = file.path.canonicalize().unwrap_or_else(|_| file.path.clone());
+    let raw_content = if let Some(content) =
+        content_overrides.and_then(|m| m.get(&file.path).or_else(|| m.get(&canonical_path)))
+    {
+        content.clone()
+    } else {
+        read_file_safe(&file.path, None, None)
+            .with_context(|| format!("Failed to read {}", file.relative_path))?
+            .0
+    };
 
     let file_name =
         Path::new(&file.relative_path).file_name().and_then(|name| name.to_str()).unwrap_or("");
@@ -491,13 +530,16 @@ fn build_redactor(mode: RedactionMode, cfg: &crate::domain::RedactionConfig) -> 
     }
 }
 
-fn resolve_output_dir(config_output: &Path, root_path: &Path, repo_url: Option<&str>) -> PathBuf {
-    let repo_name = repo_name_for_output(root_path, repo_url);
-    if config_output.file_name().and_then(|n| n.to_str()) == Some(repo_name.as_str()) {
-        config_output.to_path_buf()
-    } else {
-        config_output.join(repo_name)
-    }
+fn resolve_output_dir(repo_name: &str, module_basename: Option<&str>) -> PathBuf {
+    let repo_dir = home_rc_output_dir().join(repo_name);
+    module_basename.map(|entry| repo_dir.join(format!("module_{entry}"))).unwrap_or(repo_dir)
+}
+
+fn home_rc_output_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("~"))
+        .join("rc-output")
 }
 
 fn repo_name_for_output(root_path: &Path, repo_url: Option<&str>) -> String {
@@ -562,5 +604,9 @@ fn build_config_json(config: &Config) -> Value {
         "tree_depth": config.tree_depth,
         "redact_secrets": config.redact_secrets,
         "redaction_mode": redaction_mode,
+        "module": {
+            "module_roots": &config.module.module_roots,
+            "css_files": &config.module.css_files,
+        },
     })
 }

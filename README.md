@@ -34,7 +34,7 @@ Benchmarked with `hyperfine` using the same export workflow and `--no-timestamp`
 
 ## Output
 
-`export` writes artifacts under `./out/<repo>/`:
+`export` writes artifacts under `~/rc-output/<repo>/`:
 
 - `<repo>_context_pack.md` — prompt-friendly repository context
 - `<repo>_chunks.jsonl` — retrieval chunks for embedding/indexing
@@ -45,6 +45,8 @@ By mode:
 - `prompt` → context pack + report
 - `rag` → chunks + report
 - `both` → context pack + chunks + report
+
+Interactive exports can run in module mode. Pick an entry point to emit only its reachable dependency graph, plus scoped CSS when global styles are detected.
 
 ## Export flow
 
@@ -91,6 +93,11 @@ repo-context export --path . --mode rag
 Reproducible output
 ```
 repo-context export --path . --no-timestamp
+```
+Module-scoped output
+```
+repo-context export --path .
+# choose "Module", then select an entry point
 ```
 Disable secret redaction
 ```

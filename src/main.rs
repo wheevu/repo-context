@@ -11,6 +11,7 @@ mod cli;
 mod config;
 mod domain;
 mod fetch;
+mod module;
 mod rank;
 mod redact;
 mod render;

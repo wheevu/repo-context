@@ -143,7 +143,7 @@ impl Redactor {
             entropy_threshold: cfg.entropy.threshold,
             entropy_min_len,
             entropy_token_regex: build_entropy_regex(entropy_min_len),
-            structure_safe: mode_structure_safe,
+            structure_safe: mode_structure_safe || cfg.structure_safe_redaction,
             source_safe_patterns: cfg.source_safe_patterns.clone(),
             safe_file_patterns: cfg.safe_file_patterns.clone(),
             paranoid_mode: mode_paranoid || cfg.paranoid.enabled,

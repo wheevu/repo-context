@@ -103,6 +103,14 @@ pub fn detect_css_files(root: &Path, files: &[crate::domain::FileInfo]) -> Vec<P
     out
 }
 
+/// Regex to strip `${...}` placeholders from template literals.
+static TEMPLATE_CLEANUP: once_cell::sync::Lazy<Regex> =
+    once_cell::sync::Lazy::new(|| Regex::new(r#"\$\{[^}]+\}"#).expect("valid regex"));
+
+/// Regex to extract static class prefix from template literal (e.g. `btn-${...}`).
+static TEMPLATE_PREFIX: once_cell::sync::Lazy<Regex> =
+    once_cell::sync::Lazy::new(|| Regex::new(r#"([A-Za-z0-9_-]+-)\$\{"#).expect("valid regex"));
+
 fn extract_from_content(content: &str, names: &mut HashSet<String>) {
     let literal = Regex::new(r#"(?:class|className)\s*=\s*\"([^\"]+)\""#).expect("valid regex");
     let brace_string = Regex::new(r#"(?:class|className)\s*=\s*\{\s*['\"]([^'\"]+)['\"]\s*\}"#)
@@ -116,13 +124,9 @@ fn extract_from_content(content: &str, names: &mut HashSet<String>) {
     }
     for cap in template.captures_iter(content) {
         if let Some(value) = cap.get(1) {
-            let cleaned =
-                Regex::new(r#"\$\{[^}]+\}"#).expect("valid regex").replace_all(value.as_str(), " ");
+            let cleaned = TEMPLATE_CLEANUP.replace_all(value.as_str(), " ");
             add_tokens(&cleaned, names);
-            for prefix in Regex::new(r#"([A-Za-z0-9_-]+-)\$\{"#)
-                .expect("valid regex")
-                .captures_iter(value.as_str())
-            {
+            for prefix in TEMPLATE_PREFIX.captures_iter(value.as_str()) {
                 if let Some(prefix) = prefix.get(1) {
                     names.insert(prefix.as_str().to_string());
                 }

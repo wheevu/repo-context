@@ -7,4 +7,4 @@ pub mod loader;
 pub mod merge;
 
 pub use loader::load_config;
-pub use merge::{merge_cli_with_config, CliOverrides};
+pub use merge::{merge_cli_with_config, merge_repo_config, CliOverrides};

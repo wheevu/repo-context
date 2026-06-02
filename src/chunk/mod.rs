@@ -90,7 +90,9 @@ pub fn chunk_content(
     }])
 }
 
-fn enrich_chunks(chunks: &mut [Chunk], file_info: &FileInfo, file_content: &str) {
+/// Re-enrich chunk metadata (indices, hashes, byte offsets) after coalescing.
+/// This should be called whenever chunks are merged/split after initial enrichment.
+pub(crate) fn enrich_chunks(chunks: &mut [Chunk], file_info: &FileInfo, file_content: &str) {
     let file_sha256 = format!("{:x}", Sha256::digest(file_content.as_bytes()));
     let total = chunks.len();
     for (idx, chunk) in chunks.iter_mut().enumerate() {

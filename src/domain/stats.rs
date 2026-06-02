@@ -24,6 +24,8 @@ pub struct ScanStats {
     #[serde(default)]
     pub files_skipped_glob: usize,
     #[serde(default)]
+    pub files_skipped_minified: usize,
+    #[serde(default)]
     pub files_skipped: usize,
     pub files_dropped_budget: usize,
     #[serde(default)]
@@ -91,6 +93,7 @@ impl ScanStats {
                 "extension": self.files_skipped_extension,
                 "gitignore": self.files_skipped_gitignore,
                 "glob": self.files_skipped_glob,
+                "minified": self.files_skipped_minified,
                 "size": self.files_skipped_size,
             },
             "files_dropped_budget": self.files_dropped_budget,

@@ -68,7 +68,7 @@ fn test_export_writes_core_artifacts() {
     cmd.assert().success();
 
     let repo_name = repo.path().file_name().and_then(|n| n.to_str()).unwrap_or("repo");
-    let actual = out.path().join("rc-output").join(repo_name);
+    let actual = out.path().join(repo_name);
 
     assert!(actual.join(format!("{}_context_pack.md", repo_name)).exists());
     assert!(actual.join(format!("{}_chunks.jsonl", repo_name)).exists());

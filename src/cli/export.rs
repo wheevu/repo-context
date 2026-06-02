@@ -108,7 +108,8 @@ pub fn run(args: ExportArgs) -> Result<()> {
     };
 
     let file_config = load_config(&config_anchor, args.config.as_deref())?;
-    let include_ext = parse_csv(&args.include_ext).map(|v| v.into_iter().collect());
+    let include_ext =
+        parse_csv(&args.include_ext).map(|v| v.into_iter().map(normalize_extension).collect());
     let exclude_glob = parse_csv(&args.exclude_glob).map(|v| v.into_iter().collect());
     let mode = if args.mode.is_some() { Some(parse_mode(args.mode.as_deref())?) } else { None };
     let redaction_mode = if args.redaction_mode.is_some() {
@@ -144,8 +145,13 @@ pub fn run(args: ExportArgs) -> Result<()> {
         anyhow::bail!("Either --path or --repo must be specified");
     }
 
-    let outcome =
-        execute(merged, ExportExecutionOptions { include_timestamp: !args.no_timestamp })?;
+    let outcome = execute(
+        merged,
+        ExportExecutionOptions {
+            include_timestamp: !args.no_timestamp,
+            explicit_config_path: args.config.clone(),
+        },
+    )?;
 
     println!("Export complete:");
     println!("  root: {}", outcome.root_path.display());
@@ -183,5 +189,19 @@ fn parse_redaction_mode(mode: Option<&str>) -> Result<RedactionMode> {
         other => anyhow::bail!(
             "Invalid redaction mode '{other}'. Expected one of: fast, standard, paranoid, structure-safe"
         ),
+    }
+}
+
+/// Normalize a file extension from `--include-ext` to always start with a dot.
+///
+/// For example, `"rs"` becomes `".rs"`, while `".py"` stays as `".py"`.
+fn normalize_extension(ext: String) -> String {
+    let trimmed = ext.trim();
+    if trimmed.starts_with('.') {
+        trimmed.to_string()
+    } else if !trimmed.is_empty() {
+        format!(".{}", trimmed)
+    } else {
+        trimmed.to_string()
     }
 }

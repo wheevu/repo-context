@@ -6,6 +6,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::Path;
 
+pub mod bm25;
 pub mod ranker;
 mod workspace;
 

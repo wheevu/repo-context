@@ -1,4 +1,9 @@
 //! Lightweight BM25 scoring for task-driven chunk reranking.
+//!
+//! These functions are public API for downstream users. Internal usage
+//! may be added in the future.
+
+#![allow(dead_code)]
 
 use crate::domain::Chunk;
 use std::collections::{HashMap, HashSet};

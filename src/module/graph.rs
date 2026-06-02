@@ -166,8 +166,11 @@ fn go_imports(content: &str, rel_to_abs: &HashMap<String, PathBuf>) -> Vec<PathB
         .expect("valid regex");
     let mut out = Vec::new();
     for spec in re.captures_iter(content).filter_map(|c| c.get(1).map(|m| m.as_str())) {
+        // Match by directory-prefix: a Go file belongs to the package if its
+        // relative path starts with the import path converted to '/' form.
+        let spec_path = spec.replace('-', "/");
         for (rel, abs) in rel_to_abs {
-            if rel.ends_with(".go") && rel.contains(spec) {
+            if rel.ends_with(".go") && rel.starts_with(&spec_path) {
                 out.push(abs.clone());
             }
         }

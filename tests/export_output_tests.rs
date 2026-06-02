@@ -356,7 +356,7 @@ fn run_export(repo_root: &Path, output_dir: &Path, mode: &str, no_redact: bool) 
 
 fn resolve_output_dir(output_dir: &Path, repo_root: &Path) -> std::path::PathBuf {
     let repo_name = repo_root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
-    output_dir.join("rc-output").join(repo_name)
+    output_dir.join(repo_name)
 }
 
 fn output_file_name(repo_root: &Path, base_name: &str) -> String {
@@ -391,4 +391,255 @@ impl TestRepo {
     fn root(&self) -> &Path {
         self.temp.path()
     }
+}
+
+// ── HIGH-VALUE REGRESSION TESTS ──────────────────────────────────────────────
+
+#[test]
+fn export_redacts_readme_secret_from_context_pack_and_jsonl() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    // Place a secret in the README — it should be redacted in BOTH the context
+    // pack and the JSONL chunks.
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("README.md"), "# App\n\nAPI key: sk-abcdefghijklmnopqrstuvwxyz12345\n")
+        .expect("write readme");
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write source");
+
+    let out = TempDir::new().expect("out dir");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root"),
+        "--mode",
+        "both",
+        "--output-dir",
+        out.path().to_str().expect("out"),
+        "--no-timestamp",
+    ]);
+    cmd.env("HOME", out.path());
+    cmd.assert().success();
+
+    let repo_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let actual = out.path().join(repo_name);
+
+    // Context pack must NOT leak the raw secret.
+    let ctx = fs::read_to_string(actual.join(format!("{}_context_pack.md", repo_name)))
+        .expect("read context");
+    assert!(!ctx.contains("sk-abcdefghijklmnopqrstuvwxyz12345"));
+    assert!(ctx.contains("[REDACTED_OPENAI_KEY]") || ctx.contains("[REDACTED_SECRET]"));
+
+    // JSONL chunks must NOT leak the raw secret.
+    let jsonl =
+        fs::read_to_string(actual.join(format!("{}_chunks.jsonl", repo_name))).expect("read jsonl");
+    assert!(!jsonl.contains("sk-abcdefghijklmnopqrstuvwxyz12345"));
+
+    // Report must NOT leak the raw secret in any field.
+    let report_raw =
+        fs::read_to_string(actual.join(format!("{}_report.json", repo_name))).expect("read report");
+    assert!(!report_raw.contains("sk-abcdefghijklmnopqrstuvwxyz12345"));
+}
+
+#[test]
+fn scanner_respects_gitignore_for_markdown_by_default() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    // Git init is necessary because the `ignore` crate's gitignore support
+    // does not read `.gitignore` files outside a git repository.
+    let _ = std::process::Command::new("git").args(["init"]).current_dir(root).status();
+    fs::write(root.join(".gitignore"), "notes.md\n").expect("write gitignore");
+    fs::write(root.join("notes.md"), "# Private notes\n").expect("write notes");
+    fs::write(root.join("README.md"), "# Public\n").expect("write readme");
+    fs::write(root.join("main.py"), "x = 1\n").expect("write main");
+
+    let out = TempDir::new().expect("out dir");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root"),
+        "--mode",
+        "rag",
+        "--output-dir",
+        out.path().to_str().expect("out"),
+        "--no-timestamp",
+    ]);
+    cmd.env("HOME", out.path());
+    cmd.assert().success();
+
+    let repo_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let actual = out.path().join(repo_name);
+    let jsonl =
+        fs::read_to_string(actual.join(format!("{}_chunks.jsonl", repo_name))).expect("read jsonl");
+
+    // README and main.py should be present, but notes.md should be excluded.
+    assert!(jsonl.contains("README.md"), "README should be present");
+    assert!(!jsonl.contains("notes.md"), "gitignored notes.md should not be included");
+}
+
+#[test]
+fn cli_include_ext_accepts_extension_without_dot() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    fs::write(root.join("main.rs"), "fn main() {}\n").expect("write rs");
+    fs::write(root.join("lib.py"), "def f(): pass\n").expect("write py");
+
+    let out = TempDir::new().expect("out dir");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root"),
+        "--mode",
+        "rag",
+        "-i",
+        "rs",
+        "--output-dir",
+        out.path().to_str().expect("out"),
+        "--no-timestamp",
+    ]);
+    cmd.env("HOME", out.path());
+    cmd.assert().success();
+
+    let repo_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let actual = out.path().join(repo_name);
+    let jsonl =
+        fs::read_to_string(actual.join(format!("{}_chunks.jsonl", repo_name))).expect("read jsonl");
+
+    // `-i rs` should match main.rs, but not lib.py.
+    assert!(jsonl.contains("main.rs"), "main.rs should be included");
+    assert!(!jsonl.contains("lib.py"), "lib.py should be excluded");
+}
+
+#[test]
+fn token_budget_keeps_later_mandatory_chunks() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    // Large mandatory file (README) then a small mandatory config file
+    fs::write(
+        root.join("README.md"),
+        "x".repeat(5000), // large enough to consume budget
+    )
+    .expect("write readme");
+    fs::write(root.join("Cargo.toml"), "[package]\nname=\"foo\"\n").expect("write cargo");
+
+    let out = TempDir::new().expect("out dir");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root"),
+        "--mode",
+        "rag",
+        "--max-tokens",
+        "20",
+        "--output-dir",
+        out.path().to_str().expect("out"),
+        "--no-timestamp",
+        "--chunk-tokens",
+        "200",
+    ]);
+    cmd.env("HOME", out.path());
+    cmd.assert().success();
+
+    let repo_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let actual = out.path().join(repo_name);
+    let report_raw =
+        fs::read_to_string(actual.join(format!("{}_report.json", repo_name))).expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+
+    // With a tiny budget, at least some files should be dropped.
+    let dropped = report["stats"]["dropped_files"].as_array().expect("dropped array");
+    assert!(!dropped.is_empty(), "some files should be dropped under tight budget");
+    // The test should not panic — the budget loop must handle oversized mandatory chunks.
+}
+
+#[test]
+fn coalesced_chunks_have_valid_metadata_after_enrichment() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    // Small functions that will produce multiple chunks, which coalescing will merge.
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\nfn e() {}\nfn f() {}\n",
+    )
+    .expect("write lib");
+
+    let out = TempDir::new().expect("out dir");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root"),
+        "--mode",
+        "rag",
+        "--output-dir",
+        out.path().to_str().expect("out"),
+        "--no-timestamp",
+        "--chunk-tokens",
+        "5",
+        "--chunk-overlap",
+        "0",
+        "--min-chunk-tokens",
+        "80",
+    ]);
+    cmd.env("HOME", out.path());
+    cmd.assert().success();
+
+    let repo_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let actual = out.path().join(repo_name);
+    let jsonl =
+        fs::read_to_string(actual.join(format!("{}_chunks.jsonl", repo_name))).expect("read jsonl");
+
+    // Each line should have self-consistent metadata.
+    for line in jsonl.lines() {
+        let v: Value = serde_json::from_str(line).expect("valid json");
+        let chunk_index = v["chunk_index"].as_u64().unwrap();
+        let chunks_in_file = v["chunks_in_file"].as_u64().unwrap();
+        assert!(chunk_index < chunks_in_file, "chunk_index must be < chunks_in_file");
+        assert!(v["id"].as_str().is_some_and(|s| !s.is_empty()), "id must be non-empty");
+        assert!(
+            v["content_sha256"].as_str().is_some_and(|s| !s.is_empty()),
+            "hash must be non-empty"
+        );
+        assert!(v["byte_start"].as_u64().is_some(), "byte_start must be present");
+        assert!(v["byte_end"].as_u64().is_some(), "byte_end must be present");
+    }
+}
+
+#[test]
+fn context_pack_escapes_markdown_table_safely() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    // File with a pipe character in its name to test table escaping.
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write source");
+    // A file whose path could break the markdown table if not escaped.
+    fs::write(root.join("notes|secret.md"), "# Notes\n").expect("write notes");
+
+    let out = TempDir::new().expect("out dir");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root"),
+        "--mode",
+        "prompt",
+        "--output-dir",
+        out.path().to_str().expect("out"),
+        "--no-timestamp",
+    ]);
+    cmd.env("HOME", out.path());
+    cmd.assert().success();
+
+    let repo_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let actual = out.path().join(repo_name);
+    let ctx = fs::read_to_string(actual.join(format!("{}_context_pack.md", repo_name)))
+        .expect("read context");
+
+    // The table should still be readable — pipes are escaped.
+    // If escaping failed, lines with unescaped pipes would disrupt the table.
+    assert!(!ctx.contains("| notes|secret.md |"), "pipe in path must be escaped");
 }

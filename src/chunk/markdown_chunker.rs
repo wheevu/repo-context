@@ -59,9 +59,13 @@ impl MarkdownChunker {
                 false
             };
 
-            if i != 0 && is_heading {
-                sections.push((section_start, i, current_heading.take()));
-                section_start = i;
+            if is_heading {
+                // Track the heading even when it is line 1, so the first section
+                // below gets tagged correctly.
+                if i > 0 {
+                    sections.push((section_start, i, current_heading.take()));
+                    section_start = i;
+                }
                 // Extract heading text: strip leading '#' characters and whitespace (Python line 238)
                 current_heading = Some(
                     trimmed.trim_start_matches('#').trim().chars().take(30).collect::<String>(),

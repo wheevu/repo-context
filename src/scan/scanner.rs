@@ -93,8 +93,13 @@ impl FileScanner {
     fn build_exclude_globset(&self) -> Result<GlobSet> {
         let mut builder = GlobSetBuilder::new();
         for pattern in &self.exclude_globs {
-            if let Ok(glob) = Glob::new(pattern) {
-                builder.add(glob);
+            match Glob::new(pattern) {
+                Ok(glob) => {
+                    builder.add(glob);
+                }
+                Err(e) => {
+                    tracing::warn!("Invalid exclude glob pattern '{}': {}", pattern, e);
+                }
             }
         }
         Ok(builder.build()?)
@@ -249,7 +254,7 @@ impl FileScanner {
 
             // Check if minified
             if self.skip_minified && is_likely_minified(path, self.max_line_length) {
-                self.stats.files_skipped_glob += 1;
+                self.stats.files_skipped_minified += 1;
                 self.record_path(
                     path,
                     rel_path,
@@ -369,6 +374,19 @@ impl FileScanner {
         let mut unseen = collect_regular_files(&self.root_path);
         unseen.sort_by(|a, b| a.0.cmp(&b.0));
 
+        // Guard against excessive work on large repos. The second walk is
+        // exhaustive by design to reconcile the inventory, but we cap the
+        // number of entries processed to avoid long stalls.
+        const MAX_UNSEEN: usize = 50_000;
+        if unseen.len() > MAX_UNSEEN {
+            tracing::warn!(
+                "Too many unseen files ({}), capping disposition inventory at {}",
+                unseen.len(),
+                MAX_UNSEEN
+            );
+            unseen.truncate(MAX_UNSEEN);
+        }
+
         for (rel_path, path) in unseen {
             if seen.contains(&rel_path) {
                 continue;
@@ -378,15 +396,29 @@ impl FileScanner {
             if let Some(size) = size {
                 self.stats.total_bytes_discovered += size;
             }
-            let reason = if is_excluded_noise_path(&rel_path) {
-                FileDispositionReason::ExcludedNoiseDir
+            if is_excluded_noise_path(&rel_path) {
+                self.record_path(
+                    &path,
+                    rel_path.clone(),
+                    FileDispositionReason::ExcludedNoiseDir,
+                    size,
+                );
             } else if self.respect_gitignore {
                 self.stats.files_skipped_gitignore += 1;
-                FileDispositionReason::SkippedGitignore
+                self.record_path(
+                    &path,
+                    rel_path.clone(),
+                    FileDispositionReason::SkippedGitignore,
+                    size,
+                );
             } else {
-                FileDispositionReason::ExcludedNoiseDir
-            };
-            self.record_path(&path, rel_path.clone(), reason, size);
+                self.record_path(
+                    &path,
+                    rel_path.clone(),
+                    FileDispositionReason::ExcludedNoiseDir,
+                    size,
+                );
+            }
             seen.insert(rel_path);
         }
     }

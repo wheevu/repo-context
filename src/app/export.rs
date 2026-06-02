@@ -9,7 +9,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::chunk::{chunk_content, coalesce_small_chunks_with_max};
+use crate::chunk::{chunk_content, coalesce_small_chunks_with_max, enrich_chunks};
 use crate::domain::{
     Chunk, Config, FileDisposition, FileDispositionReason, FileInfo, OutputMode, RedactionMode,
     ScanStats,
@@ -24,10 +24,12 @@ use crate::scan::tree::generate_tree;
 use crate::utils::{estimate_tokens, read_file_safe};
 
 /// Options controlling export runtime behavior.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ExportExecutionOptions {
     /// Whether to include timestamp fields in generated artifacts.
     pub include_timestamp: bool,
+    /// Optional explicit config path for remote-repo config reload.
+    pub explicit_config_path: Option<PathBuf>,
 }
 
 /// Result summary from an export execution.
@@ -38,14 +40,26 @@ pub struct ExportOutcome {
     pub output_files: Vec<String>,
 }
 
-pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<ExportOutcome> {
+pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<ExportOutcome> {
     let started = Instant::now();
+    let was_remote = config.repo_url.is_some();
     let repo_ctx = fetch_repository(
         config.path.as_deref(),
         config.repo_url.as_deref(),
         config.ref_.as_deref(),
     )?;
     let root_path = repo_ctx.root_path.clone();
+
+    // When the export target is a remote repository, reload the repo's own
+    // config (e.g. repo-context.toml) from the fetched root.  Values set via
+    // CLI flags or the caller's own config file are preserved.
+    if was_remote {
+        crate::config::merge_repo_config(
+            &mut config,
+            &root_path,
+            options.explicit_config_path.as_deref(),
+        );
+    }
 
     let mut scanner = FileScanner::new(root_path.clone())
         .max_file_bytes(config.max_file_bytes)
@@ -134,7 +148,7 @@ pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<Export
 
     let repo_name = repo_name_for_output(&root_path, config.repo_url.as_deref());
     let module_basename = module_run.as_ref().map(|module| module.entry_basename.as_str());
-    let output_dir = resolve_output_dir(&repo_name, module_basename);
+    let output_dir = resolve_output_dir(&config.output_dir, &repo_name, module_basename);
     fs::create_dir_all(&output_dir)?;
 
     let output_prefix = module_basename
@@ -279,6 +293,12 @@ fn process_file(
     let mut chunks =
         coalesce_small_chunks_with_max(raw_chunks, config.min_chunk_tokens, config.chunk_tokens);
 
+    // Re-enrich after coalescing to correct chunk_index, chunks_in_file,
+    // byte offsets, content_sha256, file_sha256, and file_id.
+    if !chunks.is_empty() && !should_prompt_summary_only(file) {
+        enrich_chunks(&mut chunks, file, &content);
+    }
+
     for chunk in &mut chunks {
         chunk.token_estimate = estimate_tokens(&chunk.content);
     }
@@ -300,7 +320,8 @@ fn apply_file_byte_budget(
     let mut total = 0_u64;
 
     for (idx, file) in ranked_files.iter().enumerate() {
-        if total + file.size_bytes > max_total_bytes {
+        let next_total = total.saturating_add(file.size_bytes);
+        if next_total > max_total_bytes {
             for remaining in &ranked_files[idx..] {
                 stats.files_dropped_budget += 1;
                 set_disposition_reason(
@@ -317,7 +338,7 @@ fn apply_file_byte_budget(
             break;
         }
 
-        total += file.size_bytes;
+        total = next_total;
         selected.push(file.clone());
     }
 
@@ -349,8 +370,8 @@ fn apply_chunk_token_budget(
 
     let mut deferred = Vec::new();
     for chunk in chunks.iter().filter(|c| is_mandatory_chunk(c)) {
-        if used + chunk.token_estimate > limit {
-            break;
+        if used.saturating_add(chunk.token_estimate) > limit {
+            continue;
         }
         used += chunk.token_estimate;
         kept.push(chunk.clone());
@@ -369,7 +390,7 @@ fn apply_chunk_token_budget(
         }
     }
     for chunk in deferred {
-        if used + chunk.token_estimate > limit {
+        if used.saturating_add(chunk.token_estimate) > limit {
             dropped_paths.insert(chunk.path.clone());
             continue;
         }
@@ -530,16 +551,9 @@ fn build_redactor(mode: RedactionMode, cfg: &crate::domain::RedactionConfig) -> 
     }
 }
 
-fn resolve_output_dir(repo_name: &str, module_basename: Option<&str>) -> PathBuf {
-    let repo_dir = home_rc_output_dir().join(repo_name);
+fn resolve_output_dir(base_dir: &Path, repo_name: &str, module_basename: Option<&str>) -> PathBuf {
+    let repo_dir = base_dir.join(repo_name);
     module_basename.map(|entry| repo_dir.join(format!("module_{entry}"))).unwrap_or(repo_dir)
-}
-
-fn home_rc_output_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("~"))
-        .join("rc-output")
 }
 
 fn repo_name_for_output(root_path: &Path, repo_url: Option<&str>) -> String {

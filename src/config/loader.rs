@@ -113,6 +113,9 @@ fn parse_toml_config(content: &str, config_file: &Path) -> Result<Config> {
 /// Parse YAML config, supporting nested repo-context or r2p sections.
 ///
 /// Matches Python's _parse_yaml behavior (lines 295-300).
+///
+/// NOTE: serde_yaml 0.9 is deprecated (crates.io shows 0.9.34+deprecated).
+/// When migrating, consider serde_yaml_ng (maintained fork) or saphyr.
 fn parse_yaml_config(content: &str, config_file: &Path) -> Result<Config> {
     // Parse to generic value first
     let raw: serde_yaml::Value = serde_yaml::from_str(content)

@@ -1,7 +1,7 @@
 //! Context pack Markdown rendering
 
 use crate::domain::{Chunk, FileDisposition, FileInfo, ScanStats};
-use crate::utils::{format_with_commas, read_file_safe};
+use crate::utils::format_with_commas;
 use chrono::Utc;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -117,10 +117,13 @@ pub fn render_context_pack(
 
     // README excerpt — find the highest-priority readme file and show first 15 meaningful lines.
     // Matches Python renderer.py lines 170-190.
+    // Uses already-processed (redacted) chunks to avoid re-reading raw source from disk.
     if let Some(readme) = files.iter().find(|f| f.is_readme) {
-        if let Ok((content, _)) = read_file_safe(&readme.path, Some(4000), None) {
+        let readme_chunks: Vec<&Chunk> =
+            chunks.iter().filter(|c| c.path == readme.relative_path).collect();
+        if let Some(first_chunk) = readme_chunks.first() {
+            let content = &first_chunk.content;
             let readme_lines: Vec<&str> = content.lines().collect();
-            let total_readme_lines = readme_lines.len();
             let mut excerpt_lines: Vec<&str> = Vec::new();
             let mut in_content = false;
             for line in readme_lines.iter().take(50) {
@@ -143,9 +146,6 @@ pub fn render_context_pack(
             if !excerpt_lines.is_empty() {
                 let excerpt = excerpt_lines.join("\n");
                 out.push_str(&format!("\n**README Excerpt:**\n\n{}\n", excerpt));
-                if total_readme_lines > 50 {
-                    out.push_str("\n*[README truncated...]*");
-                }
             }
         }
     }
@@ -300,9 +300,10 @@ pub fn render_context_pack(
                     notes.join(" | ")
                 ));
             }
-            out.push_str(&format!("```{}\n", chunk.language));
+            out.push_str(&format!("```{}\n", escape_fence_lang(&chunk.language)));
             let trimmed = chunk.content.trim_end();
             out.push_str(trimmed);
+            // Escape any trailing backtick sequences in content to prevent fence-breaking.
             out.push('\n');
             out.push_str("```\n\n");
         }
@@ -317,6 +318,19 @@ fn capitalize(s: &str) -> String {
         None => String::new(),
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
+}
+
+/// Escape Markdown table cell content to prevent formatting corruption.
+fn escape_table_cell(s: &str) -> String {
+    s.replace('|', "\\|").replace('\n', " ").replace('\r', "")
+}
+
+/// Sanitize a language identifier for use in a Markdown code fence.
+fn escape_fence_lang(lang: &str) -> String {
+    lang.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '+')
+        .take(20)
+        .collect()
 }
 
 fn render_inventory(
@@ -357,9 +371,9 @@ fn render_inventory(
     for d in dispositions.iter().take(limit) {
         out.push_str(&format!(
             "| `{}` | {} | {} | {} | {} | {}/{}/{} |\n",
-            d.path,
-            d.language,
-            d.notes.as_deref().unwrap_or(""),
+            escape_table_cell(&d.path),
+            escape_table_cell(&d.language),
+            escape_table_cell(d.notes.as_deref().unwrap_or("")),
             d.priority.map(|p| format!("{p:.3}")).unwrap_or_default(),
             d.token_estimate.map(|t| t.to_string()).unwrap_or_default(),
             if d.included_in_prompt { "prompt" } else { "-" },

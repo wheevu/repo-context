@@ -2,9 +2,10 @@
 
 //! CLI argument merging with config.
 
+use crate::config::loader::load_config;
 use crate::domain::{Config, OutputMode, RedactionMode};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// CLI-provided overrides for configuration values.
 #[derive(Debug, Default, Clone)]
@@ -96,6 +97,95 @@ pub fn merge_cli_with_config(mut base_config: Config, cli: CliOverrides) -> Conf
     }
 
     base_config
+}
+
+/// Load config from a repo root and merge it into the given `config`,
+/// but only for fields that are still at their default values.  This
+/// preserves any values explicitly set via CLI flags or the caller's
+/// own config file.
+pub fn merge_repo_config(
+    config: &mut Config,
+    repo_root: &Path,
+    explicit_config_path: Option<&Path>,
+) {
+    let Ok(repo_config) = load_config(repo_root, explicit_config_path) else {
+        return;
+    };
+
+    let defaults = Config::default();
+
+    // Only apply repo values when the current value matches the default.
+    if config.include_extensions == defaults.include_extensions {
+        config.include_extensions = repo_config.include_extensions;
+    }
+    if config.exclude_globs == defaults.exclude_globs {
+        config.exclude_globs = repo_config.exclude_globs;
+    }
+    if config.max_file_bytes == defaults.max_file_bytes {
+        config.max_file_bytes = repo_config.max_file_bytes;
+    }
+    if config.max_total_bytes == defaults.max_total_bytes {
+        config.max_total_bytes = repo_config.max_total_bytes;
+    }
+    if config.respect_gitignore == defaults.respect_gitignore
+        && repo_config.respect_gitignore != defaults.respect_gitignore
+    {
+        config.respect_gitignore = repo_config.respect_gitignore;
+    }
+    if config.follow_symlinks == defaults.follow_symlinks
+        && repo_config.follow_symlinks != defaults.follow_symlinks
+    {
+        config.follow_symlinks = repo_config.follow_symlinks;
+    }
+    if config.skip_minified == defaults.skip_minified
+        && repo_config.skip_minified != defaults.skip_minified
+    {
+        config.skip_minified = repo_config.skip_minified;
+    }
+    if config.max_tokens.is_none() && repo_config.max_tokens.is_some() {
+        config.max_tokens = repo_config.max_tokens;
+    }
+    if config.chunk_tokens == defaults.chunk_tokens {
+        config.chunk_tokens = repo_config.chunk_tokens;
+    }
+    if config.chunk_overlap == defaults.chunk_overlap {
+        config.chunk_overlap = repo_config.chunk_overlap;
+    }
+    if config.min_chunk_tokens == defaults.min_chunk_tokens {
+        config.min_chunk_tokens = repo_config.min_chunk_tokens;
+    }
+    if config.mode == defaults.mode {
+        config.mode = repo_config.mode;
+    }
+    if config.output_dir == defaults.output_dir {
+        config.output_dir = repo_config.output_dir;
+    }
+    if config.tree_depth == defaults.tree_depth {
+        config.tree_depth = repo_config.tree_depth;
+    }
+    if config.redact_secrets == defaults.redact_secrets
+        && repo_config.redact_secrets != defaults.redact_secrets
+    {
+        config.redact_secrets = repo_config.redact_secrets;
+    }
+    if config.redaction_mode == defaults.redaction_mode {
+        config.redaction_mode = repo_config.redaction_mode;
+    }
+    if config.ranking_weights.readme == defaults.ranking_weights.readme {
+        config.ranking_weights = repo_config.ranking_weights;
+    }
+    if config.redaction == crate::domain::RedactionConfig::default() {
+        config.redaction = repo_config.redaction;
+    }
+    if config.module.module_roots.is_empty() {
+        config.module.module_roots = repo_config.module.module_roots;
+    }
+    if config.module.css_files.is_empty() {
+        config.module.css_files = repo_config.module.css_files;
+    }
+    if config.full_inventory == defaults.full_inventory {
+        config.full_inventory = repo_config.full_inventory;
+    }
 }
 
 #[cfg(test)]

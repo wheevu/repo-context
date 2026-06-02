@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Redaction configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RedactionConfig {
     #[serde(default)]
     pub allowlist_patterns: Vec<String>,
@@ -24,7 +24,7 @@ pub struct RedactionConfig {
 }
 
 /// One custom redaction rule loaded from config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CustomRedactionRule {
     pub name: Option<String>,
     pub pattern: String,
@@ -33,7 +33,7 @@ pub struct CustomRedactionRule {
 }
 
 /// Entropy detection settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntropyConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -44,7 +44,7 @@ pub struct EntropyConfig {
 }
 
 /// Paranoid mode settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParanoidConfig {
     #[serde(default)]
     pub enabled: bool,

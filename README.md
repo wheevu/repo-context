@@ -14,8 +14,7 @@
 
 It exports clean, predictable prompt and retrieval inputs from local or remote codebases.
 
-<details>
-<summary>Performance</summary>
+## Performance
 
 Originally built in Python, later rewritten in Rust.
 
@@ -27,8 +26,6 @@ Local benchmarks showed **~82–83% lower export time** (**~5.5–5.8× faster**
 | `dora-rs` | 2.079s | 0.357s | 5.82× |
 
 Benchmarked with `hyperfine` using the same export workflow and `--no-timestamp`.
-
-</details>
 
 ## Commands
 
@@ -79,7 +76,9 @@ Inspect repository only
 ```bash
 cargo run -- info .
 ```
-##  Examples
+<details>
+<summary>Examples</summary>
+
 Prompt + RAG outputs (default, maximum useful coverage)
 ```
 repo-context export --path .
@@ -113,6 +112,9 @@ Disable secret redaction
 ```
 repo-context export --path . --no-redact
 ```
+
+</details>
+
 ## Development
 ```
 cargo fmt

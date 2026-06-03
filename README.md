@@ -14,7 +14,8 @@
 
 It exports clean, predictable prompt and retrieval inputs from local or remote codebases.
 
-## Performance
+<details>
+<summary>Performance</summary>
 
 Originally built in Python, later rewritten in Rust.
 
@@ -26,6 +27,8 @@ Local benchmarks showed **~82–83% lower export time** (**~5.5–5.8× faster**
 | `dora-rs` | 2.079s | 0.357s | 5.82× |
 
 Benchmarked with `hyperfine` using the same export workflow and `--no-timestamp`.
+
+</details>
 
 ## Commands
 
@@ -46,9 +49,10 @@ By mode:
 - `rag` → chunks + report
 - `both` → context pack + chunks + report
 
-Interactive exports can run in module mode. Pick an entry point to emit only its reachable dependency graph, plus scoped CSS when global styles are detected.
+Interactive exports can run in **focused mode**. Small repos show individual files; large repos show module groups. File focus includes the selected file plus its callers, dependencies, tests, and entry path. Module focus emits the entry's full dependency graph.
 
-## Export flow
+<details>
+<summary>Export flow</summary>
 
 1. fetch repository
 2. scan candidate files
@@ -56,6 +60,8 @@ Interactive exports can run in module mode. Pick an entry point to emit only its
 4. redact secrets by default
 5. chunk content
 6. render artifacts and report
+
+</details>
 
 ## Quick start
 
@@ -94,10 +100,14 @@ Reproducible output
 ```
 repo-context export --path . --no-timestamp
 ```
-Module-scoped output
+Focused export (interactive)
 ```
 repo-context export --path .
-# choose "Module", then select an entry point
+# choose "Focused", then pick a file or module
+```
+Focused export (non-interactive)
+```
+repo-context export --path . --scan-mode focused --focus-file src/main.rs
 ```
 Disable secret redaction
 ```

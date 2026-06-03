@@ -18,6 +18,8 @@ pub struct ImportGraph {
     pub edges: HashMap<PathBuf, Vec<PathBuf>>,
     /// Reverse import counts by absolute target path.
     pub incoming: HashMap<PathBuf, usize>,
+    /// Reverse edges: file → files that import it (callers).
+    pub reverse: HashMap<PathBuf, Vec<PathBuf>>,
 }
 
 /// Builds a static import graph over scanned files.
@@ -38,7 +40,8 @@ pub fn build(files: &[ScannedFile]) -> ImportGraph {
         let deps = dedup(imports_for(file, &content, &by_path, &rel_to_abs));
         for dep in deps {
             *graph.incoming.entry(dep.clone()).or_insert(0) += 1;
-            graph.edges.entry(source.clone()).or_default().push(dep);
+            graph.edges.entry(source.clone()).or_default().push(dep.clone());
+            graph.reverse.entry(dep).or_default().push(source.clone());
         }
         graph.edges.entry(source).or_default();
     }
@@ -47,6 +50,7 @@ pub fn build(files: &[ScannedFile]) -> ImportGraph {
 }
 
 /// Breadth-first traversal returning entry plus all transitive dependencies.
+/// Also returns all reverse callers reachable from the target (who imports it).
 #[must_use]
 pub fn traverse(graph: &ImportGraph, entry: &Path) -> Vec<PathBuf> {
     let start = normalize_abs(entry);
@@ -76,6 +80,100 @@ pub fn traverse(graph: &ImportGraph, entry: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Breadth-first reverse traversal: returns all files that directly or
+/// transitively import the given file (its callers).
+#[allow(dead_code)]
+#[must_use]
+pub fn reverse_reachable(graph: &ImportGraph, target: &Path) -> Vec<PathBuf> {
+    let start = normalize_abs(target);
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::new();
+    if let Some(callers) = graph.reverse.get(&start) {
+        for caller in callers {
+            queue.push_back(caller.clone());
+        }
+    }
+
+    while let Some(path) = queue.pop_front() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        out.push(path.clone());
+        if let Some(callers) = graph.reverse.get(&path) {
+            for caller in callers {
+                if !seen.contains(caller) {
+                    queue.push_back(caller.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Returns direct callers of a file (one hop reverse).
+#[must_use]
+pub fn direct_callers(graph: &ImportGraph, target: &Path) -> Vec<PathBuf> {
+    let start = normalize_abs(target);
+    graph.reverse.get(&start).cloned().unwrap_or_default()
+}
+
+/// Detects Rust crate-root candidates from scanned files.
+///
+/// Returns absolute paths to `src/main.rs`, `src/lib.rs`, and `src/bin/*.rs`.
+#[must_use]
+pub fn rust_crate_roots(root: &Path, files: &[ScannedFile]) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let by_rel: HashMap<&str, &PathBuf> =
+        files.iter().map(|f| (f.relative_path.as_str(), &f.path)).collect();
+
+    for candidate in &["src/main.rs", "src/lib.rs"] {
+        if let Some(path) = by_rel.get(*candidate) {
+            roots.push(normalize_abs(path));
+        }
+    }
+
+    // Also detect src/bin/*.rs for multi-binary crates.
+    let bin_rs = files.iter().filter(|f| {
+        f.relative_path.starts_with("src/bin/")
+            && f.extension.to_ascii_lowercase().as_str() == ".rs"
+            || f.extension.eq_ignore_ascii_case("rs")
+    });
+    for file in bin_rs {
+        roots.push(normalize_abs(&file.path));
+    }
+
+    // If no explicit crate root found, check Cargo.toml for [[bin]] entries.
+    if roots.is_empty() {
+        let cargo_toml = root.join("Cargo.toml");
+        if let Ok((content, _)) = read_file_safe(&cargo_toml, None, None) {
+            if let Ok(value) = toml::from_str::<toml::Value>(&content) {
+                if let Some(bins) = value.get("bin").and_then(|b| b.as_array()) {
+                    for bin in bins {
+                        if let Some(path) = bin.get("path").and_then(|p| p.as_str()) {
+                            let abs = normalize_abs(&root.join(path));
+                            if files.iter().any(|f| normalize_abs(&f.path) == abs) {
+                                roots.push(abs);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// Returns whether a path looks like a Rust crate root (main.rs or lib.rs at src/).
+#[must_use]
+pub fn is_rust_crate_root(path: &Path, root: &Path) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+    rel == "src/main.rs" || rel == "src/lib.rs" || rel.starts_with("src/bin/")
+}
+
 /// Returns shortest import depth for each reachable file.
 #[must_use]
 pub fn depths(graph: &ImportGraph, entry: &Path) -> HashMap<PathBuf, usize> {
@@ -102,10 +200,13 @@ fn imports_for(
     by_path: &HashMap<PathBuf, FileInfo>,
     rel_to_abs: &HashMap<String, PathBuf>,
 ) -> Vec<PathBuf> {
-    match file.extension.as_str() {
-        ".ts" | ".tsx" | ".js" | ".jsx" => js_imports(&file.path, content, by_path),
-        ".rs" => rust_imports(&file.path, content, by_path),
-        ".go" => go_imports(content, rel_to_abs),
+    let ext = file.extension.to_ascii_lowercase();
+    match ext.as_str() {
+        ".ts" | ".tsx" | ".js" | ".jsx" | "ts" | "tsx" | "js" | "jsx" => {
+            js_imports(&file.path, content, by_path)
+        }
+        ".rs" | "rs" => rust_imports(&file.path, content, by_path),
+        ".go" | "go" => go_imports(content, rel_to_abs),
         _ => Vec::new(),
     }
 }
@@ -123,22 +224,77 @@ fn js_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>) 
 fn rust_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let src_root = path.ancestors().find(|p| p.file_name().and_then(|n| n.to_str()) == Some("src"));
-    let mod_re = Regex::new(r#"(?m)^\s*(?:pub\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"#)
-        .expect("valid regex");
+
+    // Rust's file-module path conventions:
+    //   mod foo;    → foo.rs  or  foo/mod.rs
+    //   mod foo { } → children at foo/bar.rs or foo/bar/mod.rs
+    // Visibility and cfg guards are respected.
+    let mod_re = Regex::new(
+        r#"(?m)^\s*(?:pub(?:\s*\(\s*crate\s*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"#,
+    )
+    .expect("valid mod regex");
+    let path_attr_re = Regex::new(r#"#\[path\s*=\s*"([^"]+)"\]"#).expect("valid path attr regex");
+
+    // Extract #[path] attributes to map custom module file paths.
+    let path_attrs: HashMap<&str, &str> = path_attr_re
+        .captures_iter(content)
+        .filter_map(|cap| {
+            // Find the mod declaration that follows this attribute.
+            let pos = cap.get(0)?.end();
+            let rest = &content[pos..];
+            let mod_follow = Regex::new(
+                r#"\s*(?:pub(?:\s*\(\s*crate\s*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*[;{]"#,
+            )
+            .expect("valid mod follow regex");
+            mod_follow.captures(rest).map(|m| {
+                let name = m.get(1).unwrap().as_str();
+                (name, cap.get(1).unwrap().as_str())
+            })
+        })
+        .collect();
+
     for cap in mod_re.captures_iter(content) {
         if let Some(name) = cap.get(1) {
+            let name_str = name.as_str();
+
+            // Skip modules guarded by #[cfg(test)].
+            let match_start = cap.get(0).map(|m| m.start()).unwrap_or(0);
+            let prefix = &content[..match_start];
+            if is_cfg_test_guard(prefix) {
+                continue;
+            }
+
             let dir = path.parent().unwrap_or_else(|| Path::new(""));
-            for candidate in
-                [dir.join(format!("{}.rs", name.as_str())), dir.join(name.as_str()).join("mod.rs")]
-            {
+
+            if let Some(custom_path) = path_attrs.get(name_str) {
+                let candidate = dir.join(custom_path);
                 let candidate = normalize_abs(&candidate);
                 if by_path.contains_key(&candidate) {
+                    // Also check for nested children of the custom module.
+                    collect_nested_children(&candidate, by_path, &mut out);
+                    out.push(candidate);
+                }
+                continue;
+            }
+
+            // Standard Rust module resolution: foo.rs or foo/mod.rs.
+            for candidate in
+                &[dir.join(format!("{}.rs", name_str)), dir.join(name_str).join("mod.rs")]
+            {
+                let candidate = normalize_abs(candidate);
+                if by_path.contains_key(&candidate) {
+                    // If the module is a directory (foo/mod.rs), also resolve children
+                    // like foo/bar.rs or foo/bar/mod.rs.
+                    if candidate.file_name().and_then(|n| n.to_str()) == Some("mod.rs") {
+                        collect_nested_children(&candidate, by_path, &mut out);
+                    }
                     out.push(candidate);
                 }
             }
         }
     }
-    let use_re = Regex::new(r#"(?m)^\s*use\s+crate::([A-Za-z0-9_:]+)"#).expect("valid regex");
+
+    let use_re = Regex::new(r#"(?m)^\s*use\s+crate::([A-Za-z0-9_:]+)"#).expect("valid use regex");
     if let Some(root) = src_root {
         for cap in use_re.captures_iter(content) {
             if let Some(spec) = cap.get(1) {
@@ -146,9 +302,9 @@ fn rust_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>
                 for len in (1..=parts.len()).rev() {
                     let prefix = parts[..len].join("/");
                     for candidate in
-                        [root.join(format!("{prefix}.rs")), root.join(&prefix).join("mod.rs")]
+                        &[root.join(format!("{prefix}.rs")), root.join(&prefix).join("mod.rs")]
                     {
-                        let candidate = normalize_abs(&candidate);
+                        let candidate = normalize_abs(candidate);
                         if by_path.contains_key(&candidate) {
                             out.push(candidate);
                             break;
@@ -158,7 +314,81 @@ fn rust_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>
             }
         }
     }
+
+    // Also resolve use self:: and use super::
+    let self_super_re = Regex::new(r#"(?m)^\s*use\s+(self|super)::([A-Za-z0-9_:]+)"#)
+        .expect("valid self super regex");
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    for cap in self_super_re.captures_iter(content) {
+        if let Some(prefix_kind) = cap.get(1) {
+            if let Some(spec) = cap.get(2) {
+                let base = match prefix_kind.as_str() {
+                    "self" => parent.to_path_buf(),
+                    "super" => parent.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+                    _ => continue,
+                };
+                let parts: Vec<&str> = spec.as_str().split("::").collect();
+                let module_name = parts[0];
+                for candidate in
+                    &[base.join(format!("{module_name}.rs")), base.join(module_name).join("mod.rs")]
+                {
+                    let candidate = normalize_abs(candidate);
+                    if by_path.contains_key(&candidate) {
+                        out.push(candidate);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     dedup(out)
+}
+
+/// Checks whether the text immediately preceding a position contains
+/// a `#[cfg(test)]` attribute, meaning the declaration is test-only.
+fn is_cfg_test_guard(preceding_text: &str) -> bool {
+    let re = Regex::new(r#"#\[cfg\s*\(\s*test\s*\)\s*\]\s*$"#).expect("valid cfg test regex");
+    re.is_match(preceding_text)
+}
+
+/// Collects direct child modules of a directory-based module.
+/// For `src/foo/mod.rs`, this finds `src/foo/bar.rs` and `src/foo/bar/mod.rs`.
+///
+/// Resolution rule (RFC): `mod bar;` inside `foo/mod.rs` resolves to
+/// `foo/bar.rs` or `foo/bar/mod.rs`.
+fn collect_nested_children(
+    module_mod_rs: &Path,
+    by_path: &HashMap<PathBuf, FileInfo>,
+    out: &mut Vec<PathBuf>,
+) {
+    let Some(module_dir) = module_mod_rs.parent() else { return };
+    // Read the module file to find nested `mod` declarations.
+    let Ok((content, _)) = read_file_safe(module_mod_rs, None, None) else { return };
+    let mod_re = Regex::new(
+        r#"(?m)^\s*(?:pub(?:\s*\(\s*crate\s*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*[;{]"#,
+    )
+    .expect("valid nested mod regex");
+    for cap in mod_re.captures_iter(&content) {
+        if let Some(name) = cap.get(1) {
+            // Check for #[cfg(test)] guard on nested module.
+            let match_start = cap.get(0).map(|m| m.start()).unwrap_or(0);
+            let prefix = &content[..match_start];
+            if is_cfg_test_guard(prefix) {
+                continue;
+            }
+            let name_str = name.as_str();
+            for candidate in &[
+                module_dir.join(format!("{name_str}.rs")),
+                module_dir.join(name_str).join("mod.rs"),
+            ] {
+                let candidate = normalize_abs(candidate);
+                if by_path.contains_key(&candidate) {
+                    out.push(candidate.clone());
+                }
+            }
+        }
+    }
 }
 
 fn go_imports(content: &str, rel_to_abs: &HashMap<String, PathBuf>) -> Vec<PathBuf> {
@@ -244,12 +474,136 @@ mod tests {
         assert_eq!(traverse(&graph, &entry), vec![entry, dep, transitive]);
     }
 
+    #[test]
+    fn reverse_reachable_finds_all_callers() {
+        let main = PathBuf::from("/repo/src/main.rs");
+        let app = PathBuf::from("/repo/src/app.rs");
+        let combat = PathBuf::from("/repo/src/combat.rs");
+        let graph = ImportGraph {
+            files: HashMap::from([
+                (main.clone(), test_file(&main)),
+                (app.clone(), test_file(&app)),
+                (combat.clone(), test_file(&combat)),
+            ]),
+            edges: HashMap::from([
+                (main.clone(), vec![app.clone()]),
+                (app.clone(), vec![combat.clone()]),
+                (combat.clone(), Vec::new()),
+            ]),
+            reverse: HashMap::from([
+                (app.clone(), vec![main.clone()]),
+                (combat.clone(), vec![app.clone()]),
+            ]),
+            ..ImportGraph::default()
+        };
+
+        let callers = reverse_reachable(&graph, &combat);
+        assert_eq!(callers.len(), 2);
+        assert!(callers.contains(&app));
+        assert!(callers.contains(&main));
+    }
+
+    #[test]
+    fn direct_callers_returns_one_hop() {
+        let combat = PathBuf::from("/repo/src/combat.rs");
+        let app = PathBuf::from("/repo/src/app.rs");
+        let graph = ImportGraph {
+            files: HashMap::from([
+                (combat.clone(), test_file(&combat)),
+                (app.clone(), test_file(&app)),
+            ]),
+            edges: HashMap::from([
+                (app.clone(), vec![combat.clone()]),
+                (combat.clone(), Vec::new()),
+            ]),
+            reverse: HashMap::from([(combat.clone(), vec![app.clone()])]),
+            ..ImportGraph::default()
+        };
+
+        let callers = direct_callers(&graph, &combat);
+        assert_eq!(callers, vec![app.clone()]);
+    }
+
+    #[test]
+    fn rust_mod_declarations_resolve_to_files() {
+        use std::fs;
+        use tempfile::TempDir;
+        let tmp = TempDir::new().expect("tmp");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+
+        let main_rs = root.join("src/main.rs");
+        let app_rs = root.join("src/app.rs");
+        let combat_rs = root.join("src/combat.rs");
+        fs::write(&main_rs, "mod app;\nmod combat;\nfn main() {}\n").expect("write main");
+        fs::write(&app_rs, "use crate::combat;\npub fn run() {}\n").expect("write app");
+        fs::write(&combat_rs, "pub fn resolve() -> i32 { 1 }\n").expect("write combat");
+
+        let files: Vec<FileInfo> =
+            [&main_rs, &app_rs, &combat_rs].iter().map(|p| test_file_abs(p)).collect();
+
+        let graph = build(&files);
+
+        let main_abs = normalize_abs(&main_rs);
+        let app_abs = normalize_abs(&app_rs);
+        let combat_abs = normalize_abs(&combat_rs);
+
+        let deps = graph.edges.get(&main_abs).expect("main should have edges");
+        assert!(deps.contains(&app_abs), "main should import app via mod app;");
+        assert!(deps.contains(&combat_abs), "main should import combat via mod combat;");
+
+        // Traverse from main should include all three.
+        let reachable = traverse(&graph, &main_abs);
+        assert_eq!(reachable.len(), 3);
+        assert!(reachable.contains(&main_abs));
+        assert!(reachable.contains(&app_abs));
+        assert!(reachable.contains(&combat_abs));
+    }
+
+    #[test]
+    fn rust_cfg_test_modules_are_skipped() {
+        use std::fs;
+        use tempfile::TempDir;
+        let tmp = TempDir::new().expect("tmp");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+
+        let main_rs = root.join("src/main.rs");
+        let app_rs = root.join("src/app.rs");
+        let tests_rs = root.join("src/tests.rs");
+        fs::write(&main_rs, "mod app;\n#[cfg(test)]\nmod tests;\nfn main() {}\n")
+            .expect("write main");
+        fs::write(&app_rs, "pub fn run() {}\n").expect("write app");
+        fs::write(&tests_rs, "#[test]\nfn test() {}\n").expect("write tests");
+
+        let files: Vec<FileInfo> =
+            [&main_rs, &app_rs, &tests_rs].iter().map(|p| test_file_abs(p)).collect();
+
+        let graph = build(&files);
+
+        let main_abs = normalize_abs(&main_rs);
+        let app_abs = normalize_abs(&app_rs);
+        let tests_abs = normalize_abs(&tests_rs);
+
+        let deps = graph.edges.get(&main_abs).expect("main should have edges");
+        assert!(deps.contains(&app_abs), "main should import app");
+        assert!(!deps.contains(&tests_abs), "main should NOT import tests (cfg(test) guard)");
+    }
+
     fn test_file(path: &Path) -> FileInfo {
+        test_file_abs(path)
+    }
+
+    fn test_file_abs(path: &Path) -> FileInfo {
         FileInfo {
             path: path.to_path_buf(),
-            relative_path: path.to_string_lossy().to_string(),
+            relative_path: path.to_string_lossy().replace('\\', "/"),
             size_bytes: 0,
-            extension: path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string(),
+            extension: path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| format!(".{e}"))
+                .unwrap_or_default(),
             language: String::new(),
             id: String::new(),
             priority: 0.0,

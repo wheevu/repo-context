@@ -15,7 +15,7 @@ use crate::domain::{
     ScanStats,
 };
 use crate::fetch::fetch_repository;
-use crate::module::picker::ScanMode;
+use crate::module::focus_picker::ScanMode;
 use crate::rank::rank_files_with_manifest;
 use crate::redact::Redactor;
 use crate::render::{render_context_pack, render_jsonl, write_report, ReportOptions};
@@ -30,6 +30,10 @@ pub struct ExportExecutionOptions {
     pub include_timestamp: bool,
     /// Optional explicit config path for remote-repo config reload.
     pub explicit_config_path: Option<PathBuf>,
+    /// Override scan mode (None = interactive on TTY, full on pipe).
+    pub scan_mode: Option<ScanMode>,
+    /// For focused mode: pre-select this file or module entry (non-interactive).
+    pub focus_path: Option<PathBuf>,
 }
 
 /// Result summary from an export execution.
@@ -73,16 +77,33 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
     let mut stats = scanner.stats().clone();
     let mut dispositions = scanner.dispositions().to_vec();
 
-    let scan_mode = if std::io::stdout().is_terminal() {
-        crate::module::picker::pick_scan_mode()?
-    } else {
-        ScanMode::Full
+    let scan_mode = match options.scan_mode {
+        Some(mode) => mode,
+        None => {
+            if std::io::stdout().is_terminal() {
+                crate::module::focus_picker::pick_scan_mode()?
+            } else {
+                ScanMode::Full
+            }
+        }
     };
 
     let (ranked_files, manifest_info) =
         rank_files_with_manifest(&root_path, scanned_files, config.ranking_weights.clone())?;
-    let module_run = if matches!(scan_mode, ScanMode::Module) {
-        Some(crate::module::run(&root_path, &ranked_files, &config)?)
+    let module_run = if matches!(scan_mode, ScanMode::Focused) {
+        if let Some(ref focus_path) = options.focus_path {
+            // Non-interactive: use the provided focus path.
+            let focus_abs = root_path.join(focus_path);
+            Some(crate::module::run_focused_with_file(
+                &root_path,
+                &ranked_files,
+                &config,
+                &focus_abs,
+            )?)
+        } else {
+            // Interactive focused flow.
+            crate::module::run_focused(&root_path, &ranked_files, &config)?
+        }
     } else {
         None
     };
@@ -152,7 +173,7 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
     fs::create_dir_all(&output_dir)?;
 
     let output_prefix = module_basename
-        .map(|entry| format!("{repo_name}_module_{entry}"))
+        .map(|entry| format!("{repo_name}_focus_{entry}"))
         .unwrap_or_else(|| repo_name.clone());
     let context_path = output_dir.join(format!("{}_context_pack.md", output_prefix));
     let jsonl_path = output_dir.join(format!("{}_chunks.jsonl", output_prefix));
@@ -223,6 +244,42 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
         "note": "Report includes deterministic stats and explicit supported fields only.",
     });
 
+    // Build focus metadata for the report when in focused mode.
+    let focus_json = module_run.as_ref().and_then(|m| m.focus_scope.as_ref()).map(|scope| {
+        let kind = match scope.kind {
+            crate::module::FocusKind::File => "file",
+            crate::module::FocusKind::Module => "module",
+        };
+        let selected_rel = scope
+            .selected
+            .strip_prefix(&root_path)
+            .unwrap_or(&scope.selected)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let included_reasons: serde_json::Map<String, Value> = scope
+            .files
+            .iter()
+            .map(|(f, reason)| {
+                let reason_str = match reason {
+                    crate::module::InclusionReason::Selected => "selected",
+                    crate::module::InclusionReason::OutboundDependency => "outbound_dependency",
+                    crate::module::InclusionReason::Caller => "caller",
+                    crate::module::InclusionReason::RelatedTest => "related_test",
+                    crate::module::InclusionReason::EntryPath => "entry_path",
+                    crate::module::InclusionReason::CrateFallback => "crate_fallback",
+                    crate::module::InclusionReason::RuntimeModule => "runtime_module",
+                    crate::module::InclusionReason::CssScope => "css_scope",
+                };
+                (f.relative_path.clone(), Value::String(reason_str.to_string()))
+            })
+            .collect();
+        json!({
+            "kind": kind,
+            "selected": selected_rel,
+            "included_reasons": included_reasons,
+        })
+    });
+
     write_report(
         &report_path,
         &stats,
@@ -233,6 +290,7 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
         ReportOptions {
             include_timestamp: options.include_timestamp,
             provenance: Some(&provenance),
+            focus: focus_json.as_ref(),
         },
     )?;
     output_files.push(report_path.display().to_string());
@@ -553,7 +611,7 @@ fn build_redactor(mode: RedactionMode, cfg: &crate::domain::RedactionConfig) -> 
 
 fn resolve_output_dir(base_dir: &Path, repo_name: &str, module_basename: Option<&str>) -> PathBuf {
     let repo_dir = base_dir.join(repo_name);
-    module_basename.map(|entry| repo_dir.join(format!("module_{entry}"))).unwrap_or(repo_dir)
+    module_basename.map(|entry| repo_dir.join(format!("focus_{entry}"))).unwrap_or(repo_dir)
 }
 
 fn repo_name_for_output(root_path: &Path, repo_url: Option<&str>) -> String {

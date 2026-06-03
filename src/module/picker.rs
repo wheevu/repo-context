@@ -1,4 +1,8 @@
 //! Interactive pickers for module mode.
+//!
+//! Kept for backward compatibility. New code should use `focus_picker`.
+
+#![allow(dead_code)]
 
 use anyhow::Result;
 use dialoguer::{theme::ColorfulTheme, FuzzySelect, Select};

@@ -7,12 +7,14 @@ use serde_json::{json, Map, Value};
 use std::path::Path;
 
 /// Options for report generation.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct ReportOptions<'a> {
     /// Whether to include a timestamp in the report
     pub include_timestamp: bool,
     /// Optional provenance information
     pub provenance: Option<&'a Value>,
+    /// Optional focus metadata (focused export scope info)
+    pub focus: Option<&'a Value>,
 }
 
 /// Writes a JSON report to the specified path.
@@ -71,6 +73,9 @@ pub fn write_report(
     report.insert("config".to_string(), config.clone());
     if let Some(provenance) = options.provenance {
         report.insert("provenance".to_string(), provenance.clone());
+    }
+    if let Some(focus) = options.focus {
+        report.insert("focus".to_string(), focus.clone());
     }
     report.insert("output_files".to_string(), serde_json::to_value(sorted_output_files)?);
     if !file_manifest.is_empty() {
@@ -157,7 +162,7 @@ mod tests {
             &["out/chunks.jsonl".to_string()],
             &json!({"mode":"rag"}),
             &[],
-            ReportOptions { include_timestamp: false, provenance: None },
+            ReportOptions { include_timestamp: false, provenance: None, focus: None },
         )
         .expect("write report");
 

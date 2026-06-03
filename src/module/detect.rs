@@ -1,4 +1,8 @@
 //! Entry point detection for module mode.
+//!
+//! Kept for backward compatibility. New code should use `focus::discover_candidates`.
+
+#![allow(dead_code)]
 
 use crate::domain::{FileInfo, ModuleConfig};
 use crate::module::graph::ImportGraph;

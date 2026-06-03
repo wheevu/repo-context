@@ -8,6 +8,7 @@ use super::utils::parse_csv;
 use crate::app::export::{execute, ExportExecutionOptions};
 use crate::config::{load_config, merge_cli_with_config, CliOverrides};
 use crate::domain::{OutputMode, RedactionMode};
+use crate::module::focus_picker::ScanMode;
 
 #[derive(Args)]
 pub struct ExportArgs {
@@ -94,6 +95,15 @@ pub struct ExportArgs {
     /// Redaction mode: fast|standard|paranoid|structure-safe.
     #[arg(long, value_name = "MODE")]
     pub redaction_mode: Option<String>,
+
+    /// Scan mode: full|focused. Overrides interactive prompt.
+    #[arg(long, value_name = "MODE")]
+    pub scan_mode: Option<String>,
+
+    /// Focus file or module entry for non-interactive focused export.
+    /// Example: --focus-file src/main.rs
+    #[arg(long, value_name = "PATH")]
+    pub focus_file: Option<PathBuf>,
 }
 
 pub fn run(args: ExportArgs) -> Result<()> {
@@ -145,11 +155,15 @@ pub fn run(args: ExportArgs) -> Result<()> {
         anyhow::bail!("Either --path or --repo must be specified");
     }
 
+    let scan_mode = parse_scan_mode(args.scan_mode.as_deref())?;
+
     let outcome = execute(
         merged,
         ExportExecutionOptions {
             include_timestamp: !args.no_timestamp,
             explicit_config_path: args.config.clone(),
+            scan_mode,
+            focus_path: args.focus_file.clone(),
         },
     )?;
 
@@ -189,6 +203,17 @@ fn parse_redaction_mode(mode: Option<&str>) -> Result<RedactionMode> {
         other => anyhow::bail!(
             "Invalid redaction mode '{other}'. Expected one of: fast, standard, paranoid, structure-safe"
         ),
+    }
+}
+
+fn parse_scan_mode(mode: Option<&str>) -> Result<Option<ScanMode>> {
+    match mode {
+        None => Ok(None),
+        Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "full" | "f" => Ok(Some(ScanMode::Full)),
+            "focused" | "focus" => Ok(Some(ScanMode::Focused)),
+            other => anyhow::bail!("Invalid scan mode '{other}'. Expected one of: full, focused"),
+        },
     }
 }
 

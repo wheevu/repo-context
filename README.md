@@ -14,6 +14,67 @@
 
 It exports clean, predictable prompt and retrieval inputs from local or remote codebases.
 
+## Demo
+
+Full scope against `tokio-rs/tokio`:
+
+```bash
+repo-context export --repo https://github.com/tokio-rs/tokio --scan-mode full --no-timestamp
+```
+
+```text
+Export complete:
+  root: /private/var/.../repo-context-...
+  files: 846
+  chunks: 2877
+  tokens: 1508244
+  wrote: ~/rc-output/tokio/tokio_context_pack.md
+  wrote: ~/rc-output/tokio/tokio_chunks.jsonl
+  wrote: ~/rc-output/tokio/tokio_report.json
+```
+
+Focused module (`tokio/src/lib.rs`):
+
+```bash
+repo-context export --repo https://github.com/tokio-rs/tokio --scan-mode focused --focus-file tokio/src/lib.rs --no-timestamp
+```
+
+```text
+Export complete:
+  root: /private/var/.../repo-context-...
+  files: 314
+  chunks: 1400
+  tokens: 809090
+  wrote: ~/rc-output/tokio/focus_lib/tokio_focus_lib_context_pack.md
+  wrote: ~/rc-output/tokio/focus_lib/tokio_focus_lib_chunks.jsonl
+  wrote: ~/rc-output/tokio/focus_lib/tokio_focus_lib_report.json
+```
+
+The focused context pack starts with the selected module, then follows the relevant Rust graph:
+
+````markdown
+### `tokio/src/lib.rs`
+*Priority: 100% | Language: rust | Chunks: 9*
+
+```rust
+cfg_rt! {
+    pub mod runtime;
+}
+```
+
+### `tokio/src/runtime/runtime.rs`
+*Priority: 90% | Language: rust | Chunks: 8*
+
+```rust
+use crate::task::JoinHandle;
+
+/// The Tokio runtime.
+///
+/// The runtime provides an I/O driver, task scheduler, [timer], and
+/// blocking pool, necessary for running asynchronous tasks.
+```
+````
+
 ## Performance
 
 Originally built in Python, later rewritten in Rust.

@@ -120,28 +120,16 @@ pub fn direct_callers(graph: &ImportGraph, target: &Path) -> Vec<PathBuf> {
 
 /// Detects Rust crate-root candidates from scanned files.
 ///
-/// Returns absolute paths to `src/main.rs`, `src/lib.rs`, and `src/bin/*.rs`.
+/// Returns absolute paths to `src/main.rs`, `src/lib.rs`, and `src/bin/*.rs`
+/// for the repository root and nested workspace crates.
 #[must_use]
 pub fn rust_crate_roots(root: &Path, files: &[ScannedFile]) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    let by_rel: HashMap<&str, &PathBuf> =
-        files.iter().map(|f| (f.relative_path.as_str(), &f.path)).collect();
-
-    for candidate in &["src/main.rs", "src/lib.rs"] {
-        if let Some(path) = by_rel.get(*candidate) {
-            roots.push(normalize_abs(path));
-        }
-    }
-
-    // Also detect src/bin/*.rs for multi-binary crates.
-    let bin_rs = files.iter().filter(|f| {
-        f.relative_path.starts_with("src/bin/")
-            && f.extension.to_ascii_lowercase().as_str() == ".rs"
-            || f.extension.eq_ignore_ascii_case("rs")
-    });
-    for file in bin_rs {
-        roots.push(normalize_abs(&file.path));
-    }
+    let mut roots: Vec<PathBuf> = files
+        .iter()
+        .filter(|file| is_rust_source(file))
+        .filter(|file| is_rust_crate_root(&file.path, root))
+        .map(|file| normalize_abs(&file.path))
+        .collect();
 
     // If no explicit crate root found, check Cargo.toml for [[bin]] entries.
     if roots.is_empty() {
@@ -167,11 +155,35 @@ pub fn rust_crate_roots(root: &Path, files: &[ScannedFile]) -> Vec<PathBuf> {
     roots
 }
 
-/// Returns whether a path looks like a Rust crate root (main.rs or lib.rs at src/).
+/// Returns whether a path looks like a Rust crate root.
 #[must_use]
 pub fn is_rust_crate_root(path: &Path, root: &Path) -> bool {
-    let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
-    rel == "src/main.rs" || rel == "src/lib.rs" || rel.starts_with("src/bin/")
+    let root = normalize_abs(root);
+    let normalized = normalize_abs(path);
+    let rel_path = normalized.strip_prefix(&root).unwrap_or(&normalized);
+    let rel = rel_path.to_string_lossy().replace('\\', "/");
+    crate_dir_for_rust_entry(&rel).is_some()
+}
+
+fn is_rust_source(file: &ScannedFile) -> bool {
+    matches!(file.extension.to_ascii_lowercase().as_str(), ".rs" | "rs")
+}
+
+fn crate_dir_for_rust_entry(rel: &str) -> Option<&str> {
+    if matches!(rel, "src/lib.rs" | "src/main.rs") {
+        return Some("");
+    }
+    if rel.starts_with("src/bin/") && rel.ends_with(".rs") {
+        return Some("");
+    }
+    if let Some(crate_dir) = rel.strip_suffix("/src/lib.rs") {
+        return Some(crate_dir);
+    }
+    if let Some(crate_dir) = rel.strip_suffix("/src/main.rs") {
+        return Some(crate_dir);
+    }
+    rel.find("/src/bin/")
+        .and_then(|idx| if rel.ends_with(".rs") { Some(&rel[..idx]) } else { None })
 }
 
 /// Returns shortest import depth for each reachable file.
@@ -590,14 +602,46 @@ mod tests {
         assert!(!deps.contains(&tests_abs), "main should NOT import tests (cfg(test) guard)");
     }
 
+    #[test]
+    fn rust_crate_roots_include_workspace_crates() {
+        use std::fs;
+        use tempfile::TempDir;
+        let tmp = TempDir::new().expect("tmp");
+        let root = tmp.path();
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"tokio\"]\n")
+            .expect("write workspace manifest");
+        fs::create_dir_all(root.join("tokio/src/bin")).expect("mkdir crate src");
+        fs::write(root.join("tokio/Cargo.toml"), "[package]\nname = \"tokio\"\n")
+            .expect("write crate manifest");
+
+        let lib_rs = root.join("tokio/src/lib.rs");
+        let bin_rs = root.join("tokio/src/bin/console.rs");
+        fs::write(&lib_rs, "pub mod runtime;\n").expect("write lib");
+        fs::write(&bin_rs, "fn main() {}\n").expect("write bin");
+
+        let files = vec![
+            test_file_rel(&lib_rs, "tokio/src/lib.rs"),
+            test_file_rel(&bin_rs, "tokio/src/bin/console.rs"),
+        ];
+
+        let roots = rust_crate_roots(root, &files);
+
+        assert!(roots.contains(&normalize_abs(&lib_rs)), "workspace crate lib.rs is a crate root");
+        assert!(roots.contains(&normalize_abs(&bin_rs)), "workspace crate bin is a crate root");
+    }
+
     fn test_file(path: &Path) -> FileInfo {
         test_file_abs(path)
     }
 
     fn test_file_abs(path: &Path) -> FileInfo {
+        test_file_rel(path, &path.to_string_lossy().replace('\\', "/"))
+    }
+
+    fn test_file_rel(path: &Path, relative_path: &str) -> FileInfo {
         FileInfo {
             path: path.to_path_buf(),
-            relative_path: path.to_string_lossy().replace('\\', "/"),
+            relative_path: relative_path.to_string(),
             size_bytes: 0,
             extension: path
                 .extension()

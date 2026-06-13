@@ -22,6 +22,7 @@ impl RepoContext {
     /// * `root_path` - Path to the repository root
     /// * `is_temp` - Whether this is a temporary directory
     pub fn new(root_path: PathBuf, is_temp: bool) -> Self {
+        let root_path = root_path.canonicalize().unwrap_or(root_path);
         Self { root_path, is_temp }
     }
 }

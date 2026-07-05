@@ -1,16 +1,11 @@
-//! Code-aware chunking.
-//!
-//! Uses tree-sitter for structure-aware chunking of source code files.
+//! Code-aware chunking using tree-sitter for structure-aware boundaries.
 //! Falls back to line-based chunking for unsupported languages.
 
-use crate::chunk::line_chunker::LineChunker;
+use crate::chunk::line_chunker::chunk_lines;
 use crate::domain::{Chunk, FileInfo};
 use crate::utils::{estimate_tokens, stable_hash};
 use std::collections::{BTreeSet, HashMap};
 use tree_sitter::{Language, Parser};
-
-/// Code chunker using tree-sitter for structure-aware chunking.
-pub struct CodeChunker;
 
 /// Type alias for symbol tags mapped to line boundaries.
 type SymbolTagsByBoundary = HashMap<usize, BTreeSet<String>>;
@@ -20,115 +15,90 @@ pub fn supported_tree_sitter_languages() -> &'static [&'static str] {
     &["python", "rust", "javascript", "typescript", "go"]
 }
 
-impl Default for CodeChunker {
-    fn default() -> Self {
-        Self::new()
+/// Chunk source code using tree-sitter for structure awareness, falling back
+/// to line-based chunking for unsupported languages or parse failures.
+pub fn chunk_code(
+    file_info: &FileInfo,
+    content: &str,
+    max_tokens: usize,
+    overlap_tokens: usize,
+) -> Vec<Chunk> {
+    if let Some(chunks) = chunk_with_tree_sitter(file_info, content, max_tokens, overlap_tokens) {
+        if !chunks.is_empty() {
+            return chunks;
+        }
     }
-}
 
-impl CodeChunker {
-    /// Creates a new CodeChunker.
-    pub fn new() -> Self {
-        Self
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    if lines.is_empty() {
+        return Vec::new();
     }
 
-    /// Chunks source code using tree-sitter or regex-based boundaries.
-    ///
-    /// # Arguments
-    /// * `file_info` - File metadata
-    /// * `content` - File content
-    /// * `max_tokens` - Maximum tokens per chunk
-    /// * `overlap_tokens` - Overlap between chunks
-    ///
-    /// # Returns
-    /// Vector of chunks
-    pub fn chunk(
-        &self,
-        file_info: &FileInfo,
-        content: &str,
-        max_tokens: usize,
-        overlap_tokens: usize,
-    ) -> Vec<Chunk> {
-        if let Some(chunks) = chunk_with_tree_sitter(file_info, content, max_tokens, overlap_tokens)
-        {
-            if !chunks.is_empty() {
-                return chunks;
-            }
-        }
-
-        let lines: Vec<&str> = content.split_inclusive('\n').collect();
-        if lines.is_empty() {
-            return Vec::new();
-        }
-
-        let boundaries = find_definition_boundaries(&lines, &file_info.language);
-        if boundaries.len() <= 1 {
-            return LineChunker::new().chunk(file_info, content, max_tokens, overlap_tokens);
-        }
-
-        let symbol_tags = find_boundary_symbol_tags(&lines, &file_info.language, &boundaries);
-        let mut chunks = Vec::new();
-        let line_chunker = LineChunker::new();
-
-        for window in boundaries.windows(2) {
-            let start = window[0];
-            let end = window[1];
-            if end <= start || start >= lines.len() {
-                continue;
-            }
-
-            let section_content = lines[start..end.min(lines.len())].join("");
-            if section_content.trim().is_empty() {
-                continue;
-            }
-
-            let mut section_tags = file_info.tags.clone();
-            section_tags
-                .extend(extract_symbol_tags_from_section(&file_info.language, &section_content));
-            if let Some(boundary_tags) = symbol_tags.get(&start) {
-                section_tags.extend(boundary_tags.iter().cloned());
-            }
-
-            if estimate_tokens(&section_content) <= max_tokens {
-                chunks.push(Chunk {
-                    id: stable_hash(&section_content, &file_info.relative_path, start + 1, end),
-                    path: file_info.relative_path.clone(),
-                    language: file_info.language.clone(),
-                    start_line: start + 1,
-                    end_line: end,
-                    token_estimate: estimate_tokens(&section_content),
-                    content: section_content,
-                    priority: file_info.priority,
-                    tags: section_tags,
-                    file_id: String::new(),
-                    chunk_index: 0,
-                    chunks_in_file: 0,
-                    byte_start: None,
-                    byte_end: None,
-                    content_sha256: String::new(),
-                    file_sha256: String::new(),
-                });
-            } else {
-                let nested =
-                    line_chunker.chunk(file_info, &section_content, max_tokens, overlap_tokens);
-                for mut chunk in nested {
-                    chunk.start_line += start;
-                    chunk.end_line += start;
-                    chunk.id =
-                        stable_hash(&chunk.content, &chunk.path, chunk.start_line, chunk.end_line);
-                    chunk.tags.extend(section_tags.iter().cloned());
-                    chunks.push(chunk);
-                }
-            }
-        }
-
-        if chunks.is_empty() {
-            return LineChunker::new().chunk(file_info, content, max_tokens, overlap_tokens);
-        }
-
-        chunks.sort_by_key(|chunk| chunk.start_line);
-        chunks
+    let boundaries = find_definition_boundaries(&lines, &file_info.language);
+    if boundaries.len() <= 1 {
+        return chunk_lines(file_info, content, max_tokens, overlap_tokens);
     }
+
+    let symbol_tags = find_boundary_symbol_tags(&lines, &file_info.language, &boundaries);
+    let mut chunks = Vec::new();
+
+    for window in boundaries.windows(2) {
+        let start = window[0];
+        let end = window[1];
+        if end <= start || start >= lines.len() {
+            continue;
+        }
+
+        let section_content = lines[start..end.min(lines.len())].join("");
+        if section_content.trim().is_empty() {
+            continue;
+        }
+
+        let mut section_tags = file_info.tags.clone();
+        section_tags
+            .extend(extract_symbol_tags_from_section(&file_info.language, &section_content));
+        if let Some(boundary_tags) = symbol_tags.get(&start) {
+            section_tags.extend(boundary_tags.iter().cloned());
+        }
+
+        if estimate_tokens(&section_content) <= max_tokens {
+            chunks.push(Chunk {
+                id: stable_hash(&section_content, &file_info.relative_path, start + 1, end),
+                path: file_info.relative_path.clone(),
+                language: file_info.language.clone(),
+                start_line: start + 1,
+                end_line: end,
+                token_estimate: estimate_tokens(&section_content),
+                content: section_content,
+                priority: file_info.priority,
+                tags: section_tags,
+                file_id: String::new(),
+                chunk_index: 0,
+                chunks_in_file: 0,
+                byte_start: None,
+                byte_end: None,
+                content_sha256: String::new(),
+                file_sha256: String::new(),
+            });
+        } else {
+            let nested = chunk_lines(file_info, &section_content, max_tokens, overlap_tokens);
+            for mut chunk in nested {
+                chunk.start_line += start;
+                chunk.end_line += start;
+                chunk.id =
+                    stable_hash(&chunk.content, &chunk.path, chunk.start_line, chunk.end_line);
+                chunk.tags.extend(section_tags.iter().cloned());
+                chunks.push(chunk);
+            }
+        }
+    }
+
+    if chunks.is_empty() {
+        return chunk_lines(file_info, content, max_tokens, overlap_tokens);
+    }
+
+    chunks.sort_by_key(|chunk| chunk.start_line);
+    chunks
 }
 
 fn chunk_with_tree_sitter(
@@ -234,7 +204,6 @@ fn chunk_by_boundaries(
     max_tokens: usize,
     overlap_tokens: usize,
 ) -> Vec<Chunk> {
-    let line_chunker = LineChunker::new();
     let mut chunks = Vec::new();
 
     for window in boundaries.windows(2) {
@@ -276,8 +245,7 @@ fn chunk_by_boundaries(
                 file_sha256: String::new(),
             });
         } else {
-            let nested =
-                line_chunker.chunk(file_info, &section_content, max_tokens, overlap_tokens);
+            let nested = chunk_lines(file_info, &section_content, max_tokens, overlap_tokens);
             for mut chunk in nested {
                 chunk.start_line += start;
                 chunk.end_line += start;
@@ -505,7 +473,7 @@ fn clean_symbol_name(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::CodeChunker;
+    use super::chunk_code;
     use crate::domain::FileInfo;
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -528,7 +496,7 @@ mod tests {
         };
 
         let content = "def a():\n    pass\n\ndef b():\n    pass\n\ndef c():\n    pass\n";
-        let chunks = CodeChunker::new().chunk(&info, content, 20, 0);
+        let chunks = chunk_code(&info, content, 20, 0);
         assert!(!chunks.is_empty());
         assert!(chunks.len() >= 2);
         assert!(chunks[0].start_line >= 1);
@@ -553,7 +521,7 @@ mod tests {
         };
 
         let content = "struct S;\nfn a() {}\nimpl S { fn b(&self) {} }\nfn c() {}\n";
-        let chunks = CodeChunker::new().chunk(&info, content, 20, 0);
+        let chunks = chunk_code(&info, content, 20, 0);
         assert!(!chunks.is_empty());
         assert!(chunks.len() >= 2);
         assert!(chunks.iter().any(|c| c.tags.iter().any(|t| t.starts_with("def:a"))));
@@ -578,7 +546,7 @@ mod tests {
         };
 
         let content = "package main\n\nfunc a() {}\n\nfunc b() {}\n\nfunc main() {}\n";
-        let chunks = CodeChunker::new().chunk(&info, content, 20, 0);
+        let chunks = chunk_code(&info, content, 20, 0);
         assert!(!chunks.is_empty());
         assert!(chunks.len() >= 2);
         assert!(chunks.iter().any(|c| c.tags.contains("def:a")));

@@ -7,6 +7,37 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Arguments for `render_context_pack`.
+#[allow(missing_docs)]
+pub struct ContextPackCtx<'a> {
+    pub root_path: &'a Path,
+    pub files: &'a [FileInfo],
+    pub chunks: &'a [Chunk],
+    pub stats: &'a ScanStats,
+    pub tree: &'a str,
+    pub manifest_info: &'a HashMap<String, JsonValue>,
+    pub dispositions: &'a [FileDisposition],
+    pub full_inventory: bool,
+    pub include_timestamp: bool,
+}
+
+impl<'a> ContextPackCtx<'a> {
+    /// Render the context pack from this context.
+    pub fn render(&self) -> String {
+        render_context_pack(
+            self.root_path,
+            self.files,
+            self.chunks,
+            self.stats,
+            self.tree,
+            self.manifest_info,
+            self.dispositions,
+            self.full_inventory,
+            self.include_timestamp,
+        )
+    }
+}
+
 /// Renders the context pack markdown document.
 ///
 /// # Arguments

@@ -3,9 +3,12 @@
 use crate::domain::{CustomRedactionRule, RedactionConfig};
 use crate::redact::entropy::calculate_entropy;
 use crate::redact::rules::{RedactionRule, DEFAULT_RULES};
+use globset::Glob;
 use once_cell::sync::Lazy;
 use regex::Regex;
+#[cfg(feature = "python-structure-safe")]
 use rustpython_parser::ast;
+#[cfg(feature = "python-structure-safe")]
 use rustpython_parser::Parse;
 use std::collections::BTreeMap;
 
@@ -36,38 +39,12 @@ fn is_safe_value(s: &str) -> bool {
 
 /// Returns true if the filename matches any of the given glob patterns.
 fn matches_glob_pattern(filename: &str, patterns: &[String]) -> bool {
-    for pattern in patterns {
-        if glob_match(pattern, filename) {
-            return true;
-        }
-    }
-    false
+    patterns
+        .iter()
+        .any(|pattern| Glob::new(pattern).ok().is_some_and(|g| g.compile_matcher().is_match(filename)))
 }
 
-/// Simple glob matching: supports `*` (matches any chars, not `/`) and `**` (matches all).
-fn glob_match(pattern: &str, value: &str) -> bool {
-    // Use the `glob` crate-compatible approach via fnmatch-style logic.
-    // For simplicity, we delegate to the `globset` approach using string comparison:
-    // patterns like "*.md", "go.sum", "package-lock.json".
-    fn inner(pat: &[u8], val: &[u8]) -> bool {
-        match (pat.first(), val.first()) {
-            (None, None) => true,
-            (Some(b'*'), _) => {
-                // `**` — match everything
-                if pat.get(1) == Some(&b'*') {
-                    inner(&pat[2..], val) || (!val.is_empty() && inner(pat, &val[1..]))
-                } else {
-                    // `*` — match any char except '/'
-                    inner(&pat[1..], val)
-                        || (!val.is_empty() && val[0] != b'/' && inner(pat, &val[1..]))
-                }
-            }
-            (Some(&p), Some(&v)) if p == v => inner(&pat[1..], &val[1..]),
-            _ => false,
-        }
-    }
-    inner(pattern.as_bytes(), value.as_bytes())
-}
+// Removed hand-rolled glob_match — replaced by globset::Glob above.
 
 /// Main redactor that applies secret detection rules to text content.
 pub struct Redactor {
@@ -178,7 +155,7 @@ impl Redactor {
         }
         if !filename.is_empty() {
             for pattern in &self.source_safe_patterns {
-                if glob_match(pattern, filename) {
+                if Glob::new(pattern).is_ok_and(|g| g.compile_matcher().is_match(filename)) {
                     return true;
                 }
             }
@@ -187,7 +164,9 @@ impl Redactor {
             // Fall back to extension-based fake filename
             let fake_filename = format!("file{}", extension);
             for pattern in &self.source_safe_patterns {
-                if glob_match(pattern, &fake_filename) {
+                if Glob::new(pattern)
+                    .is_ok_and(|g| g.compile_matcher().is_match(&fake_filename))
+                {
                     return true;
                 }
             }
@@ -409,8 +388,14 @@ fn compile_custom_rule(cr: &CustomRedactionRule) -> Result<RedactionRule, regex:
     Ok(RedactionRule { name: Box::leak(name.into_boxed_str()), pattern, replacement })
 }
 
+#[cfg(feature = "python-structure-safe")]
 fn is_valid_python(source: &str) -> bool {
     ast::Suite::parse(source, "<redacted>").is_ok()
+}
+
+#[cfg(not(feature = "python-structure-safe"))]
+fn is_valid_python(_source: &str) -> bool {
+    true
 }
 
 #[cfg(test)]

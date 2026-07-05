@@ -24,6 +24,16 @@ pub fn fetch_repository(
     if let Some(p) = path {
         local::validate_local_path(p)
     } else if let Some(url) = repo_url {
+        // Only allow https:// and git@ (SSH) schemes to prevent local file access.
+        if url.starts_with("file://") {
+            anyhow::bail!("Local file:// URLs are not supported; use --path instead");
+        }
+        if !(url.starts_with("https://") || url.starts_with("http://") || url.starts_with("git@")) {
+            anyhow::bail!(
+                "Unsupported URL scheme in '{}'. Use https:// or git@ URLs, or --path for local repos",
+                url
+            );
+        }
         if huggingface::is_huggingface_url(url) {
             huggingface::clone_repository(url, ref_)
         } else {

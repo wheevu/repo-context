@@ -3,6 +3,7 @@
 //! Provides functionality to clone GitHub repositories to temporary directories.
 
 use crate::fetch::RepoContext;
+use crate::utils::redact_url_credentials;
 use anyhow::{Context, Result};
 use git2::{FetchOptions, ObjectType, Repository};
 use std::env;
@@ -34,16 +35,18 @@ pub fn clone_repository(url: &str, ref_: Option<&str>) -> Result<RepoContext> {
     if let Some(reference) = ref_ {
         // Specific ref: try shallow clone targeting the branch first, fall back to full clone.
         let repo = try_shallow_clone_with_branch(url, &temp_dir, reference).or_else(|_| {
-            Repository::clone(url, &temp_dir)
-                .with_context(|| format!("Failed cloning repository from {url}"))
+            Repository::clone(url, &temp_dir).with_context(|| {
+                format!("Failed cloning repository from {}", redact_url_credentials(url))
+            })
         })?;
         checkout_ref(&repo, reference)?;
         Ok(RepoContext::new(temp_dir, true))
     } else {
         // No specific ref: shallow clone (depth=1) the default branch.
         let repo = shallow_clone(url, &temp_dir).or_else(|_| {
-            Repository::clone(url, &temp_dir)
-                .with_context(|| format!("Failed cloning repository from {url}"))
+            Repository::clone(url, &temp_dir).with_context(|| {
+                format!("Failed cloning repository from {}", redact_url_credentials(url))
+            })
         })?;
         let _ = repo; // drop
         Ok(RepoContext::new(temp_dir, true))

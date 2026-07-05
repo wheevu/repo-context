@@ -26,6 +26,22 @@ pub struct FileScanner {
 }
 
 impl FileScanner {
+    /// Create a new FileScanner from a root path and config.
+    pub fn from_config(root_path: PathBuf, config: &crate::domain::Config) -> Self {
+        Self {
+            root_path,
+            include_extensions: config.include_extensions.iter().cloned().collect(),
+            exclude_globs: config.exclude_globs.iter().cloned().collect(),
+            max_file_bytes: config.max_file_bytes,
+            respect_gitignore: config.respect_gitignore,
+            follow_symlinks: config.follow_symlinks,
+            skip_minified: config.skip_minified,
+            max_line_length: 5000,
+            stats: ScanStats::default(),
+            dispositions: Vec::new(),
+        }
+    }
+
     /// Create a new FileScanner with default settings.
     pub fn new(root_path: PathBuf) -> Self {
         Self {
@@ -219,6 +235,15 @@ impl FileScanner {
             let size = metadata.len();
             self.stats.total_bytes_scanned += size;
             self.stats.total_bytes_discovered += size;
+
+            // When symlinks are followed, verify the resolved target stays
+            // within the repository root so a malicious repo can't reach
+            // outside through symlinks.
+            if self.follow_symlinks && !is_symlink_target_safe(path, &self.root_path) {
+                self.stats.files_skipped += 1;
+                self.record_path(path, rel_path, FileDispositionReason::SkippedGlob, Some(size));
+                continue;
+            }
 
             // Check explicit exclude globs
             if exclude_globset.is_match(&rel_path) {
@@ -496,6 +521,21 @@ fn extension_with_dot(path: &Path) -> String {
         format!(".{ext}")
     } else {
         ext
+    }
+}
+
+/// Returns `true` when a symlink target resolves within the repository root.
+/// Returns `true` for non-symlinks (they are safe by definition).
+fn is_symlink_target_safe(path: &Path, repo_root: &Path) -> bool {
+    match std::fs::read_link(path) {
+        Ok(target) => {
+            let resolved = path.parent().unwrap_or_else(|| Path::new(".")).join(&target);
+            match resolved.canonicalize() {
+                Ok(canon) => canon.starts_with(repo_root),
+                Err(_) => false,
+            }
+        }
+        Err(_) => true, // Not a symlink, safe
     }
 }
 

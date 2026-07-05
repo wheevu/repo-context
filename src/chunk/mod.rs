@@ -1,46 +1,19 @@
 //! Content chunking strategies
 
 use crate::domain::{Chunk, FileInfo};
-#[cfg(test)]
-use crate::utils::read_file_safe;
 use crate::utils::{estimate_tokens, stable_hash};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
-use code_chunker::CodeChunker;
-use line_chunker::LineChunker;
-use markdown_chunker::MarkdownChunker;
+use code_chunker::chunk_code;
+use line_chunker::chunk_lines;
+use markdown_chunker::chunk_markdown;
 
 pub mod code_chunker;
 pub mod line_chunker;
 pub mod markdown_chunker;
 
-/// Chunk a file with default options (800 tokens, 120 overlap).
-///
-/// This is primarily used in tests. In production, use [`chunk_content`] with pre-read content.
-#[cfg(test)]
-#[allow(dead_code)]
-pub fn chunk_file(file_info: &FileInfo) -> Result<Vec<Chunk>> {
-    chunk_file_with_options(file_info, 800, 120)
-}
-
-/// Chunk a file with custom token limits.
-///
-/// This is primarily used in tests. In production, use [`chunk_content`] with pre-read content.
-#[cfg(test)]
-#[allow(dead_code)]
-pub fn chunk_file_with_options(
-    file_info: &FileInfo,
-    max_tokens: usize,
-    overlap_tokens: usize,
-) -> Result<Vec<Chunk>> {
-    let (content, _encoding) = read_file_safe(&file_info.path, None, None)?;
-    chunk_content(file_info, &content, max_tokens, overlap_tokens)
-}
-
-/// Chunk pre-loaded (and optionally pre-redacted) content.  Callers that want
-/// to redact before chunking should read the file, apply the redactor, then
-/// call this instead of `chunk_file_with_options`.
+/// Chunk pre-loaded content, choosing strategy based on file language.
 pub fn chunk_content(
     file_info: &FileInfo,
     content: &str,
@@ -49,15 +22,9 @@ pub fn chunk_content(
 ) -> Result<Vec<Chunk>> {
     let chunker_kind = chunker_for_language(&file_info.language);
     let mut chunks = match chunker_kind {
-        ChunkerKind::Markdown => {
-            MarkdownChunker::new().chunk(file_info, content, max_tokens, overlap_tokens)
-        }
-        ChunkerKind::Code => {
-            CodeChunker::new().chunk(file_info, content, max_tokens, overlap_tokens)
-        }
-        ChunkerKind::Line => {
-            LineChunker::new().chunk(file_info, content, max_tokens, overlap_tokens)
-        }
+        ChunkerKind::Markdown => chunk_markdown(file_info, content, max_tokens, overlap_tokens),
+        ChunkerKind::Code => chunk_code(file_info, content, max_tokens, overlap_tokens),
+        ChunkerKind::Line => chunk_lines(file_info, content, max_tokens, overlap_tokens),
     };
 
     if !chunks.is_empty() {
@@ -135,15 +102,6 @@ fn line_end_to_byte_offset(content: &str, line: usize) -> usize {
         }
     }
     content.len()
-}
-
-/// Coalesce small chunks with default max tokens (800).
-///
-/// This is primarily used in tests. In production, use [`coalesce_small_chunks_with_max`].
-#[cfg(test)]
-#[allow(dead_code)]
-pub fn coalesce_small_chunks(chunks: Vec<Chunk>, _min_tokens: usize) -> Vec<Chunk> {
-    coalesce_small_chunks_with_max(chunks, 200, 800)
 }
 
 /// Coalesce small chunks that are adjacent or overlap.

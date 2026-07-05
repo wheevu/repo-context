@@ -6,9 +6,6 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-/// Alias matching the module-mode specification.
-pub type ScannedFile = FileInfo;
-
 /// Directed graph where edges point from importer to imported file.
 #[derive(Debug, Clone, Default)]
 pub struct ImportGraph {
@@ -24,7 +21,7 @@ pub struct ImportGraph {
 
 /// Builds a static import graph over scanned files.
 #[must_use]
-pub fn build(files: &[ScannedFile]) -> ImportGraph {
+pub fn build(files: &[FileInfo]) -> ImportGraph {
     let by_path: HashMap<PathBuf, FileInfo> =
         files.iter().map(|f| (normalize_abs(&f.path), f.clone())).collect();
     let rel_to_abs: HashMap<String, PathBuf> = files
@@ -123,7 +120,7 @@ pub fn direct_callers(graph: &ImportGraph, target: &Path) -> Vec<PathBuf> {
 /// Returns absolute paths to `src/main.rs`, `src/lib.rs`, and `src/bin/*.rs`
 /// for the repository root and nested workspace crates.
 #[must_use]
-pub fn rust_crate_roots(root: &Path, files: &[ScannedFile]) -> Vec<PathBuf> {
+pub fn rust_crate_roots(root: &Path, files: &[FileInfo]) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = files
         .iter()
         .filter(|file| is_rust_source(file))
@@ -165,7 +162,7 @@ pub fn is_rust_crate_root(path: &Path, root: &Path) -> bool {
     crate_dir_for_rust_entry(&rel).is_some()
 }
 
-fn is_rust_source(file: &ScannedFile) -> bool {
+fn is_rust_source(file: &FileInfo) -> bool {
     matches!(file.extension.to_ascii_lowercase().as_str(), ".rs" | "rs")
 }
 

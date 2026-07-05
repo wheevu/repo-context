@@ -1,108 +1,79 @@
-//! Line-based chunking.
-//!
-//! Provides simple line-based chunking with overlap and boundary detection
-//! for function/class definitions.
+//! Line-based chunking using boundary-aware line windows.
 
 use crate::domain::{Chunk, FileInfo};
 use crate::utils::{estimate_tokens, stable_hash};
 
-/// Line-based chunker for generic text content.
-pub struct LineChunker;
-
-impl Default for LineChunker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LineChunker {
-    /// Creates a new LineChunker.
-    pub fn new() -> Self {
-        Self
+/// Chunk content into overlapping line-based segments with boundary detection.
+pub fn chunk_lines(
+    file_info: &FileInfo,
+    content: &str,
+    max_tokens: usize,
+    overlap_tokens: usize,
+) -> Vec<Chunk> {
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    if lines.is_empty() {
+        return Vec::new();
     }
 
-    /// Chunks content into line-based chunks with overlap.
-    ///
-    /// # Arguments
-    /// * `file_info` - File metadata
-    /// * `content` - File content
-    /// * `max_tokens` - Maximum tokens per chunk
-    /// * `overlap_tokens` - Overlap between chunks
-    ///
-    /// # Returns
-    /// Vector of chunks
-    pub fn chunk(
-        &self,
-        file_info: &FileInfo,
-        content: &str,
-        max_tokens: usize,
-        overlap_tokens: usize,
-    ) -> Vec<Chunk> {
-        let lines: Vec<&str> = content.split_inclusive('\n').collect();
-        if lines.is_empty() {
-            return Vec::new();
-        }
+    let total_tokens = estimate_tokens(content).max(1);
+    let avg_tokens_per_line = (total_tokens / lines.len()).max(1);
+    let target_lines = (max_tokens / avg_tokens_per_line).max(1);
+    let overlap_lines = overlap_tokens / avg_tokens_per_line;
 
-        let total_tokens = estimate_tokens(content).max(1);
-        let avg_tokens_per_line = (total_tokens / lines.len()).max(1);
-        let target_lines = (max_tokens / avg_tokens_per_line).max(1);
-        let overlap_lines = overlap_tokens / avg_tokens_per_line;
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
 
-        let mut chunks = Vec::new();
-        let mut start = 0usize;
+    while start < lines.len() {
+        let mut end = (start + target_lines).min(lines.len());
 
-        while start < lines.len() {
-            let mut end = (start + target_lines).min(lines.len());
-
-            if end < lines.len() {
-                let window_start = start + ((target_lines as f64 * 0.8) as usize);
-                let search_start = window_start.min(end);
-                let search_end = (end + 10).min(lines.len());
-                if let Some(boundary) = find_boundary(&lines, search_start, search_end) {
-                    end = boundary;
-                }
-            }
-
-            if end <= start {
-                end = (start + 1).min(lines.len());
-            }
-
-            let chunk_content = lines[start..end].join("");
-            if chunk_content.trim().is_empty() {
-                start = end;
-                continue;
-            }
-
-            let chunk = Chunk {
-                id: stable_hash(&chunk_content, &file_info.relative_path, start + 1, end),
-                path: file_info.relative_path.clone(),
-                language: file_info.language.clone(),
-                start_line: start + 1,
-                end_line: end,
-                token_estimate: estimate_tokens(&chunk_content),
-                content: chunk_content,
-                priority: file_info.priority,
-                tags: file_info.tags.clone(),
-                file_id: String::new(),
-                chunk_index: 0,
-                chunks_in_file: 0,
-                byte_start: None,
-                byte_end: None,
-                content_sha256: String::new(),
-                file_sha256: String::new(),
-            };
-            chunks.push(chunk);
-
-            let next_start = end.saturating_sub(overlap_lines);
-            if next_start <= start {
-                start = end;
-            } else {
-                start = next_start;
+        if end < lines.len() {
+            let window_start = start + ((target_lines as f64 * 0.8) as usize);
+            let search_start = window_start.min(end);
+            let search_end = (end + 10).min(lines.len());
+            if let Some(boundary) = find_boundary(&lines, search_start, search_end) {
+                end = boundary;
             }
         }
 
-        chunks
+        if end <= start {
+            end = (start + 1).min(lines.len());
+        }
+
+        let chunk_content = lines[start..end].join("");
+        if chunk_content.trim().is_empty() {
+            start = end;
+            continue;
+        }
+
+        let chunk = Chunk {
+            id: stable_hash(&chunk_content, &file_info.relative_path, start + 1, end),
+            path: file_info.relative_path.clone(),
+            language: file_info.language.clone(),
+            start_line: start + 1,
+            end_line: end,
+            token_estimate: estimate_tokens(&chunk_content),
+            content: chunk_content,
+            priority: file_info.priority,
+            tags: file_info.tags.clone(),
+            file_id: String::new(),
+            chunk_index: 0,
+            chunks_in_file: 0,
+            byte_start: None,
+            byte_end: None,
+            content_sha256: String::new(),
+            file_sha256: String::new(),
+        };
+        chunks.push(chunk);
+
+        let next_start = end.saturating_sub(overlap_lines);
+        if next_start <= start {
+            start = end;
+        } else {
+            start = next_start;
+        }
     }
+
+    chunks
 }
 
 fn find_boundary(lines: &[&str], start: usize, end: usize) -> Option<usize> {

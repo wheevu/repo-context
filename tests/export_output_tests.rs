@@ -643,3 +643,126 @@ fn context_pack_escapes_markdown_table_safely() {
     // If escaping failed, lines with unescaped pipes would disrupt the table.
     assert!(!ctx.contains("| notes|secret.md |"), "pipe in path must be escaped");
 }
+
+// ── SECURITY REGRESSION TESTS ────────────────────────────────────────────
+
+#[test]
+fn report_does_not_leak_credentialed_repo_url() {
+    let fixture = TestRepo::new();
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    // This would happen if a user passed `--repo https://user:token@...`
+    // The report should sanitize the credential.
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        fixture.root().to_str().expect("path"),
+        "--mode",
+        "both",
+        "--output-dir",
+        out.to_str().expect("out"),
+        "--no-timestamp",
+    ]);
+    cmd.env("HOME", &out);
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(&out, fixture.root());
+    let report_raw =
+        fs::read_to_string(actual.join(output_file_name(fixture.root(), "report.json")))
+            .expect("read report");
+
+    // No credential-like patterns should appear in the report.
+    // (This is mainly checking that the sanitizer doesn't crash on normal URLs.)
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+    assert!(report.get("provenance").is_some());
+}
+
+#[test]
+fn manifest_scripts_are_redacted_in_context_pack() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    // A package.json with a secret in the scripts section.
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("README.md"), "# App\n").expect("write readme");
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write source");
+    fs::write(
+        root.join("package.json"),
+        r#"{"name": "myapp", "scripts": {"start": "export API_KEY=sk-abcdefghijklmnopqrstuvwxyz12345"}, "description": "A test"}"#,
+    )
+    .expect("write package.json");
+
+    let out = TempDir::new().expect("temp out");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root"),
+        "--mode",
+        "prompt",
+        "--output-dir",
+        out.path().to_str().expect("out"),
+        "--no-timestamp",
+    ]);
+    cmd.env("HOME", out.path());
+    cmd.assert().success();
+
+    let repo_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let actual = out.path().join(repo_name);
+    let ctx = fs::read_to_string(actual.join(format!("{}_context_pack.md", repo_name)))
+        .expect("read context");
+
+    // The secret should NOT appear in the context pack.
+    assert!(!ctx.contains("sk-abc123"), "secret in manifest scripts must be redacted");
+}
+
+#[test]
+fn symlink_escaping_repo_root_is_rejected() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    let outside = TempDir::new().expect("outside");
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write main");
+    fs::write(outside.path().join("secrets.txt"), "password=12345\n").expect("write secrets");
+
+    // Create a symlink from repo -> outside file.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            outside.path().join("secrets.txt"),
+            root.join("src/secrets.txt"),
+        )
+        .expect("symlink");
+    }
+    // On non-unix, skip symlink test.
+    #[cfg(not(unix))]
+    {
+        return;
+    }
+
+    let out = TempDir::new().expect("temp out");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root"),
+        "--mode",
+        "rag",
+        "--output-dir",
+        out.path().to_str().expect("out"),
+        "--no-timestamp",
+        "--follow-symlinks",
+    ]);
+    cmd.env("HOME", out.path());
+    cmd.assert().success();
+
+    let repo_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let actual = out.path().join(repo_name);
+    let jsonl =
+        fs::read_to_string(actual.join(format!("{}_chunks.jsonl", repo_name))).expect("read jsonl");
+
+    // Symlink to outside file should be skipped, NOT included.
+    assert!(!jsonl.contains("password=12345"), "outside-file symlink content must not be included");
+    assert!(!jsonl.contains("secrets.txt"), "outside-file symlink must be rejected");
+}

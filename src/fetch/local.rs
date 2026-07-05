@@ -14,8 +14,8 @@ pub fn find_repo_root(start: &Path) -> PathBuf {
     loop {
         if current.join(".git").exists() {
             if current != start {
-                println!(
-                    "Note: using repository root {} (detected from {})",
+                tracing::info!(
+                    "using repository root {} (detected from {})",
                     current.display(),
                     start.display()
                 );
@@ -28,7 +28,7 @@ pub fn find_repo_root(start: &Path) -> PathBuf {
         }
     }
     // No .git found anywhere — use the provided path as-is.
-    println!("Note: no .git found; using provided path {} as repository root", start.display());
+    tracing::info!("no .git found; using provided path {} as repository root", start.display());
     start.to_path_buf()
 }
 

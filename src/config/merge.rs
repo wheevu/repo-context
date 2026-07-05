@@ -100,8 +100,13 @@ pub fn merge_cli_with_config(mut base_config: Config, cli: CliOverrides) -> Conf
 }
 
 /// Load config from a repo root and merge it into the given `config`,
-/// but only for fields that are still at their default values.  This
-/// preserves any values explicitly set via CLI flags or the caller's
+/// but only for **safe** fields that are still at their default values and
+/// do not weaken the user's security posture.  Fields like redaction,
+/// symlink following, gitignore, and output-dir are never merged from a
+/// remote repo because a malicious `repo-context.toml` could disable
+/// protections or redirect output.
+///
+/// This preserves any values explicitly set via CLI flags or the caller's
 /// own config file.
 pub fn merge_repo_config(
     config: &mut Config,
@@ -114,7 +119,7 @@ pub fn merge_repo_config(
 
     let defaults = Config::default();
 
-    // Only apply repo values when the current value matches the default.
+    // ── Safe fields: repo-local tweaks that don't weaken security ──
     if config.include_extensions == defaults.include_extensions {
         config.include_extensions = repo_config.include_extensions;
     }
@@ -126,21 +131,6 @@ pub fn merge_repo_config(
     }
     if config.max_total_bytes == defaults.max_total_bytes {
         config.max_total_bytes = repo_config.max_total_bytes;
-    }
-    if config.respect_gitignore == defaults.respect_gitignore
-        && repo_config.respect_gitignore != defaults.respect_gitignore
-    {
-        config.respect_gitignore = repo_config.respect_gitignore;
-    }
-    if config.follow_symlinks == defaults.follow_symlinks
-        && repo_config.follow_symlinks != defaults.follow_symlinks
-    {
-        config.follow_symlinks = repo_config.follow_symlinks;
-    }
-    if config.skip_minified == defaults.skip_minified
-        && repo_config.skip_minified != defaults.skip_minified
-    {
-        config.skip_minified = repo_config.skip_minified;
     }
     if config.max_tokens.is_none() && repo_config.max_tokens.is_some() {
         config.max_tokens = repo_config.max_tokens;
@@ -157,25 +147,11 @@ pub fn merge_repo_config(
     if config.mode == defaults.mode {
         config.mode = repo_config.mode;
     }
-    if config.output_dir == defaults.output_dir {
-        config.output_dir = repo_config.output_dir;
-    }
     if config.tree_depth == defaults.tree_depth {
         config.tree_depth = repo_config.tree_depth;
     }
-    if config.redact_secrets == defaults.redact_secrets
-        && repo_config.redact_secrets != defaults.redact_secrets
-    {
-        config.redact_secrets = repo_config.redact_secrets;
-    }
-    if config.redaction_mode == defaults.redaction_mode {
-        config.redaction_mode = repo_config.redaction_mode;
-    }
     if config.ranking_weights.readme == defaults.ranking_weights.readme {
         config.ranking_weights = repo_config.ranking_weights;
-    }
-    if config.redaction == crate::domain::RedactionConfig::default() {
-        config.redaction = repo_config.redaction;
     }
     if config.module.module_roots.is_empty() {
         config.module.module_roots = repo_config.module.module_roots;
@@ -186,6 +162,14 @@ pub fn merge_repo_config(
     if config.full_inventory == defaults.full_inventory {
         config.full_inventory = repo_config.full_inventory;
     }
+
+    // ══ Intentionally NOT merged from remote repos ══
+    //   redact_secrets, follow_symlinks, respect_gitignore, skip_minified,
+    //   output_dir, redaction_mode, redaction (custom rules / structure-safe)
+    //
+    // These fields control the tool's safety boundary.  A remote repo must
+    // not be able to disable secret redaction, enable symlink traversal, or
+    // redirect output through a repo-bundled config file.
 }
 
 #[cfg(test)]

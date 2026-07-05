@@ -9,7 +9,7 @@ pub mod tokens;
 pub use classify::{is_likely_generated, is_likely_minified, is_lock_file, is_vendored};
 pub use encoding::{is_binary_file, read_file_safe};
 pub use hashing::stable_hash;
-pub use paths::normalize_path;
+pub use paths::{normalize_path, redact_url_credentials};
 pub use tokens::estimate_tokens;
 
 /// Format a number with thousands separators (e.g. 1048576 → "1,048,576").

@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use dialoguer::{theme::ColorfulTheme, FuzzySelect, Select};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::focus::{FocusCandidate, FocusKind, FocusScope};
 
@@ -119,21 +119,4 @@ pub fn preview_and_confirm(scope: &FocusScope, root: &Path) -> Result<FocusActio
         2 => FocusAction::FullContext,
         _ => FocusAction::Cancel,
     })
-}
-
-/// Legacy: pick an entry point (kept for backward compat if needed).
-#[allow(dead_code)]
-pub fn pick_entry(root: &Path, mut candidates: Vec<PathBuf>) -> Result<Option<PathBuf>> {
-    candidates.sort_by_key(|p| super::display_rel(root, p));
-    candidates.dedup();
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-    let labels: Vec<String> = candidates.iter().map(|p| super::display_rel(root, p)).collect();
-    let selected = FuzzySelect::with_theme(&ColorfulTheme::default())
-        .with_prompt("Select entry point (type to filter)")
-        .items(&labels)
-        .default(0)
-        .interact()?;
-    Ok(candidates.get(selected).cloned())
 }

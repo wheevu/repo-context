@@ -53,11 +53,7 @@ pub struct ScanStats {
     #[serde(default)]
     pub languages_detected: HashMap<String, usize>,
     #[serde(default)]
-    pub top_ignored_patterns: HashMap<String, usize>,
-    #[serde(default)]
     pub processing_time_seconds: f64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub top_ranked_files: Vec<HashMap<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_files: Vec<HashMap<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -75,11 +71,6 @@ impl ScanStats {
         langs.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         let languages_detected: serde_json::Map<String, serde_json::Value> =
             langs.into_iter().map(|(k, v)| (k.clone(), serde_json::json!(v))).collect();
-
-        let mut patterns: Vec<(&String, &usize)> = self.top_ignored_patterns.iter().collect();
-        patterns.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-        let top_ignored_patterns: serde_json::Map<String, serde_json::Value> =
-            patterns.into_iter().take(10).map(|(k, v)| (k.clone(), serde_json::json!(v))).collect();
 
         let mut value = serde_json::json!({
             "files_scanned": self.files_scanned,
@@ -108,7 +99,6 @@ impl ScanStats {
             "total_tokens_estimated_prompt": self.total_tokens_estimated_prompt,
             "total_tokens_estimated_rag": self.total_tokens_estimated_rag,
             "languages_detected": languages_detected,
-            "top_ignored_patterns": top_ignored_patterns,
             "redaction_counts": self.redaction_counts,
             "processing_time_seconds": self.processing_time_seconds,
         });
@@ -118,9 +108,6 @@ impl ScanStats {
         }
         if self.redacted_chunks > 0 {
             value["redacted_chunks"] = serde_json::json!(self.redacted_chunks);
-        }
-        if !self.top_ranked_files.is_empty() {
-            value["top_ranked_files"] = serde_json::json!(self.top_ranked_files);
         }
         if !self.dropped_files.is_empty() {
             value["dropped_files"] = serde_json::json!(self.dropped_files);

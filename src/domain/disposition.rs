@@ -14,12 +14,10 @@ pub enum FileDispositionReason {
     SkippedGitignore,
     SkippedGlob,
     SkippedMinified,
-    SkippedGenerated,
     DroppedByteBudget,
     DroppedTokenBudget,
     ExcludedNoiseDir,
     ErrorReadingMetadata,
-    ErrorReadingContent,
 }
 
 impl FileDispositionReason {
@@ -36,12 +34,10 @@ impl FileDispositionReason {
             Self::SkippedGitignore => "skipped_gitignore",
             Self::SkippedGlob => "skipped_glob",
             Self::SkippedMinified => "skipped_minified",
-            Self::SkippedGenerated => "skipped_generated",
             Self::DroppedByteBudget => "dropped_byte_budget",
             Self::DroppedTokenBudget => "dropped_token_budget",
             Self::ExcludedNoiseDir => "excluded_noise_dir",
             Self::ErrorReadingMetadata => "error_reading_metadata",
-            Self::ErrorReadingContent => "error_reading_content",
         }
     }
 }

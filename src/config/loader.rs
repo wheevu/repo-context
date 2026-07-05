@@ -1,7 +1,6 @@
 //! Config file loading
 //!
-//! Provides functionality to load configuration from TOML or YAML files,
-//! with auto-discovery of config files in the repository.
+//! Loads configuration from TOML files with auto-discovery in the repository.
 
 use crate::domain::Config;
 use anyhow::{Context, Result};
@@ -41,21 +40,6 @@ pub fn load_config(repo_root: &Path, config_path: Option<&Path>) -> Result<Confi
     // if auto-discovered (not explicitly provided by user).
     let parsed = match ext.as_str() {
         "toml" => match parse_toml_config(&content, &config_file) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                if config_path_provided {
-                    return Err(e);
-                }
-                // Auto-discovered: silently warn and return default
-                tracing::warn!(
-                    "Failed to parse auto-discovered config {}: {}",
-                    config_file.display(),
-                    e
-                );
-                return Ok(Config::default());
-            }
-        },
-        "yaml" | "yml" => match parse_yaml_config(&content, &config_file) {
             Ok(cfg) => cfg,
             Err(e) => {
                 if config_path_provided {
@@ -110,45 +94,8 @@ fn parse_toml_config(content: &str, config_file: &Path) -> Result<Config> {
     config_val.try_into().with_context(|| format!("Invalid TOML config: {}", config_file.display()))
 }
 
-/// Parse YAML config, supporting nested repo-context or r2p sections.
-///
-/// Matches Python's _parse_yaml behavior (lines 295-300).
-///
-/// NOTE: serde_yaml 0.9 is deprecated (crates.io shows 0.9.34+deprecated).
-/// When migrating, consider serde_yaml_ng (maintained fork) or saphyr.
-fn parse_yaml_config(content: &str, config_file: &Path) -> Result<Config> {
-    // Parse to generic value first
-    let raw: serde_yaml::Value = serde_yaml::from_str(content)
-        .with_context(|| format!("Invalid YAML syntax: {}", config_file.display()))?;
-
-    // Check for nested section (Python lines 296-299)
-    // Prefer repo-context, then r2p.
-    let config_val = if let Some(nested) = raw.get("repo-context") {
-        nested.clone()
-    } else if let Some(nested) = raw.get("r2p") {
-        nested.clone()
-    } else {
-        raw
-    };
-
-    // Deserialize to Config
-    serde_yaml::from_value(config_val)
-        .with_context(|| format!("Invalid YAML config: {}", config_file.display()))
-}
-
 fn discover_config(repo_root: &Path) -> Option<std::path::PathBuf> {
-    let candidates = [
-        // New names (preferred)
-        "repo-context.toml",
-        ".repo-context.toml",
-        // Short names
-        "r2p.toml",
-        ".r2p.toml",
-        "r2p.yml",
-        ".r2p.yml",
-        "r2p.yaml",
-        ".r2p.yaml",
-    ];
+    let candidates = ["repo-context.toml", ".repo-context.toml", "r2p.toml", ".r2p.toml"];
 
     for candidate in candidates {
         let path = repo_root.join(candidate);
@@ -187,13 +134,14 @@ mod tests {
     }
 
     #[test]
-    fn test_deprecated_coverage_profile_config_still_parses() {
+    fn test_full_inventory_config_parses() {
         let tmp = TempDir::new().expect("tmp");
         let path = tmp.path().join("repo-context.toml");
-        fs::write(&path, "coverage_profile = 'budget'\nmax_tokens = 12000\n").expect("write");
+        fs::write(&path, "full_inventory = true\nmax_tokens = 12000\n").expect("write");
 
         let cfg = load_config(tmp.path(), None).expect("config");
 
+        assert!(cfg.full_inventory);
         assert_eq!(cfg.max_tokens, Some(12000));
     }
 

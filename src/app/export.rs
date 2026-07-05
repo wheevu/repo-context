@@ -16,12 +16,13 @@ use crate::domain::{
 };
 use crate::fetch::fetch_repository;
 use crate::module::focus_picker::ScanMode;
+use crate::module::FocusResult;
 use crate::rank::rank_files_with_manifest;
 use crate::redact::Redactor;
-use crate::render::{render_context_pack, render_jsonl, write_report, ReportOptions};
+use crate::render::{render_jsonl, write_report, ContextPackCtx, ReportOptions};
 use crate::scan::scanner::FileScanner;
 use crate::scan::tree::generate_tree;
-use crate::utils::{estimate_tokens, read_file_safe};
+use crate::utils::{estimate_tokens, read_file_safe, redact_url_credentials};
 
 /// Options controlling export runtime behavior.
 #[derive(Debug, Clone)]
@@ -65,13 +66,7 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
         );
     }
 
-    let mut scanner = FileScanner::new(root_path.clone())
-        .max_file_bytes(config.max_file_bytes)
-        .respect_gitignore(config.respect_gitignore)
-        .follow_symlinks(config.follow_symlinks)
-        .skip_minified(config.skip_minified)
-        .include_extensions(config.include_extensions.iter().cloned().collect())
-        .exclude_globs(config.exclude_globs.iter().cloned().collect());
+    let mut scanner = FileScanner::from_config(root_path.clone(), &config);
 
     let scanned_files = scanner.scan()?;
     let mut stats = scanner.stats().clone();
@@ -102,7 +97,13 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
             )?)
         } else {
             // Interactive focused flow.
-            crate::module::run_focused(&root_path, &ranked_files, &config)?
+            match crate::module::run_focused(&root_path, &ranked_files, &config)? {
+                FocusResult::Export(m) => Some(m),
+                FocusResult::FullContext => None,
+                FocusResult::Cancelled => {
+                    return Err(anyhow::anyhow!("Export cancelled"));
+                }
+            }
         }
     } else {
         None
@@ -121,6 +122,14 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
         Some(build_redactor(config.redaction_mode, &config.redaction))
     } else {
         None
+    };
+
+    // Redact manifest strings (package.json scripts, etc.) before rendering,
+    // since they bypass the per-file redaction in process_file.
+    let manifest_info = if let Some(ref r) = redactor {
+        redact_manifest_info(manifest_info, r)
+    } else {
+        manifest_info
     };
 
     let mut all_chunks = Vec::new();
@@ -184,17 +193,18 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
     match config.mode {
         OutputMode::Prompt => {
             stats.prompt_chunks_rendered = chunks.len();
-            let mut content = render_context_pack(
-                &root_path,
-                &included_files,
-                &chunks,
-                &stats,
-                &tree,
-                &manifest_info,
-                &dispositions,
-                config.full_inventory,
-                options.include_timestamp,
-            );
+            let ctx = ContextPackCtx {
+                root_path: &root_path,
+                files: &included_files,
+                chunks: &chunks,
+                stats: &stats,
+                tree: &tree,
+                manifest_info: &manifest_info,
+                dispositions: &dispositions,
+                full_inventory: config.full_inventory,
+                include_timestamp: options.include_timestamp,
+            };
+            let mut content = ctx.render();
             if let Some(module) = &module_run {
                 content = format!("{}{}", module.header, content);
             }
@@ -209,17 +219,18 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
         }
         OutputMode::Both => {
             stats.prompt_chunks_rendered = chunks.len();
-            let mut content = render_context_pack(
-                &root_path,
-                &included_files,
-                &chunks,
-                &stats,
-                &tree,
-                &manifest_info,
-                &dispositions,
-                config.full_inventory,
-                options.include_timestamp,
-            );
+            let ctx = ContextPackCtx {
+                root_path: &root_path,
+                files: &included_files,
+                chunks: &chunks,
+                stats: &stats,
+                tree: &tree,
+                manifest_info: &manifest_info,
+                dispositions: &dispositions,
+                full_inventory: config.full_inventory,
+                include_timestamp: options.include_timestamp,
+            };
+            let mut content = ctx.render();
             if let Some(module) = &module_run {
                 content = format!("{}{}", module.header, content);
             }
@@ -238,7 +249,7 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
     let config_json = build_config_json(&config);
     let provenance = json!({
         "path": root_path.display().to_string(),
-        "repo": config.repo_url,
+        "repo": config.repo_url.as_ref().map(|u| redact_url_credentials(u)),
         "ref": config.ref_,
         "tool_version": env!("CARGO_PKG_VERSION"),
         "note": "Report includes deterministic stats and explicit supported fields only.",
@@ -657,7 +668,7 @@ fn build_config_json(config: &Config) -> Value {
 
     json!({
         "path": config.path,
-        "repo": config.repo_url,
+        "repo": config.repo_url.as_ref().map(|u| redact_url_credentials(u)),
         "ref": config.ref_,
         "include_extensions": include_extensions,
         "exclude_globs": exclude_globs,
@@ -681,4 +692,37 @@ fn build_config_json(config: &Config) -> Value {
             "css_files": &config.module.css_files,
         },
     })
+}
+
+/// Redact secrets from manifest info (package.json scripts, etc.) that bypass
+/// per-file redaction.
+fn redact_manifest_info(
+    mut info: HashMap<String, Value>,
+    redactor: &Redactor,
+) -> HashMap<String, Value> {
+    // Redact string values recursively.
+    fn redact_value(v: &mut Value, redactor: &Redactor) {
+        match v {
+            Value::String(s) => {
+                let outcome = redactor.redact_with_language_report(s, "", "", "", "");
+                *s = outcome.content;
+            }
+            Value::Object(map) => {
+                for val in map.values_mut() {
+                    redact_value(val, redactor);
+                }
+            }
+            Value::Array(arr) => {
+                for val in arr.iter_mut() {
+                    redact_value(val, redactor);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for val in info.values_mut() {
+        redact_value(val, redactor);
+    }
+    info
 }

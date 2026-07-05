@@ -49,9 +49,6 @@ pub struct Config {
     #[serde(default = "default_min_chunk_tokens")]
     pub min_chunk_tokens: usize,
 
-    /// Deprecated/backward-compatible config key. Runtime selection is derived from max_tokens.
-    #[serde(default)]
-    pub coverage_profile: Option<CoverageProfile>,
     #[serde(default)]
     pub full_inventory: bool,
 
@@ -93,7 +90,6 @@ impl Default for Config {
             chunk_tokens: default_chunk_tokens(),
             chunk_overlap: default_chunk_overlap(),
             min_chunk_tokens: default_min_chunk_tokens(),
-            coverage_profile: None,
             full_inventory: false,
             mode: OutputMode::Both,
             output_dir: default_output_dir(),
@@ -113,15 +109,6 @@ pub struct ModuleConfig {
     pub module_roots: Vec<PathBuf>,
     #[serde(default)]
     pub css_files: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum CoverageProfile {
-    Full,
-    #[default]
-    Balanced,
-    Budget,
 }
 
 fn default_true() -> bool {

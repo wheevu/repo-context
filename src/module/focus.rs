@@ -93,7 +93,8 @@ pub struct FocusCandidate {
 
 /// Builds the focus scope from the user's selection.
 ///
-/// If `selected_file_or_entry` is a Rust crate root (src/main.rs, src/lib.rs, src/bin/*.rs),
+/// If `selected` is a directory, it collects all source files under it.
+/// If it is a Rust crate root (src/main.rs, src/lib.rs, src/bin/*.rs),
 /// expands as a module (dependency graph). Otherwise, expands as a file focus
 /// (selected + callers + tests + entry path).
 pub fn build_scope(
@@ -108,6 +109,12 @@ pub fn build_scope(
     } else {
         Presentation::Modules
     };
+
+    // Directory candidates (e.g. JS/TS pages/, routes/) — collect all
+    // source files under the directory.
+    if selected.is_dir() {
+        return build_directory_scope(root, scanned_files, selected, presentation, source_count);
+    }
 
     if graph::is_rust_crate_root(selected, root) {
         build_module_scope(root, scanned_files, graph, selected, presentation, source_count)
@@ -289,6 +296,46 @@ fn build_module_scope(
 
     FocusScope {
         selected: entry_abs,
+        kind: FocusKind::Module,
+        presentation,
+        files,
+        repo_source_file_count: source_count,
+    }
+}
+
+// ── Directory-level scope ──
+
+/// Builds a scope for a directory candidate (e.g. JS/TS `pages/`, `routes/`).
+/// Collects all source files under the directory.
+fn build_directory_scope(
+    _root: &Path,
+    scanned_files: &[FileInfo],
+    selected_dir: &Path,
+    presentation: Presentation,
+    source_count: usize,
+) -> FocusScope {
+    let selected_abs = canon(selected_dir);
+    let mut files: Vec<(FileInfo, InclusionReason)> = scanned_files
+        .iter()
+        .filter(|f| {
+            let abs = canon(&f.path);
+            abs.starts_with(&selected_abs) && is_source_file(f)
+        })
+        .cloned()
+        .map(|f| (f, InclusionReason::RuntimeModule))
+        .collect();
+
+    // Tag likely entrypoints (index.*, main.*) with higher priority.
+    for (file, _) in &mut files {
+        file.priority = 0.9;
+        let name = file.path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+        if name.starts_with("index.") || name.starts_with("main.") || name.starts_with("app.") {
+            file.tags.insert("entrypoint".to_string());
+        }
+    }
+
+    FocusScope {
+        selected: selected_abs,
         kind: FocusKind::Module,
         presentation,
         files,

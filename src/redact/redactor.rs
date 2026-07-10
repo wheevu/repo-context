@@ -39,9 +39,9 @@ fn is_safe_value(s: &str) -> bool {
 
 /// Returns true if the filename matches any of the given glob patterns.
 fn matches_glob_pattern(filename: &str, patterns: &[String]) -> bool {
-    patterns
-        .iter()
-        .any(|pattern| Glob::new(pattern).ok().is_some_and(|g| g.compile_matcher().is_match(filename)))
+    patterns.iter().any(|pattern| {
+        Glob::new(pattern).ok().is_some_and(|g| g.compile_matcher().is_match(filename))
+    })
 }
 
 // Removed hand-rolled glob_match — replaced by globset::Glob above.
@@ -164,9 +164,7 @@ impl Redactor {
             // Fall back to extension-based fake filename
             let fake_filename = format!("file{}", extension);
             for pattern in &self.source_safe_patterns {
-                if Glob::new(pattern)
-                    .is_ok_and(|g| g.compile_matcher().is_match(&fake_filename))
-                {
+                if Glob::new(pattern).is_ok_and(|g| g.compile_matcher().is_match(&fake_filename)) {
                     return true;
                 }
             }

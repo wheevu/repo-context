@@ -79,14 +79,14 @@ use crate::task::JoinHandle;
 
 Originally built in Python, later rewritten in Rust.
 
-Local benchmarks showed **~82–83% lower export time** (**~5.5–5.8× faster**) on representative repositories.
+No benchmark results are checked in yet. To collect local, reproducible evidence, run:
 
-| Repository | Python | Rust | Speedup |
-|---|---:|---:|---:|
-| `repo-context` | 5.896s | 1.074s | 5.49× |
-| `dora-rs` | 2.079s | 0.357s | 5.82× |
+```bash
+./bench/bench.sh          # benchmark this repository
+./bench/bench.sh <repo>   # benchmark another local repository
+```
 
-Benchmarked with `hyperfine` using the same export workflow and `--no-timestamp`.
+The script builds the release binary with `--locked`, runs `repo-context export --no-timestamp --mode rag` with `hyperfine`, and writes raw timing JSON plus run metadata under `bench/results/`. See `bench/README.md` for the methodology.
 
 ## Commands
 

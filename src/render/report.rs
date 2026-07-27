@@ -1,6 +1,7 @@
 //! Report JSON generation.
 
 use crate::domain::{FileDisposition, FileInfo, ScanStats, REPORT_SCHEMA_VERSION};
+use crate::godot::GodotSummary;
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::{json, Map, Value};
@@ -15,6 +16,8 @@ pub struct ReportOptions<'a> {
     pub provenance: Option<&'a Value>,
     /// Optional focus metadata (focused export scope info)
     pub focus: Option<&'a Value>,
+    /// Godot project analysis when the Godot profile is active.
+    pub godot: Option<&'a GodotSummary>,
 }
 
 /// Writes a JSON report to the specified path.
@@ -76,6 +79,9 @@ pub fn write_report(
     }
     if let Some(focus) = options.focus {
         report.insert("focus".to_string(), focus.clone());
+    }
+    if let Some(godot) = options.godot {
+        report.insert("godot".to_string(), serde_json::to_value(godot)?);
     }
     report.insert("output_files".to_string(), serde_json::to_value(sorted_output_files)?);
     if !file_manifest.is_empty() {
@@ -162,7 +168,7 @@ mod tests {
             &["out/chunks.jsonl".to_string()],
             &json!({"mode":"rag"}),
             &[],
-            ReportOptions { include_timestamp: false, provenance: None, focus: None },
+            ReportOptions { include_timestamp: false, provenance: None, focus: None, godot: None },
         )
         .expect("write report");
 

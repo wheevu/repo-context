@@ -9,6 +9,7 @@ use super::utils::parse_csv;
 use crate::chunk::code_chunker::supported_tree_sitter_languages;
 use crate::config::{merge_cli_with_config, CliOverrides};
 use crate::domain::Config;
+use crate::godot::resolve_profile;
 use crate::rank::rank_files;
 use crate::scan::scanner::FileScanner;
 use crate::scan::tree::generate_tree;
@@ -43,6 +44,10 @@ pub struct InfoArgs {
     /// Include minified/bundled files
     #[arg(long)]
     pub include_minified: bool,
+
+    /// Repository profile: auto|generic|godot.
+    #[arg(long, value_name = "PROFILE")]
+    pub profile: Option<String>,
 }
 
 pub fn run(args: InfoArgs) -> Result<()> {
@@ -54,10 +59,11 @@ pub fn run(args: InfoArgs) -> Result<()> {
     let include_ext = parse_csv(&args.include_ext);
     let exclude_glob = parse_csv(&args.exclude_glob);
 
-    let config = merge_cli_with_config(
+    let mut config = merge_cli_with_config(
         Config::default(),
         CliOverrides {
             path: Some(root.clone()),
+            profile: args.profile.as_deref().map(super::export::parse_profile).transpose()?,
             include_extensions: include_ext.map(|v| v.into_iter().collect()),
             exclude_globs: exclude_glob.map(|v| v.into_iter().collect()),
             max_file_bytes: args.max_file_bytes,
@@ -67,14 +73,9 @@ pub fn run(args: InfoArgs) -> Result<()> {
             ..CliOverrides::default()
         },
     );
+    let detection = resolve_profile(&mut config, &root);
 
-    let mut scanner = FileScanner::new(root.clone())
-        .max_file_bytes(config.max_file_bytes)
-        .respect_gitignore(config.respect_gitignore)
-        .follow_symlinks(config.follow_symlinks)
-        .skip_minified(config.skip_minified)
-        .include_extensions(config.include_extensions.iter().cloned().collect())
-        .exclude_globs(config.exclude_globs.iter().cloned().collect());
+    let mut scanner = FileScanner::from_config(root.clone(), &config);
 
     let scanned_files = scanner.scan()?;
     let stats = scanner.stats().clone();
@@ -84,6 +85,7 @@ pub fn run(args: InfoArgs) -> Result<()> {
     // Repository name (just the directory name, matching Python's path.name)
     let repo_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("");
     println!("Repository: {}", repo_name);
+    println!("Profile: {}", if detection.active { "godot" } else { "generic" });
 
     // Languages detected (matching Python cli.py:762-765)
     if !stats.languages_detected.is_empty() {

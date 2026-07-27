@@ -15,6 +15,7 @@ use crate::domain::{
     ScanStats,
 };
 use crate::fetch::fetch_repository;
+use crate::godot::{analyze as analyze_godot, resolve_profile};
 use crate::module::focus_picker::ScanMode;
 use crate::module::FocusResult;
 use crate::rank::rank_files_with_manifest;
@@ -66,6 +67,8 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
         );
     }
 
+    let godot_detection = resolve_profile(&mut config, &root_path);
+
     let mut scanner = FileScanner::from_config(root_path.clone(), &config);
 
     let scanned_files = scanner.scan()?;
@@ -109,6 +112,9 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
         None
     };
     update_dispositions_from_files(&mut dispositions, &ranked_files);
+    let godot_summary = godot_detection.active.then(|| {
+        analyze_godot(&root_path, &ranked_files, &dispositions, godot_detection.signals.clone())
+    });
     let selected_source =
         module_run.as_ref().map(|module| module.files.clone()).unwrap_or(ranked_files);
     let selected_files = apply_file_byte_budget(
@@ -157,15 +163,21 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
     stats.chunks_created = chunks.len();
     stats.total_tokens_estimated = chunks.iter().map(|c| c.token_estimate).sum();
     stats.total_tokens_estimated_rag = stats.total_tokens_estimated;
+    let prompt_chunks = chunks.iter().filter(|chunk| !chunk.tags.contains("rag-only")).count();
     stats.rag_chunks_rendered =
         if matches!(config.mode, OutputMode::Rag | OutputMode::Both) { chunks.len() } else { 0 };
+    stats.prompt_chunks_rendered = if matches!(config.mode, OutputMode::Prompt | OutputMode::Both) {
+        prompt_chunks
+    } else {
+        0
+    };
     stats.files_selected_rag = if matches!(config.mode, OutputMode::Rag | OutputMode::Both) {
-        included_files.len()
+        unique_chunk_paths(&chunks, false)
     } else {
         0
     };
     stats.files_selected_prompt = if matches!(config.mode, OutputMode::Prompt | OutputMode::Both) {
-        included_files.len()
+        unique_chunk_paths(&chunks, true)
     } else {
         0
     };
@@ -192,7 +204,6 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
 
     match config.mode {
         OutputMode::Prompt => {
-            stats.prompt_chunks_rendered = chunks.len();
             let ctx = ContextPackCtx {
                 root_path: &root_path,
                 files: &included_files,
@@ -203,6 +214,7 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
                 dispositions: &dispositions,
                 full_inventory: config.full_inventory,
                 include_timestamp: options.include_timestamp,
+                godot: godot_summary.as_ref(),
             };
             let mut content = ctx.render();
             if let Some(module) = &module_run {
@@ -218,7 +230,6 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
             output_files.push(jsonl_path.display().to_string());
         }
         OutputMode::Both => {
-            stats.prompt_chunks_rendered = chunks.len();
             let ctx = ContextPackCtx {
                 root_path: &root_path,
                 files: &included_files,
@@ -229,6 +240,7 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
                 dispositions: &dispositions,
                 full_inventory: config.full_inventory,
                 include_timestamp: options.include_timestamp,
+                godot: godot_summary.as_ref(),
             };
             let mut content = ctx.render();
             if let Some(module) = &module_run {
@@ -253,6 +265,7 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
         "ref": config.ref_,
         "tool_version": env!("CARGO_PKG_VERSION"),
         "note": "Report includes deterministic stats and explicit supported fields only.",
+        "profile_signals": godot_detection.signals,
     });
 
     // Build focus metadata for the report when in focused mode.
@@ -302,6 +315,7 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
             include_timestamp: options.include_timestamp,
             provenance: Some(&provenance),
             focus: focus_json.as_ref(),
+            godot: godot_summary.as_ref(),
         },
     )?;
     output_files.push(report_path.display().to_string());
@@ -534,15 +548,20 @@ fn update_dispositions_for_outputs(
     chunks: &[Chunk],
     mode: OutputMode,
 ) {
-    let chunk_paths: HashSet<&str> = chunks.iter().map(|c| c.path.as_str()).collect();
+    let rag_paths: HashSet<&str> = chunks.iter().map(|c| c.path.as_str()).collect();
+    let prompt_paths: HashSet<&str> = chunks
+        .iter()
+        .filter(|chunk| !chunk.tags.contains("rag-only"))
+        .map(|chunk| chunk.path.as_str())
+        .collect();
     for file in files {
         if let Some(d) = dispositions.iter_mut().find(|d| d.path == file.relative_path) {
             d.priority = Some(file.priority);
             d.token_estimate = Some(file.token_estimate);
             d.included_in_prompt = matches!(mode, OutputMode::Prompt | OutputMode::Both)
-                && chunk_paths.contains(file.relative_path.as_str());
+                && prompt_paths.contains(file.relative_path.as_str());
             d.included_in_rag = matches!(mode, OutputMode::Rag | OutputMode::Both)
-                && chunk_paths.contains(file.relative_path.as_str());
+                && rag_paths.contains(file.relative_path.as_str());
             d.reason = if should_prompt_summary_only(file) {
                 FileDispositionReason::IncludedSummaryOnly
             } else if chunks.iter().filter(|c| c.path == file.relative_path).count() > 1 {
@@ -552,6 +571,15 @@ fn update_dispositions_for_outputs(
             };
         }
     }
+}
+
+fn unique_chunk_paths(chunks: &[Chunk], prompt_only: bool) -> usize {
+    chunks
+        .iter()
+        .filter(|chunk| !prompt_only || !chunk.tags.contains("rag-only"))
+        .map(|chunk| chunk.path.as_str())
+        .collect::<HashSet<_>>()
+        .len()
 }
 
 fn set_disposition_reason(
@@ -670,6 +698,11 @@ fn build_config_json(config: &Config) -> Value {
         "path": config.path,
         "repo": config.repo_url.as_ref().map(|u| redact_url_credentials(u)),
         "ref": config.ref_,
+        "profile": match config.profile {
+            crate::domain::ProjectProfile::Auto => "auto",
+            crate::domain::ProjectProfile::Generic => "generic",
+            crate::domain::ProjectProfile::Godot => "godot",
+        },
         "include_extensions": include_extensions,
         "exclude_globs": exclude_globs,
         "max_file_bytes": config.max_file_bytes,

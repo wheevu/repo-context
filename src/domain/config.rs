@@ -5,6 +5,19 @@ use serde::{de, Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+/// Repository-specific behavior layered over the generic scanner.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectProfile {
+    /// Detect a supported repository profile from project signals.
+    #[default]
+    Auto,
+    /// Use only the generic repository behavior.
+    Generic,
+    /// Enable first-class Godot repository behavior.
+    Godot,
+}
+
 /// Main configuration for repo-context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -14,6 +27,9 @@ pub struct Config {
     pub repo_url: Option<String>,
     #[serde(default, alias = "ref")]
     pub ref_: Option<String>,
+
+    #[serde(default)]
+    pub profile: ProjectProfile,
 
     #[serde(
         default = "default_include_extensions",
@@ -79,6 +95,7 @@ impl Default for Config {
             path: None,
             repo_url: None,
             ref_: None,
+            profile: ProjectProfile::Auto,
             include_extensions: default_include_extensions(),
             exclude_globs: default_exclude_globs(),
             max_file_bytes: default_max_file_bytes(),
@@ -101,6 +118,14 @@ impl Default for Config {
             module: ModuleConfig::default(),
         }
     }
+}
+
+/// Text extensions added when the Godot profile is active.
+pub fn godot_text_extensions() -> HashSet<String> {
+    [".gd", ".tscn", ".tres", ".gdshader", ".gdshaderinc", ".godot", ".cfg"]
+        .iter()
+        .map(|extension| (*extension).to_string())
+        .collect()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

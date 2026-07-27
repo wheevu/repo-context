@@ -1,6 +1,8 @@
 //! File scanner implementation with gitignore support
 
+use crate::domain::ProjectProfile;
 use crate::domain::{FileDisposition, FileDispositionReason, FileInfo, ScanStats};
+use crate::godot::{file_policy, FilePolicy};
 use crate::utils::{is_binary_file, is_likely_minified, normalize_path};
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -23,6 +25,7 @@ pub struct FileScanner {
     max_line_length: usize,
     stats: ScanStats,
     dispositions: Vec<FileDisposition>,
+    godot_profile: bool,
 }
 
 impl FileScanner {
@@ -39,6 +42,7 @@ impl FileScanner {
             max_line_length: 5000,
             stats: ScanStats::default(),
             dispositions: Vec::new(),
+            godot_profile: config.profile == ProjectProfile::Godot,
         }
     }
 
@@ -61,6 +65,7 @@ impl FileScanner {
             max_line_length: 5000,
             stats: ScanStats::default(),
             dispositions: Vec::new(),
+            godot_profile: false,
         }
     }
 
@@ -252,6 +257,12 @@ impl FileScanner {
                 continue;
             }
 
+            if self.godot_profile && file_policy(path) == FilePolicy::InventoryOnly {
+                self.stats.files_inventory_only += 1;
+                self.record_path(path, rel_path, FileDispositionReason::InventoryOnly, Some(size));
+                continue;
+            }
+
             // Check extension
             if !self.should_include_extension(path) {
                 self.stats.files_skipped_extension += 1;
@@ -353,7 +364,9 @@ impl FileScanner {
             + self.stats.files_skipped_binary
             + self.stats.files_skipped_extension
             + self.stats.files_skipped_gitignore
-            + self.stats.files_skipped_glob;
+            + self.stats.files_skipped_glob
+            + self.stats.files_skipped_minified
+            + self.stats.files_inventory_only;
 
         Ok(result)
     }
@@ -611,6 +624,37 @@ mod tests {
         for i in 1..files.len() {
             assert!(files[i - 1].relative_path <= files[i].relative_path);
         }
+    }
+
+    #[test]
+    fn godot_profile_includes_text_and_inventories_generated_and_binary_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::create_dir_all(root.join(".godot/editor")).unwrap();
+        fs::write(root.join("project.godot"), "config_version=5\n").unwrap();
+        fs::write(root.join("scripts/player.gd"), "extends Node\n").unwrap();
+        fs::write(root.join("scripts/player.gd.uid"), "uid://abc\n").unwrap();
+        fs::write(root.join("assets/player.png.import"), "[remap]\n").unwrap();
+        fs::write(root.join("assets/player.png"), [0_u8, 1, 2, 0, 3]).unwrap();
+        fs::write(root.join(".godot/editor/cache.cfg"), "generated=true\n").unwrap();
+
+        let mut config = crate::domain::Config::default();
+        crate::godot::resolve_profile(&mut config, root);
+        let mut scanner = FileScanner::from_config(root.to_path_buf(), &config);
+        let files = scanner.scan().unwrap();
+
+        assert!(files.iter().any(|file| file.relative_path == "project.godot"));
+        assert!(files.iter().any(|file| file.relative_path == "scripts/player.gd"));
+        assert!(!files.iter().any(|file| file.relative_path.ends_with(".uid")));
+        assert_eq!(scanner.stats().files_inventory_only, 3);
+        assert!(scanner.dispositions().iter().any(|item| {
+            item.path == "assets/player.png"
+                && item.reason == FileDispositionReason::InventoryOnly
+                && item.language == "image_asset"
+        }));
+        assert!(!scanner.dispositions().iter().any(|item| item.path.starts_with(".godot/")));
     }
 
     #[test]

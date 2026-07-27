@@ -1,6 +1,7 @@
 //! Context pack Markdown rendering
 
 use crate::domain::{Chunk, FileDisposition, FileInfo, ScanStats};
+use crate::godot::GodotSummary;
 use crate::utils::format_with_commas;
 use chrono::Utc;
 use serde_json::Value as JsonValue;
@@ -19,6 +20,7 @@ pub struct ContextPackCtx<'a> {
     pub dispositions: &'a [FileDisposition],
     pub full_inventory: bool,
     pub include_timestamp: bool,
+    pub godot: Option<&'a GodotSummary>,
 }
 
 impl<'a> ContextPackCtx<'a> {
@@ -34,6 +36,7 @@ impl<'a> ContextPackCtx<'a> {
             self.dispositions,
             self.full_inventory,
             self.include_timestamp,
+            self.godot,
         )
     }
 }
@@ -62,6 +65,7 @@ pub fn render_context_pack(
     dispositions: &[FileDisposition],
     full_inventory: bool,
     include_timestamp: bool,
+    godot: Option<&GodotSummary>,
 ) -> String {
     let mut out = String::new();
 
@@ -82,12 +86,16 @@ pub fn render_context_pack(
     out.push_str(&format!(
         "> Files: {} | Chunks: {} | Size: {} bytes\n",
         stats.files_included,
-        chunks.len(),
+        stats.prompt_chunks_rendered,
         format_with_commas(stats.total_bytes_included)
     ));
     out.push_str("\n---\n\n");
 
     render_inventory(&mut out, stats, files, dispositions, full_inventory);
+
+    if let Some(godot) = godot {
+        render_godot_overview(&mut out, godot);
+    }
 
     // ── Repository Overview ──────────────────────────────────────────────────
     out.push_str("## 📋 Repository Overview\n\n");
@@ -106,7 +114,7 @@ pub fn render_context_pack(
     if !lang_counts.is_empty() {
         let top = lang_counts
             .iter()
-            .take(5)
+            .take(if godot.is_some() { 10 } else { 5 })
             .map(|(lang, count)| format!("{} ({})", lang, count))
             .collect::<Vec<_>>()
             .join(", ");
@@ -277,7 +285,7 @@ pub fn render_context_pack(
     let file_priorities: HashMap<&str, f64> =
         files.iter().map(|f| (f.relative_path.as_str(), f.priority)).collect();
     let mut chunks_by_file: HashMap<&str, Vec<&Chunk>> = HashMap::new();
-    for chunk in chunks {
+    for chunk in chunks.iter().filter(|chunk| !chunk.tags.contains("rag-only")) {
         chunks_by_file.entry(chunk.path.as_str()).or_default().push(chunk);
     }
 
@@ -343,6 +351,96 @@ pub fn render_context_pack(
     out
 }
 
+fn render_godot_overview(out: &mut String, godot: &GodotSummary) {
+    out.push_str("## Godot Project\n\n");
+    out.push_str(&format!("- project signals: {}\n", godot.signals.join(", ")));
+    out.push_str(&format!(
+        "- version/features: config {} | {}\n",
+        godot.project.config_version.as_deref().unwrap_or("unknown"),
+        if godot.project.features.is_empty() {
+            "not declared".to_string()
+        } else {
+            godot.project.features.join(", ")
+        }
+    ));
+    out.push_str(&format!(
+        "- main scene: `{}`\n",
+        godot.project.main_scene.as_deref().unwrap_or("not configured")
+    ));
+    out.push_str(&format!(
+        "- implementation discovered: {} GDScript, {} scenes, {} resources, {} shaders\n",
+        godot.gdscript_count, godot.scene_count, godot.resource_count, godot.shader_count
+    ));
+    out.push_str(&format!("- test files discovered: {}\n", godot.test_files.len()));
+    for test in &godot.test_files {
+        out.push_str(&format!("  - `{test}`\n"));
+    }
+    out.push_str(&format!("- test commands discovered: {}\n", godot.test_commands.len()));
+    for command in &godot.test_commands {
+        out.push_str(&format!("  - `{command}`\n"));
+    }
+    out.push_str(&format!(
+        "- third-party test frameworks discovered: {}\n",
+        if godot.test_frameworks.is_empty() {
+            "none (tests may use standalone SceneTree scripts)".to_string()
+        } else {
+            godot.test_frameworks.join(", ")
+        }
+    ));
+    if !godot.project.autoloads.is_empty() {
+        out.push_str("- autoloads:\n");
+        for (name, path) in &godot.project.autoloads {
+            out.push_str(&format!("  - `{name}` → `{path}`\n"));
+        }
+    }
+    if !godot.project.input_actions.is_empty() {
+        out.push_str(&format!(
+            "- configured input actions: {}\n",
+            godot.project.input_actions.join(", ")
+        ));
+    }
+    if !godot.input_actions_used.is_empty() {
+        out.push_str(&format!(
+            "- input actions used in source: {}\n",
+            godot.input_actions_used.join(", ")
+        ));
+    }
+    if !godot.central_systems.is_empty() {
+        out.push_str("- source-defined systems (`class_name`):\n");
+        for (name, path) in &godot.central_systems {
+            out.push_str(&format!("  - `{name}` — `{path}`\n"));
+        }
+    }
+    if !godot.asset_counts.is_empty() {
+        out.push_str("- binary/generated assets (inventory only; internals not inspected): ");
+        out.push_str(
+            &godot
+                .asset_counts
+                .iter()
+                .map(|(kind, count)| format!("{kind}={count}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        out.push('\n');
+    }
+    if !godot.relationships.is_empty() {
+        out.push_str("\n### Godot Relationships\n\n");
+        for relationship in godot.relationships.iter().take(100) {
+            out.push_str(&format!(
+                "- `{}` —{}→ `{}`\n",
+                relationship.source, relationship.kind, relationship.target
+            ));
+        }
+        if godot.relationships.len() > 100 {
+            out.push_str(&format!(
+                "- … {} more relationships in the JSON report\n",
+                godot.relationships.len() - 100
+            ));
+        }
+    }
+    out.push_str("\nREADME claims are documentation only; the counts and relationships above come from project files and source text.\n\n");
+}
+
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -398,8 +496,27 @@ fn render_inventory(
         "\n| path | language | role/tags | priority | tokens | prompt/rag/disposition |\n",
     );
     out.push_str("| --- | --- | --- | ---: | ---: | --- |\n");
-    let limit = if full_inventory { usize::MAX } else { 100 };
-    for d in dispositions.iter().take(limit) {
+    let mut visible: Vec<&FileDisposition> = if full_inventory {
+        dispositions.iter().collect()
+    } else {
+        let mut regular: Vec<&FileDisposition> =
+            dispositions.iter().filter(|item| item.reason.as_str() != "inventory_only").collect();
+        regular.sort_by(|a, b| {
+            b.priority
+                .partial_cmp(&a.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        let mut assets: Vec<&FileDisposition> =
+            dispositions.iter().filter(|item| item.reason.as_str() == "inventory_only").collect();
+        assets.sort_by(|a, b| a.path.cmp(&b.path));
+        regular.extend(assets.into_iter().take(20));
+        regular
+    };
+    if full_inventory {
+        visible.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    for d in &visible {
         out.push_str(&format!(
             "| `{}` | {} | {} | {} | {} | {}/{}/{} |\n",
             escape_table_cell(&d.path),
@@ -412,9 +529,11 @@ fn render_inventory(
             d.reason.as_str()
         ));
     }
-    if dispositions.len() > limit {
+    if dispositions.len() > visible.len() {
         out.push_str(&format!(
-            "\n*Inventory table capped at {limit} rows; report JSON contains the complete inventory.*\n"
+            "\n*Inventory table shows all non-asset dispositions plus {} representative inventory-only assets; report JSON contains all {} files.*\n",
+            visible.iter().filter(|item| item.reason.as_str() == "inventory_only").count(),
+            dispositions.len()
         ));
     }
     out.push('\n');

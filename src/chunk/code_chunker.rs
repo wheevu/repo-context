@@ -299,6 +299,15 @@ fn find_definition_boundaries(lines: &[&str], language: &str) -> Vec<usize> {
                     || trimmed.starts_with("var ")
                     || trimmed.starts_with("const ")
             }
+            "gdscript" => {
+                *line == trimmed
+                    && (trimmed.starts_with("func ")
+                        || trimmed.starts_with("static func ")
+                        || trimmed.starts_with("class "))
+            }
+            "godot_shader" | "godot_shader_include" => {
+                *line == trimmed && trimmed.ends_with('{') && trimmed.contains('(')
+            }
             _ => {
                 trimmed.starts_with("def ")
                     || trimmed.starts_with("class ")
@@ -308,7 +317,18 @@ fn find_definition_boundaries(lines: &[&str], language: &str) -> Vec<usize> {
         };
 
         if is_boundary {
-            boundaries.push(idx);
+            let boundary = if language == "gdscript" {
+                let mut annotation_start = idx;
+                while annotation_start > 0
+                    && lines[annotation_start - 1].trim_start().starts_with('@')
+                {
+                    annotation_start -= 1;
+                }
+                annotation_start
+            } else {
+                idx
+            };
+            boundaries.push(boundary);
         }
     }
 
@@ -445,6 +465,20 @@ fn extract_symbol_tags_from_line(language: &str, line: &str) -> BTreeSet<String>
             ("let ", "def"),
         ],
         "go" => &[("func ", "def"), ("type ", "type"), ("const ", "def"), ("var ", "def")],
+        "gdscript" => &[
+            ("static func ", "def"),
+            ("func ", "def"),
+            ("class_name ", "type"),
+            ("class ", "type"),
+            ("signal ", "signal"),
+        ],
+        "godot_shader" | "godot_shader_include" => &[
+            ("void ", "def"),
+            ("float ", "def"),
+            ("vec2 ", "def"),
+            ("vec3 ", "def"),
+            ("vec4 ", "def"),
+        ],
         _ => &[("def ", "def"), ("fn ", "def"), ("class ", "type")],
     };
 

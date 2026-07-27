@@ -3,7 +3,7 @@
 //! CLI argument merging with config.
 
 use crate::config::loader::load_config;
-use crate::domain::{Config, OutputMode, RedactionMode};
+use crate::domain::{Config, OutputMode, ProjectProfile, RedactionMode};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +13,7 @@ pub struct CliOverrides {
     pub path: Option<PathBuf>,
     pub repo_url: Option<String>,
     pub ref_: Option<String>,
+    pub profile: Option<ProjectProfile>,
     pub include_extensions: Option<HashSet<String>>,
     pub exclude_globs: Option<HashSet<String>>,
     pub max_file_bytes: Option<u64>,
@@ -43,6 +44,9 @@ pub fn merge_cli_with_config(mut base_config: Config, cli: CliOverrides) -> Conf
     }
     if let Some(ref_) = cli.ref_ {
         base_config.ref_ = Some(ref_);
+    }
+    if let Some(profile) = cli.profile {
+        base_config.profile = profile;
     }
 
     if let Some(include_extensions) = cli.include_extensions {
@@ -161,6 +165,9 @@ pub fn merge_repo_config(
     }
     if config.full_inventory == defaults.full_inventory {
         config.full_inventory = repo_config.full_inventory;
+    }
+    if config.profile == defaults.profile {
+        config.profile = repo_config.profile;
     }
 
     // ══ Intentionally NOT merged from remote repos ══

@@ -174,7 +174,32 @@ Disable secret redaction
 repo-context export --path . --no-redact
 ```
 
+Index a Godot 4 project (auto-detected)
+```
+repo-context export --path /path/to/game --no-timestamp
+```
+
+Force or disable repository-specific behavior
+```
+repo-context export --path /path/to/game --profile godot
+repo-context export --path /path/to/repo --profile generic
+```
+
 </details>
+
+## Godot 4 repositories
+
+Godot support is auto-selected when `project.godot`, `.godot/`, or a Godot source format is found. `project.godot` is the strongest signal. Set `profile = "godot"` or `profile = "generic"` in `repo-context.toml`, or use `--profile`, to override detection. The Godot profile is layered onto the normal extension and ignore configuration.
+
+The scanner understands GDScript (`.gd`), text scenes (`.tscn`), text resources (`.tres`), shaders (`.gdshader`, `.gdshaderinc`), Godot configuration (`.godot`, including `project.godot`), and `.cfg` files. It extracts GDScript declarations and resource paths, scene hierarchy and connections, project settings, shader declarations, standalone Godot test scripts, and the main scene/autoload/load relationships used by the context pack and JSON report.
+
+Generated `.uid` and `.import` files are inventory-only, and `.godot/` editor/import caches are excluded. Images, audio, models, and binary `.res`/`.scn` resources are recorded with path, type, and size but are never read as text or emitted as chunks. Large scenes are structurally summarized; detailed node batches are retrieval-only when needed.
+
+Valid JSON is parsed before minification checks. The prompt receives a concise top-level schema, while logical object/array batches remain available in RAG chunks. Invalid JSON safely falls back to normal text chunking. Minified-code protection remains active for JavaScript and similar source formats.
+
+Known limitations: the Godot parsers are intentionally lightweight rather than compiler-complete. Dynamic resource paths, runtime-created node hierarchies, computed input action names, and binary asset internals cannot always be resolved statically. Malformed or unusual text formats degrade to source/text chunks instead of failing an export.
+
+Godot analysis is additive in report schema `1.2.0`: reports may contain a top-level `godot` object, and file dispositions may use `inventory_only` for generated metadata and binary assets that were indexed without textual chunks.
 
 ## Development
 ```

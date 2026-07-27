@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use super::utils::parse_csv;
 use crate::app::export::{execute, ExportExecutionOptions};
 use crate::config::{load_config, merge_cli_with_config, CliOverrides};
-use crate::domain::{OutputMode, RedactionMode};
+use crate::domain::{OutputMode, ProjectProfile, RedactionMode};
 use crate::module::focus_picker::ScanMode;
 
 #[derive(Args)]
@@ -23,6 +23,10 @@ pub struct ExportArgs {
     /// Git ref (branch/tag/SHA) when using --repo.
     #[arg(long, value_name = "REF")]
     pub ref_: Option<String>,
+
+    /// Repository profile: auto|generic|godot.
+    #[arg(long, value_name = "PROFILE")]
+    pub profile: Option<String>,
 
     /// Path to config file (repo-context.toml or .r2p.yml).
     #[arg(short = 'c', long, value_name = "FILE")]
@@ -131,6 +135,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
         path: args.path,
         repo_url: args.repo,
         ref_: args.ref_,
+        profile: args.profile.as_deref().map(parse_profile).transpose()?,
         include_extensions: include_ext,
         exclude_globs: exclude_glob,
         max_file_bytes: args.max_file_bytes,
@@ -214,6 +219,15 @@ fn parse_scan_mode(mode: Option<&str>) -> Result<Option<ScanMode>> {
             "focused" | "focus" => Ok(Some(ScanMode::Focused)),
             other => anyhow::bail!("Invalid scan mode '{other}'. Expected one of: full, focused"),
         },
+    }
+}
+
+pub(crate) fn parse_profile(profile: &str) -> Result<ProjectProfile> {
+    match profile.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(ProjectProfile::Auto),
+        "generic" => Ok(ProjectProfile::Generic),
+        "godot" => Ok(ProjectProfile::Godot),
+        other => anyhow::bail!("Invalid profile '{other}'. Expected one of: auto, generic, godot"),
     }
 }
 

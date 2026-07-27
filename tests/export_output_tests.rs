@@ -107,7 +107,7 @@ fn export_report_contains_trustworthy_core_fields() {
             .expect("read report");
     let report: Value = serde_json::from_str(&report_raw).expect("parse report");
 
-    assert_eq!(report["schema_version"], Value::String("1.1.0".to_string()));
+    assert_eq!(report["schema_version"], Value::String("1.2.0".to_string()));
     assert!(report.get("generated_at").is_none());
     assert!(report.get("stats").is_some());
     assert!(report.get("config").is_some());

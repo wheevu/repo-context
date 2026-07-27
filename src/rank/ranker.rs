@@ -1,6 +1,7 @@
 //! File ranker implementation with manifest-aware entrypoint detection.
 
 use crate::domain::{FileInfo, RankingWeights};
+use crate::godot::{parse_project, parse_scene};
 use crate::rank::workspace::discover_workspace_graph;
 use crate::utils::{
     is_likely_generated, is_lock_file, is_vendored, normalize_path, read_file_safe,
@@ -65,6 +66,9 @@ pub struct FileRanker {
     manifest_info: HashMap<String, JsonValue>,
     workspace_members: Vec<String>,
     weights: RankingWeights,
+    godot_main_scene: Option<String>,
+    godot_central_files: HashSet<String>,
+    godot_autoloads: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,6 +123,9 @@ impl FileRanker {
             manifest_info: HashMap::new(),
             workspace_members: Vec::new(),
             weights,
+            godot_main_scene: None,
+            godot_central_files: HashSet::new(),
+            godot_autoloads: HashSet::new(),
         };
         ranker.load_manifests();
         ranker.validate_entrypoints();
@@ -144,6 +151,45 @@ impl FileRanker {
         file.is_config = signals.is_config;
         file.is_doc = signals.is_doc;
         file.priority = self.score_signals(signals);
+
+        let is_project = rel_normalized == "project.godot";
+        let is_main_scene = self.godot_main_scene.as_deref() == Some(rel_normalized.as_str());
+        let is_autoload = self.godot_autoloads.contains(&rel_normalized);
+        let is_central = self.godot_central_files.contains(&rel_normalized);
+        if is_project {
+            file.priority = file.priority.max(0.98);
+            file.tags.extend(["godot", "project-config", "key-file"].map(str::to_string));
+        } else if is_main_scene {
+            file.priority = file.priority.max(0.95);
+            file.tags.extend(["godot", "scene", "entrypoint", "key-file"].map(str::to_string));
+        } else if is_autoload {
+            file.priority = file.priority.max(0.92);
+            file.tags
+                .extend(["godot", "autoload", "global-system", "key-file"].map(str::to_string));
+        } else if is_central {
+            file.priority = file.priority.max(0.88);
+            file.tags.extend(["godot", "central-system"].map(str::to_string));
+        }
+
+        match file.language.as_str() {
+            "gdscript" => {
+                file.priority = file.priority.max(if signals.is_test { 0.65 } else { 0.75 });
+                file.tags.extend(["godot", "source"].map(str::to_string));
+            }
+            "godot_scene" => {
+                file.priority = file.priority.max(0.60);
+                file.tags.extend(["godot", "scene"].map(str::to_string));
+            }
+            "godot_resource" => {
+                file.priority = file.priority.max(0.55);
+                file.tags.extend(["godot", "resource"].map(str::to_string));
+            }
+            "godot_shader" | "godot_shader_include" => {
+                file.priority = file.priority.max(0.65);
+                file.tags.extend(["godot", "rendering"].map(str::to_string));
+            }
+            _ => {}
+        }
 
         if signals.is_readme {
             file.tags.insert("readme".to_string());
@@ -294,10 +340,44 @@ impl FileRanker {
         self.parse_package_json();
         self.parse_go_mod();
         self.parse_cargo_toml();
+        self.parse_godot_project();
 
         if self.root_path.join("setup.py").exists() {
             self.detected_languages.insert("python".to_string());
         }
+    }
+
+    fn parse_godot_project(&mut self) {
+        let path = self.root_path.join("project.godot");
+        let Ok((content, _)) = read_file_safe(&path, None, None) else { return };
+        let project = parse_project(&content);
+        self.detected_languages.insert("gdscript".to_string());
+        if let Some(main_scene) = project.main_scene {
+            let relative = normalize_path(main_scene.trim_start_matches("res://"));
+            self.entrypoint_candidates.insert(relative.clone());
+            self.godot_main_scene = Some(relative.clone());
+            self.godot_central_files.insert(relative.clone());
+            if let Ok((scene_content, _)) =
+                read_file_safe(&self.root_path.join(&relative), None, None)
+            {
+                for resource in parse_scene(&scene_content).external_resources.into_values() {
+                    self.godot_central_files
+                        .insert(normalize_path(resource.trim_start_matches("res://")));
+                }
+            }
+        }
+        for path in project.autoloads.into_values() {
+            let relative = normalize_path(path.trim_start_matches("res://"));
+            self.godot_autoloads.insert(relative.clone());
+            self.godot_central_files.insert(relative);
+        }
+        self.manifest_info.insert(
+            "godot".to_string(),
+            serde_json::json!({
+                "project_file": "project.godot",
+                "main_scene": self.godot_main_scene,
+            }),
+        );
     }
 
     fn parse_pyproject(&mut self) {
@@ -547,7 +627,11 @@ fn is_ci_workflow(rel: &str) -> bool {
 }
 
 fn is_config_file(name: &str, rel: &str) -> bool {
-    IMPORTANT_CONFIG_FILES.contains(&rel) || IMPORTANT_CONFIG_FILES.contains(&name)
+    rel == "project.godot"
+        || name.ends_with(".godot")
+        || name.ends_with(".cfg")
+        || IMPORTANT_CONFIG_FILES.contains(&rel)
+        || IMPORTANT_CONFIG_FILES.contains(&name)
 }
 
 fn is_api_definition(name: &str) -> bool {

@@ -36,6 +36,16 @@ pub fn is_likely_minified(path: &Path, max_line_length: usize) -> bool {
         }
     }
 
+    // One-line JSON is common structured data, not minified executable code.
+    if path.extension().and_then(|value| value.to_str()).is_some_and(|ext| {
+        ext.eq_ignore_ascii_case("json")
+            && std::fs::read_to_string(path)
+                .ok()
+                .is_some_and(|content| serde_json::from_str::<serde_json::Value>(&content).is_ok())
+    }) {
+        return false;
+    }
+
     // Check first line length
     if let Ok(mut file) = File::open(path) {
         let mut buffer = vec![0u8; max_line_length + 1];
@@ -97,7 +107,12 @@ pub fn is_likely_generated(path: &Path, content_sample: &str) -> bool {
         }
 
         // Check for extremely long first line (common in minified files)
-        if let Some(first_line) = content_sample.lines().next() {
+        let is_json = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+        if !is_json {
+            let Some(first_line) = content_sample.lines().next() else { return false };
             if first_line.len() > 1000 {
                 return true;
             }

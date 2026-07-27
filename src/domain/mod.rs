@@ -11,7 +11,10 @@ mod redaction;
 mod stats;
 
 pub use chunk::Chunk;
-pub use config::{default_exclude_globs, default_include_extensions, Config, ModuleConfig};
+pub use config::{
+    default_exclude_globs, default_include_extensions, godot_text_extensions, Config, ModuleConfig,
+    ProjectProfile,
+};
 pub use disposition::{FileDisposition, FileDispositionReason};
 pub use file::FileInfo;
 pub use language::get_language;

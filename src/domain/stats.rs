@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 /// Current report schema version.
-pub const REPORT_SCHEMA_VERSION: &str = "1.1.0";
+pub const REPORT_SCHEMA_VERSION: &str = "1.2.0";
 
 /// Statistics from scanning and processing.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -25,6 +25,8 @@ pub struct ScanStats {
     pub files_skipped_glob: usize,
     #[serde(default)]
     pub files_skipped_minified: usize,
+    #[serde(default)]
+    pub files_inventory_only: usize,
     #[serde(default)]
     pub files_skipped: usize,
     pub files_dropped_budget: usize,
@@ -85,6 +87,7 @@ impl ScanStats {
                 "gitignore": self.files_skipped_gitignore,
                 "glob": self.files_skipped_glob,
                 "minified": self.files_skipped_minified,
+                "inventory_only": self.files_inventory_only,
                 "size": self.files_skipped_size,
             },
             "files_dropped_budget": self.files_dropped_budget,

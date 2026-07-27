@@ -216,8 +216,23 @@ fn imports_for(
         }
         ".rs" | "rs" => rust_imports(&file.path, content, by_path),
         ".go" | "go" => go_imports(content, rel_to_abs),
+        ".gd" | ".tscn" | ".tres" | ".godot" | ".gdshader" | ".gdshaderinc" => {
+            godot_imports(content, rel_to_abs)
+        }
         _ => Vec::new(),
     }
+}
+
+fn godot_imports(content: &str, rel_to_abs: &HashMap<String, PathBuf>) -> Vec<PathBuf> {
+    let re = Regex::new(r#"res://[^\"'\s)\],}]+"#).expect("valid Godot resource regex");
+    let mut out = Vec::new();
+    for resource_path in re.find_iter(content).map(|matched| matched.as_str()) {
+        let relative = resource_path.trim_start_matches("res://").replace('\\', "/");
+        if let Some(path) = rel_to_abs.get(&relative) {
+            out.push(path.clone());
+        }
+    }
+    dedup(out)
 }
 
 fn js_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>) -> Vec<PathBuf> {
@@ -481,6 +496,18 @@ mod tests {
         };
 
         assert_eq!(traverse(&graph, &entry), vec![entry, dep, transitive]);
+    }
+
+    #[test]
+    fn godot_imports_resolve_resource_paths() {
+        let script = PathBuf::from("/repo/scripts/player.gd");
+        let scene = PathBuf::from("/repo/scenes/hud.tscn");
+        let map = HashMap::from([("scenes/hud.tscn".to_string(), scene.clone())]);
+
+        let imports = godot_imports("const HUD = preload(\"res://scenes/hud.tscn\")\n", &map);
+
+        assert_eq!(imports, vec![scene]);
+        let _ = script;
     }
 
     #[test]

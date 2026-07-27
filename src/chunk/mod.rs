@@ -6,10 +6,14 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 
 use code_chunker::chunk_code;
+use godot_chunker::{chunk_gdscript, chunk_project, chunk_scene, chunk_shader};
+use json_chunker::chunk_json;
 use line_chunker::chunk_lines;
 use markdown_chunker::chunk_markdown;
 
 pub mod code_chunker;
+pub mod godot_chunker;
+pub mod json_chunker;
 pub mod line_chunker;
 pub mod markdown_chunker;
 
@@ -21,10 +25,20 @@ pub fn chunk_content(
     overlap_tokens: usize,
 ) -> Result<Vec<Chunk>> {
     let chunker_kind = chunker_for_language(&file_info.language);
-    let mut chunks = match chunker_kind {
-        ChunkerKind::Markdown => chunk_markdown(file_info, content, max_tokens, overlap_tokens),
-        ChunkerKind::Code => chunk_code(file_info, content, max_tokens, overlap_tokens),
-        ChunkerKind::Line => chunk_lines(file_info, content, max_tokens, overlap_tokens),
+    let mut chunks = match file_info.language.as_str() {
+        "gdscript" => chunk_gdscript(file_info, content, max_tokens, overlap_tokens),
+        "godot_scene" | "godot_resource" => chunk_scene(file_info, content, max_tokens),
+        "godot_project" => chunk_project(file_info, content, max_tokens),
+        "godot_shader" | "godot_shader_include" => {
+            chunk_shader(file_info, content, max_tokens, overlap_tokens)
+        }
+        "json" => chunk_json(file_info, content, max_tokens)
+            .unwrap_or_else(|| chunk_lines(file_info, content, max_tokens, overlap_tokens)),
+        _ => match chunker_kind {
+            ChunkerKind::Markdown => chunk_markdown(file_info, content, max_tokens, overlap_tokens),
+            ChunkerKind::Code => chunk_code(file_info, content, max_tokens, overlap_tokens),
+            ChunkerKind::Line => chunk_lines(file_info, content, max_tokens, overlap_tokens),
+        },
     };
 
     if !chunks.is_empty() {
@@ -70,8 +84,13 @@ pub(crate) fn enrich_chunks(chunks: &mut [Chunk], file_info: &FileInfo, file_con
         chunk.file_sha256 = file_sha256.clone();
         let start_byte = line_to_byte_offset(file_content, chunk.start_line);
         let end_byte = line_end_to_byte_offset(file_content, chunk.end_line);
-        chunk.byte_start = Some(start_byte);
-        chunk.byte_end = Some(end_byte);
+        if chunk.tags.contains("synthetic-summary") {
+            chunk.byte_start = None;
+            chunk.byte_end = None;
+        } else {
+            chunk.byte_start = Some(start_byte);
+            chunk.byte_end = Some(end_byte);
+        }
     }
 }
 

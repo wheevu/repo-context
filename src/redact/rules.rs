@@ -188,8 +188,19 @@ pub static DEFAULT_RULES: Lazy<Vec<RedactionRule>> = Lazy::new(|| {
         // ── Basic auth in URLs ────────────────────────────────────────────────────
         RedactionRule {
             name: "url_auth",
-            pattern: Regex::new(r"(https?://[^:]+:)([^@]+)(@[^\s]+)").expect("valid regex"),
+            pattern: Regex::new(
+                r#"\b(https?://[^\s/:@<>"']+:)([^\s/@<>"']+)(@[^\s<>"']+)"#,
+            )
+            .expect("valid regex"),
             replacement: "${1}[PASSWORD_REDACTED]${3}",
+        },
+        RedactionRule {
+            name: "url_credential",
+            pattern: Regex::new(
+                r#"(?i)([?&;](?:api[_-]?key|access[_-]?token|auth[_-]?token|id[_-]?token|token|session(?:id)?|jsessionid|signature|x-amz-signature|credential|password)=)([^&#\s<>"']{16,})"#,
+            )
+            .expect("valid regex"),
+            replacement: "${1}[URL_CREDENTIAL_REDACTED]",
         },
         // ── HTTP Authorization headers ────────────────────────────────────────────
         RedactionRule {
@@ -377,6 +388,31 @@ mod tests {
         let out = redact("https://user:secret123@example.com/api");
         assert!(out.contains("[PASSWORD_REDACTED]"), "got: {out}");
         assert!(!out.contains("secret123"));
+    }
+
+    #[test]
+    fn redacts_url_query_and_matrix_credentials() {
+        let input = concat!(
+            "https://example.com/callback?token=abcdefghijklmnopqrstuvwxyz123456\n",
+            "https://example.com/page;jsessionid=ZYXWVUTSRQPONMLKJIHGFEDCBA654321",
+        );
+        let out = redact(input);
+
+        assert_eq!(out.matches("[URL_CREDENTIAL_REDACTED]").count(), 2, "got: {out}");
+        assert!(!out.contains("abcdefghijklmnopqrstuvwxyz123456"));
+        assert!(!out.contains("ZYXWVUTSRQPONMLKJIHGFEDCBA654321"));
+    }
+
+    #[test]
+    fn url_auth_does_not_span_markdown_lines() {
+        let input = "[rubric](https://drive.google.com/file/d/example/view)\n\nContact: @reviewer";
+        assert_eq!(redact(input), input);
+    }
+
+    #[test]
+    fn url_auth_does_not_span_python_statements() {
+        let input = "API_URL = \"https://example.com/article\"\nreviewer: str = \"@organizer\"\n";
+        assert_eq!(redact(input), input);
     }
 
     #[test]

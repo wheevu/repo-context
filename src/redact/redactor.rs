@@ -1,6 +1,6 @@
 //! Redactor implementation
 
-use crate::domain::{CustomRedactionRule, RedactionConfig};
+use crate::domain::{is_programming_language, CustomRedactionRule, RedactionConfig};
 use crate::redact::entropy::calculate_entropy;
 use crate::redact::rules::{RedactionRule, DEFAULT_RULES};
 use globset::Glob;
@@ -16,7 +16,7 @@ const ENTROPY_MIN_LEN: usize = 20;
 
 /// Patterns for safe (non-secret) strings that should not be flagged by entropy detection.
 /// Matches: UUIDs, git SHAs (40-char hex), MD5 (32-char hex), SHA-256 (64-char hex),
-/// semver strings.
+/// semver strings, and package-manager subresource-integrity hashes.
 static SAFE_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
         // UUID
@@ -29,12 +29,27 @@ static SAFE_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         Regex::new(r"^[0-9a-f]{64}$").unwrap(),
         // Semver: 1.2.3-beta.4+build.567
         Regex::new(r"^\d+\.\d+\.\d+[\w\-+.]*$").unwrap(),
+        // npm and other package-manager integrity fields
+        Regex::new(r"^sha(?:256|384|512)-[A-Za-z0-9+/]+={0,2}$").unwrap(),
     ]
 });
 
 /// Returns true if `s` matches a known safe pattern (UUID, hash, semver).
 fn is_safe_value(s: &str) -> bool {
     SAFE_PATTERNS.iter().any(|re| re.is_match(s))
+}
+
+/// Returns true when a candidate is part of a URL token. URL-aware rules handle
+/// recognizable credentials without treating opaque path and query IDs as secrets.
+fn is_url_token(text: &str, token_start: usize) -> bool {
+    let prefix = &text[..token_start];
+    let url_start = [prefix.rfind("https://"), prefix.rfind("http://")].into_iter().flatten().max();
+    let Some(url_start) = url_start else { return false };
+    let before_token = &prefix[url_start..];
+
+    !before_token
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>'))
 }
 
 /// Returns true if the filename matches any of the given glob patterns.
@@ -70,6 +85,21 @@ pub struct RedactionOutcome {
     pub content: String,
     /// Count of matches per rule name.
     pub counts: BTreeMap<String, usize>,
+    /// Replacement spans in the final redacted content.
+    pub occurrences: Vec<RedactionOccurrence>,
+}
+
+/// One applied redaction and its byte span in the final redacted content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedactionOccurrence {
+    /// Rule that produced the replacement.
+    pub rule: String,
+    /// Inclusive replacement start byte.
+    pub start: usize,
+    /// Exclusive replacement end byte.
+    pub end: usize,
+    /// Exact replacement text emitted for this occurrence.
+    pub replacement: String,
 }
 
 /// Build an entropy token regex for the given minimum token length.
@@ -213,20 +243,25 @@ impl Redactor {
         check_structure_safe: bool,
     ) -> RedactionOutcome {
         let mut counts = BTreeMap::new();
+        let mut occurrences = Vec::new();
 
         // ── Pass 1: apply rule-based redactions ──────────────────────────────
         let mut after_rules = text.to_string();
         for rule in &self.rules {
-            let mut replaced = 0usize;
-            after_rules = rule
-                .pattern
-                .replace_all(&after_rules, |caps: &regex::Captures<'_>| {
-                    replaced += 1;
+            let (next, replaced) =
+                replace_tracked(&after_rules, &rule.pattern, &mut occurrences, rule.name, |caps| {
+                    let unquoted_code_reference = rule.name == "generic_secret"
+                        && is_programming_language(language)
+                        && !caps.get(2).is_some_and(|value| value.as_str().contains(['\'', '"']))
+                        && caps.get(3).is_some_and(|value| is_code_reference(value.as_str()));
+                    if unquoted_code_reference {
+                        return None;
+                    }
                     let mut expanded = String::new();
                     caps.expand(rule.replacement, &mut expanded);
-                    expanded
-                })
-                .into_owned();
+                    Some(expanded)
+                });
+            after_rules = next;
             if replaced > 0 {
                 counts.insert(rule.name.to_string(), replaced);
             }
@@ -245,7 +280,11 @@ impl Redactor {
                 // Rules broke the Python AST — revert everything and return original.
                 let mut reverted = BTreeMap::new();
                 reverted.insert("structure_safe_reverted".to_string(), 1);
-                return RedactionOutcome { content: text.to_string(), counts: reverted };
+                return RedactionOutcome {
+                    content: text.to_string(),
+                    counts: reverted,
+                    occurrences: Vec::new(),
+                };
             }
         }
 
@@ -255,9 +294,11 @@ impl Redactor {
         let apply_paranoid = self.paranoid_mode && !file_is_safe;
 
         let mut after_entropy = after_rules.clone();
+        let rule_occurrences = occurrences.clone();
 
         if self.redact_high_entropy {
-            let (entropy_redacted, entropy_count) = self.redact_high_entropy_tokens(&after_entropy);
+            let (entropy_redacted, entropy_count) =
+                self.redact_high_entropy_tokens(&after_entropy, &mut occurrences);
             after_entropy = entropy_redacted;
             if entropy_count > 0 {
                 counts.insert("entropy_detected".to_string(), entropy_count);
@@ -265,7 +306,8 @@ impl Redactor {
         }
 
         if apply_paranoid {
-            let (paranoid_redacted, paranoid_count) = self.redact_paranoid_tokens(&after_entropy);
+            let (paranoid_redacted, paranoid_count) =
+                self.redact_paranoid_tokens(&after_entropy, &mut occurrences);
             after_entropy = paranoid_redacted;
             if paranoid_count > 0 {
                 *counts.entry("paranoid_redacted".to_string()).or_insert(0) += paranoid_count;
@@ -280,37 +322,45 @@ impl Redactor {
                 // Remove entropy/paranoid counts (keep rule counts).
                 counts.remove("entropy_detected");
                 counts.remove("paranoid_redacted");
-                return RedactionOutcome { content: after_rules, counts };
+                return RedactionOutcome {
+                    content: after_rules,
+                    counts,
+                    occurrences: rule_occurrences,
+                };
             }
         }
 
-        RedactionOutcome { content: after_entropy, counts }
+        RedactionOutcome { content: after_entropy, counts, occurrences }
     }
 
-    fn redact_high_entropy_tokens(&self, text: &str) -> (String, usize) {
+    fn redact_high_entropy_tokens(
+        &self,
+        text: &str,
+        occurrences: &mut Vec<RedactionOccurrence>,
+    ) -> (String, usize) {
         let threshold = if self.paranoid_mode { 3.5 } else { self.entropy_threshold };
         let min_len = self.entropy_min_len;
-        let mut count = 0usize;
-        let output = self
-            .entropy_token_regex
-            .replace_all(text, |caps: &regex::Captures<'_>| {
-                let token = caps.get(0).map(|m| m.as_str()).unwrap_or("");
-                if token.len() >= min_len
-                    && !self.is_string_allowlisted(token)
-                    && !is_safe_value(token)
-                    && calculate_entropy(token) >= threshold
-                {
-                    count += 1;
-                    "[HIGH_ENTROPY_REDACTED]".to_string()
-                } else {
-                    token.to_string()
-                }
-            })
-            .into_owned();
-        (output, count)
+        replace_tracked(text, &self.entropy_token_regex, occurrences, "entropy_detected", |caps| {
+            let candidate = caps.get(0)?;
+            let token = candidate.as_str();
+            if token.len() >= min_len
+                && !self.is_string_allowlisted(token)
+                && !is_safe_value(token)
+                && !is_url_token(text, candidate.start())
+                && calculate_entropy(token) >= threshold
+            {
+                Some("[HIGH_ENTROPY_REDACTED]".to_string())
+            } else {
+                None
+            }
+        })
     }
 
-    fn redact_paranoid_tokens(&self, text: &str) -> (String, usize) {
+    fn redact_paranoid_tokens(
+        &self,
+        text: &str,
+        occurrences: &mut Vec<RedactionOccurrence>,
+    ) -> (String, usize) {
         let min_len = self.paranoid_min_len;
         // Paranoid: any alphanumeric+symbols token of min_len or more that isn't already
         // redacted, allowlisted, or a known safe value.
@@ -319,23 +369,83 @@ impl Redactor {
             Ok(r) => r,
             Err(_) => return (text.to_string(), 0),
         };
-        let mut count = 0usize;
-        let output = re
-            .replace_all(text, |caps: &regex::Captures<'_>| {
-                let token = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-                if self.is_string_allowlisted(token)
-                    || is_safe_value(token)
-                    || token.contains("[REDACTED")
-                {
-                    token.to_string()
-                } else {
-                    count += 1;
-                    "[LONG_TOKEN_REDACTED]".to_string()
-                }
-            })
-            .into_owned();
-        (output, count)
+        replace_tracked(text, &re, occurrences, "paranoid_redacted", |caps| {
+            let token = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            if self.is_string_allowlisted(token)
+                || is_safe_value(token)
+                || token.contains("[REDACTED")
+            {
+                None
+            } else {
+                Some("[LONG_TOKEN_REDACTED]".to_string())
+            }
+        })
     }
+}
+
+fn is_code_reference(value: &str) -> bool {
+    let mut segments = value.split('.');
+    segments.all(|segment| {
+        let mut chars = segment.chars();
+        chars.next().is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+            && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+    })
+}
+
+fn replace_tracked(
+    text: &str,
+    pattern: &Regex,
+    occurrences: &mut Vec<RedactionOccurrence>,
+    rule: &str,
+    mut replacement: impl FnMut(&regex::Captures<'_>) -> Option<String>,
+) -> (String, usize) {
+    let mut output = String::with_capacity(text.len());
+    let mut edits = Vec::new();
+    let mut new_occurrences = Vec::new();
+    let mut last = 0usize;
+
+    for captures in pattern.captures_iter(text) {
+        let Some(matched) = captures.get(0) else { continue };
+        let Some(replacement) = replacement(&captures) else { continue };
+        output.push_str(&text[last..matched.start()]);
+        let start = output.len();
+        output.push_str(&replacement);
+        let end = output.len();
+        edits.push((matched.start(), matched.end(), start, end));
+        new_occurrences.push(RedactionOccurrence {
+            rule: rule.to_string(),
+            start,
+            end,
+            replacement,
+        });
+        last = matched.end();
+    }
+
+    if edits.is_empty() {
+        return (text.to_string(), 0);
+    }
+    output.push_str(&text[last..]);
+
+    occurrences.retain_mut(|occurrence| {
+        if edits.iter().any(|(start, end, _, _)| occurrence.start < *end && occurrence.end > *start)
+        {
+            return false;
+        }
+        let shift: isize = edits
+            .iter()
+            .filter(|(_, end, _, _)| *end <= occurrence.start)
+            .map(|(start, end, new_start, new_end)| {
+                (*new_end as isize - *new_start as isize) - (*end as isize - *start as isize)
+            })
+            .sum();
+        occurrence.start = occurrence.start.saturating_add_signed(shift);
+        occurrence.end = occurrence.end.saturating_add_signed(shift);
+        true
+    });
+    occurrences.extend(new_occurrences);
+    occurrences.sort_by_key(|occurrence| occurrence.start);
+
+    (output, edits.len())
 }
 
 #[cfg(test)]
@@ -398,8 +508,8 @@ fn is_valid_python(_source: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_safe_value, is_valid_python, Redactor};
-    use crate::domain::RedactionConfig;
+    use super::{is_safe_value, is_url_token, is_valid_python, Redactor};
+    use crate::domain::{CustomRedactionRule, RedactionConfig};
 
     #[test]
     fn redacts_known_patterns() {
@@ -410,11 +520,119 @@ mod tests {
     }
 
     #[test]
+    fn generic_rule_preserves_unquoted_code_references() {
+        let redactor = Redactor::new();
+        let input = "extractor = ClaimExtractor(api_key=settings.gemini_api_key)";
+        let outcome =
+            redactor.redact_with_language_report(input, "python", ".py", "main.py", "app/main.py");
+
+        assert_eq!(outcome.content, input);
+        assert!(outcome.occurrences.is_empty());
+
+        let literal = redactor.redact_with_language_report(
+            "api_key='abcdefghijklmnop1234'",
+            "python",
+            ".py",
+            "main.py",
+            "app/main.py",
+        );
+        assert!(literal.content.contains("[SECRET_REDACTED]"));
+    }
+
+    #[test]
+    fn occurrence_spans_track_custom_replacements_without_marker_text() {
+        let mut config = RedactionConfig::default();
+        config.custom_rules.push(CustomRedactionRule {
+            name: Some("custom_token".to_string()),
+            pattern: "CUSTOM_LONG_SECRET".to_string(),
+            replacement: "HIDDEN".to_string(),
+        });
+        let redactor = Redactor::from_config(false, false, false, &config);
+        let outcome = redactor.redact_with_language_report(
+            "CUSTOM_LONG_SECRET sk-abcdefghijklmnopqrstuvwxyz12345",
+            "text",
+            ".txt",
+            "secrets.txt",
+            "secrets.txt",
+        );
+
+        let custom = outcome
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.rule == "custom_token")
+            .expect("custom occurrence");
+        let openai = outcome
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.rule == "openai_key")
+            .expect("OpenAI occurrence");
+        assert_eq!(&outcome.content[custom.start..custom.end], "HIDDEN");
+        assert_eq!(&outcome.content[openai.start..openai.end], "[REDACTED_OPENAI_KEY]");
+    }
+
+    #[test]
+    fn occurrence_span_tracks_multiline_replacement() {
+        let redactor = Redactor::new();
+        let outcome = redactor.redact_with_language_report(
+            "before\n-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----\nafter\n",
+            "text",
+            ".txt",
+            "key.txt",
+            "key.txt",
+        );
+
+        let occurrence = outcome
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.rule == "private_key_header")
+            .expect("private key occurrence");
+        assert_eq!(&outcome.content[occurrence.start..occurrence.end], "[PRIVATE_KEY_REDACTED]");
+    }
+
+    #[test]
     fn redacts_entropy_tokens() {
         let redactor = Redactor::new().with_entropy_detection(true);
         let input = "secret ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
         let output = redactor.redact(input);
         assert!(output.contains("[HIGH_ENTROPY_REDACTED]"));
+    }
+
+    #[test]
+    fn ordinary_urls_are_not_redacted_by_entropy() {
+        let redactor = Redactor::new().with_entropy_detection(true);
+        let input = concat!(
+            "See [the rubric](https://drive.google.com/file/d/",
+            "1gCYKVKU2nWTmMZ6mSAGkanWC8js962j1/view?usp=sharing).\n",
+            "Source: https://aclanthology.org/2026.eacl-long.240/\n",
+            "Resolved: https://www.kdca.go.kr/subview.do;route=",
+            "OmsMAFN_ccJ_V9BTdrIiw8aPsLGeXvnP2cfllS4T.kdca_20?enc=",
+            "Zm5jdDF8QEB8JTJGYmJzJTJGa2RjYSUyRjQyJTJGMzEwMDk2JTJGYXJ0Y2xWaWV3LmRvJTNG\n",
+        );
+
+        assert_eq!(redactor.redact(input), input);
+    }
+
+    #[test]
+    fn api_key_rules_still_redact_url_query_credentials() {
+        let redactor = Redactor::new().with_entropy_detection(true);
+        let input = "https://example.com/callback?api_key=ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+        let output = redactor.redact(input);
+
+        assert!(output.contains("[URL_CREDENTIAL_REDACTED]"), "got: {output}");
+        assert!(!output.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"));
+    }
+
+    #[test]
+    fn detects_url_context_across_path_and_query() {
+        let url = "https://example.com/ABCDEFGHIJKLMNOPQRSTUVWXYZ123456?state=ZYXWVUTSRQPONMLKJIHGFEDCBA654321";
+        let path_token = url.find("ABCDEFGHIJKLMNOPQRSTUVWXYZ").unwrap();
+        let query_token = url.find("ZYXWVUTSRQPONMLKJIHGFEDCBA").unwrap();
+
+        assert!(is_url_token(url, path_token));
+        assert!(is_url_token(url, query_token));
+        let assigned = "source=https://example.com/ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+        assert!(is_url_token(assigned, assigned.find("ABCDEFGHIJKLMNOPQRSTUVWXYZ").unwrap()));
+        assert!(!is_url_token("value=ABCDEFGHIJKLMNOPQRSTUVWXYZ123456", 6));
     }
 
     #[test]
@@ -449,6 +667,10 @@ mod tests {
         assert!(is_safe_value("d41d8cd98f00b204e9800998ecf8427e"));
         // Semver
         assert!(is_safe_value("1.2.3-beta.4"));
+        // npm subresource-integrity value (padding may be omitted by tokenization)
+        assert!(is_safe_value(
+            "sha512-6OzddxPio9UiWTCemp4N8cYLV2ZN1ncRnV1cVGtve7dhPOtRkleRyx32GQCYSwDYgaHU3USMm84tNsvKzRCa1Q"
+        ));
     }
 
     #[test]

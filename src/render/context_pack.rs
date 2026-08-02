@@ -19,6 +19,7 @@ pub struct ContextPackCtx<'a> {
     pub manifest_info: &'a HashMap<String, JsonValue>,
     pub dispositions: &'a [FileDisposition],
     pub full_inventory: bool,
+    pub compact: bool,
     pub include_timestamp: bool,
     pub godot: Option<&'a GodotSummary>,
 }
@@ -35,6 +36,7 @@ impl<'a> ContextPackCtx<'a> {
             self.manifest_info,
             self.dispositions,
             self.full_inventory,
+            self.compact,
             self.include_timestamp,
             self.godot,
         )
@@ -64,10 +66,20 @@ pub fn render_context_pack(
     manifest_info: &HashMap<String, JsonValue>,
     dispositions: &[FileDisposition],
     full_inventory: bool,
+    compact: bool,
     include_timestamp: bool,
     godot: Option<&GodotSummary>,
 ) -> String {
     let mut out = String::new();
+
+    if compact {
+        out.push_str(&format!(
+            "# Context: {}\n\n",
+            root_path.file_name().and_then(|n| n.to_str()).unwrap_or("repo")
+        ));
+        render_file_contents(&mut out, files, chunks);
+        return out;
+    }
 
     // ── Header ──────────────────────────────────────────────────────────────
     out.push_str(&format!(
@@ -145,8 +157,8 @@ pub fn render_context_pack(
         if !present.is_empty() {
             out.push_str("\n**Available Commands:**\n");
             for (cmd, val) in present {
-                if val.len() > 60 {
-                    out.push_str(&format!("- `{}`: `{}...`\n", cmd, &val[..60]));
+                if val.chars().count() > 60 {
+                    out.push_str(&format!("- `{}`: `{}...`\n", cmd, truncate_chars(val, 60)));
                 } else {
                     out.push_str(&format!("- `{}`: `{}`\n", cmd, val));
                 }
@@ -278,7 +290,12 @@ pub fn render_context_pack(
         out.push('\n');
     }
 
-    // ── File Contents ────────────────────────────────────────────────────────
+    render_file_contents(&mut out, files, chunks);
+
+    out
+}
+
+fn render_file_contents(out: &mut String, files: &[FileInfo], chunks: &[Chunk]) {
     out.push_str("## 📄 File Contents\n\n");
 
     // Group chunks by file path, sorted by file priority then path.
@@ -305,7 +322,7 @@ pub fn render_context_pack(
         let priority = file_priorities.get(*path).copied().unwrap_or(0.5);
 
         // Per-file header with metadata
-        out.push_str(&format!("### `{}`\n\n", path));
+        out.push_str(&format!("### {}\n\n", inline_code(path)));
         out.push_str(&format!(
             "*Priority: {:.0}% | Language: {} | Chunks: {}*\n\n",
             priority * 100.0,
@@ -339,16 +356,15 @@ pub fn render_context_pack(
                     notes.join(" | ")
                 ));
             }
-            out.push_str(&format!("```{}\n", escape_fence_lang(&chunk.language)));
             let trimmed = chunk.content.trim_end();
+            let fence = markdown_fence(trimmed);
+            out.push_str(&format!("{}{}\n", fence, escape_fence_lang(&chunk.language)));
             out.push_str(trimmed);
-            // Escape any trailing backtick sequences in content to prevent fence-breaking.
             out.push('\n');
-            out.push_str("```\n\n");
+            out.push_str(&fence);
+            out.push_str("\n\n");
         }
     }
-
-    out
 }
 
 fn render_godot_overview(out: &mut String, godot: &GodotSummary) {
@@ -462,6 +478,34 @@ fn escape_fence_lang(lang: &str) -> String {
         .collect()
 }
 
+fn markdown_fence(content: &str) -> String {
+    "`".repeat(longest_backtick_run(content).saturating_add(1).max(3))
+}
+
+fn inline_code(content: &str) -> String {
+    let delimiter = "`".repeat(longest_backtick_run(content).saturating_add(1));
+    let padding = if content.starts_with('`') || content.ends_with('`') { " " } else { "" };
+    format!("{delimiter}{padding}{content}{padding}{delimiter}")
+}
+
+fn longest_backtick_run(content: &str) -> usize {
+    let mut longest = 0usize;
+    let mut current = 0usize;
+    for ch in content.chars() {
+        if ch == '`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
+}
+
+fn truncate_chars(content: &str, limit: usize) -> String {
+    content.chars().take(limit).collect()
+}
+
 fn render_inventory(
     out: &mut String,
     stats: &ScanStats,
@@ -566,7 +610,7 @@ fn dedupe_overlapping_chunks(chunks: Vec<&Chunk>) -> Vec<Chunk> {
 
 #[cfg(test)]
 mod tests {
-    use super::dedupe_overlapping_chunks;
+    use super::{dedupe_overlapping_chunks, inline_code, markdown_fence, truncate_chars};
     use crate::domain::Chunk;
     use std::collections::BTreeSet;
 
@@ -601,5 +645,25 @@ mod tests {
         assert_eq!(deduped.len(), 2);
         assert_eq!(deduped[1].start_line, 4);
         assert_eq!(deduped[1].content, "line4\nline5\n");
+    }
+
+    #[test]
+    fn markdown_fence_is_longer_than_embedded_backticks() {
+        assert_eq!(markdown_fence("plain"), "```");
+        assert_eq!(markdown_fence("```rust\nfn main() {}\n```"), "````");
+        assert_eq!(markdown_fence("`````"), "``````");
+    }
+
+    #[test]
+    fn inline_code_handles_backticks_in_paths() {
+        assert_eq!(inline_code("src/`odd`.rs"), "``src/`odd`.rs``");
+        assert_eq!(inline_code("`edge`"), "`` `edge` ``");
+    }
+
+    #[test]
+    fn truncation_preserves_unicode_boundaries() {
+        let command = "dịch-bài-báo-한국어".repeat(8);
+        let truncated = truncate_chars(&command, 60);
+        assert_eq!(truncated.chars().count(), 60);
     }
 }

@@ -52,10 +52,9 @@ pub fn render_jsonl(chunks: &[Chunk]) -> String {
         entry.insert("lockfile", Value::Bool(chunk.tags.contains("lock-file")));
         entry.insert("minified", Value::Bool(chunk.tags.contains("minified")));
         entry.insert("path", Value::String(chunk.path.clone()));
-        entry.insert(
-            "priority",
-            serde_json::to_value((chunk.priority * 1000.0).round() / 1000.0).unwrap(),
-        );
+        // Value::from(f64) serializes non-finite priorities as null instead of
+        // panicking; priorities are expected to be finite.
+        entry.insert("priority", Value::from((chunk.priority * 1000.0).round() / 1000.0));
         entry.insert("role", Value::String(tags.join(",")));
         entry.insert(
             "disposition",
@@ -125,5 +124,32 @@ mod tests {
         assert_eq!(value["chunks_in_file"], 1);
         assert_eq!(value["byte_start"], 0);
         assert_eq!(value["content_sha256"], "abc");
+    }
+
+    #[test]
+    fn jsonl_renders_non_finite_priority_as_null() {
+        let chunk = Chunk {
+            id: "c1".to_string(),
+            path: "src/lib.rs".to_string(),
+            language: "rust".to_string(),
+            start_line: 1,
+            end_line: 2,
+            content: "fn main() {}\n".to_string(),
+            priority: f64::NAN,
+            tags: BTreeSet::new(),
+            token_estimate: 4,
+            file_id: "file1".to_string(),
+            chunk_index: 0,
+            chunks_in_file: 1,
+            byte_start: Some(0),
+            byte_end: Some(13),
+            content_sha256: "abc".to_string(),
+            file_sha256: "def".to_string(),
+        };
+
+        let jsonl = render_jsonl(&[chunk]);
+        let value: serde_json::Value = serde_json::from_str(jsonl.trim()).unwrap();
+
+        assert_eq!(value["priority"], serde_json::Value::Null);
     }
 }

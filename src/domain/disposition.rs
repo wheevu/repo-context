@@ -17,6 +17,7 @@ pub enum FileDispositionReason {
     SkippedMinified,
     DroppedByteBudget,
     DroppedTokenBudget,
+    ExcludedFocus,
     ExcludedNoiseDir,
     ErrorReadingMetadata,
 }
@@ -38,6 +39,7 @@ impl FileDispositionReason {
             Self::SkippedMinified => "skipped_minified",
             Self::DroppedByteBudget => "dropped_byte_budget",
             Self::DroppedTokenBudget => "dropped_token_budget",
+            Self::ExcludedFocus => "excluded_focus",
             Self::ExcludedNoiseDir => "excluded_noise_dir",
             Self::ErrorReadingMetadata => "error_reading_metadata",
         }

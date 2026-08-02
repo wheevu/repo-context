@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -11,14 +11,15 @@ use std::time::Instant;
 
 use crate::chunk::{chunk_content, coalesce_small_chunks_with_max, enrich_chunks};
 use crate::domain::{
-    Chunk, Config, FileDisposition, FileDispositionReason, FileInfo, OutputMode, RedactionMode,
-    ScanStats,
+    is_programming_language, Chunk, Config, FileDisposition, FileDispositionReason, FileInfo,
+    OutputMode, RedactionMode, ScanStats,
 };
 use crate::fetch::fetch_repository;
 use crate::godot::{analyze as analyze_godot, resolve_profile};
 use crate::module::focus_picker::ScanMode;
 use crate::module::FocusResult;
 use crate::rank::rank_files_with_manifest;
+use crate::redact::redactor::RedactionOccurrence;
 use crate::redact::Redactor;
 use crate::render::{render_jsonl, write_report, ContextPackCtx, ReportOptions};
 use crate::scan::scanner::FileScanner;
@@ -115,6 +116,12 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
     let godot_summary = godot_detection.active.then(|| {
         analyze_godot(&root_path, &ranked_files, &dispositions, godot_detection.signals.clone())
     });
+    let focus_paths = module_run.as_ref().map(|module| {
+        module.files.iter().map(|file| file.relative_path.clone()).collect::<HashSet<_>>()
+    });
+    if let Some(paths) = &focus_paths {
+        mark_focus_excluded(&mut dispositions, paths);
+    }
     let selected_source =
         module_run.as_ref().map(|module| module.files.clone()).unwrap_or(ranked_files);
     let selected_files = apply_file_byte_budget(
@@ -139,54 +146,123 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
     };
 
     let mut all_chunks = Vec::new();
-    let mut redaction_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut redactions_by_path: HashMap<String, Vec<RedactionOccurrence>> = HashMap::new();
     let content_overrides = module_run.as_ref().map(|module| &module.content_overrides);
     for file in &selected_files {
         let processed = process_file(file, redactor.as_ref(), &config, content_overrides)?;
-        if processed.redacted {
-            stats.redacted_files += 1;
-            stats.redacted_chunks += processed.chunks.len();
-        }
-        for (rule, count) in processed.counts {
-            *redaction_counts.entry(rule).or_insert(0) += count;
+        if !processed.redactions.is_empty() {
+            redactions_by_path.insert(file.relative_path.clone(), processed.redactions);
         }
         all_chunks.extend(processed.chunks);
     }
-    stats.redaction_counts = redaction_counts;
 
-    let chunks = apply_chunk_token_budget(all_chunks, config.max_tokens, &mut stats);
+    let mut chunks = apply_chunk_token_budget(all_chunks, config.max_tokens, &mut stats);
+    if matches!(config.mode, OutputMode::Rag | OutputMode::Both) {
+        if let Some(limit) = config.max_tokens {
+            trim_chunks_to_rag_budget(&mut chunks, limit);
+        }
+    }
+    let accounting_stats = stats.clone();
+    let accounting_dispositions = dispositions.clone();
+    let mut included_files = refresh_output_accounting(
+        &mut stats,
+        &mut dispositions,
+        &selected_files,
+        &chunks,
+        config.mode,
+        &redactions_by_path,
+    );
 
-    let file_tokens = file_token_totals(&chunks);
-    let included_files = selected_files_with_tokens(selected_files.clone(), &file_tokens);
-
-    stats.files_included = included_files.len();
-    stats.chunks_created = chunks.len();
-    stats.total_tokens_estimated = chunks.iter().map(|c| c.token_estimate).sum();
-    stats.total_tokens_estimated_rag = stats.total_tokens_estimated;
-    let prompt_chunks = chunks.iter().filter(|chunk| !chunk.tags.contains("rag-only")).count();
-    stats.rag_chunks_rendered =
-        if matches!(config.mode, OutputMode::Rag | OutputMode::Both) { chunks.len() } else { 0 };
-    stats.prompt_chunks_rendered = if matches!(config.mode, OutputMode::Prompt | OutputMode::Both) {
-        prompt_chunks
-    } else {
-        0
-    };
-    stats.files_selected_rag = if matches!(config.mode, OutputMode::Rag | OutputMode::Both) {
-        unique_chunk_paths(&chunks, false)
-    } else {
-        0
-    };
-    stats.files_selected_prompt = if matches!(config.mode, OutputMode::Prompt | OutputMode::Both) {
-        unique_chunk_paths(&chunks, true)
-    } else {
-        0
-    };
-    update_dispositions_for_outputs(&mut dispositions, &included_files, &chunks, config.mode);
-    mark_token_dropped(&mut dispositions, &selected_files, &included_files);
-
-    let highlights: HashSet<String> =
+    let mut highlights: HashSet<String> =
         included_files.iter().take(10).map(|f| f.relative_path.clone()).collect();
-    let tree = generate_tree(&root_path, config.tree_depth, true, &highlights)?;
+    let mut tree = generate_tree(&root_path, config.tree_depth, true, &highlights)?;
+
+    let mut prompt_content = None;
+    if matches!(config.mode, OutputMode::Prompt | OutputMode::Both) {
+        let mut compact = false;
+        let full_dispositions =
+            context_dispositions(&dispositions, &included_files, module_run.is_some());
+        let mut content = render_prompt(
+            ContextPackCtx {
+                root_path: &root_path,
+                files: &included_files,
+                chunks: &chunks,
+                stats: &stats,
+                tree: &tree,
+                manifest_info: &manifest_info,
+                dispositions: &full_dispositions,
+                full_inventory: config.full_inventory,
+                compact,
+                include_timestamp: options.include_timestamp,
+                godot: godot_summary.as_ref(),
+            },
+            module_run.as_ref().map(|module| module.header.as_str()),
+        );
+
+        if let Some(limit) = config.max_tokens {
+            if estimate_tokens(&content) > limit {
+                compact = true;
+                loop {
+                    content = render_prompt(
+                        ContextPackCtx {
+                            root_path: &root_path,
+                            files: &included_files,
+                            chunks: &chunks,
+                            stats: &stats,
+                            tree: &tree,
+                            manifest_info: &manifest_info,
+                            dispositions: &[],
+                            full_inventory: false,
+                            compact,
+                            include_timestamp: false,
+                            godot: None,
+                        },
+                        None,
+                    );
+                    if estimate_tokens(&content) <= limit || chunks.is_empty() {
+                        break;
+                    }
+                    let remove_at = lowest_value_chunk_index(&chunks);
+                    chunks.remove(remove_at);
+                }
+
+                stats = accounting_stats.clone();
+                dispositions = accounting_dispositions.clone();
+                included_files = refresh_output_accounting(
+                    &mut stats,
+                    &mut dispositions,
+                    &selected_files,
+                    &chunks,
+                    config.mode,
+                    &redactions_by_path,
+                );
+                highlights =
+                    included_files.iter().take(10).map(|f| f.relative_path.clone()).collect();
+                tree = generate_tree(&root_path, config.tree_depth, true, &highlights)?;
+                content = render_prompt(
+                    ContextPackCtx {
+                        root_path: &root_path,
+                        files: &included_files,
+                        chunks: &chunks,
+                        stats: &stats,
+                        tree: &tree,
+                        manifest_info: &manifest_info,
+                        dispositions: &[],
+                        full_inventory: false,
+                        compact,
+                        include_timestamp: false,
+                        godot: None,
+                    },
+                    None,
+                );
+                if estimate_tokens(&content) > limit {
+                    content.clear();
+                }
+            }
+        }
+        stats.total_tokens_estimated_prompt = estimate_tokens(&content);
+        prompt_content = Some(content);
+    }
 
     let repo_name = repo_name_for_output(&root_path, config.repo_url.as_deref());
     let module_basename = module_run.as_ref().map(|module| module.entry_basename.as_str());
@@ -201,58 +277,27 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
     let report_path = output_dir.join(format!("{}_report.json", output_prefix));
 
     let mut output_files = Vec::new();
+    if matches!(config.mode, OutputMode::Prompt | OutputMode::Both) {
+        output_files.push(context_path.display().to_string());
+    }
+    if matches!(config.mode, OutputMode::Rag | OutputMode::Both) {
+        output_files.push(jsonl_path.display().to_string());
+    }
+    output_files.push(report_path.display().to_string());
 
     match config.mode {
         OutputMode::Prompt => {
-            let ctx = ContextPackCtx {
-                root_path: &root_path,
-                files: &included_files,
-                chunks: &chunks,
-                stats: &stats,
-                tree: &tree,
-                manifest_info: &manifest_info,
-                dispositions: &dispositions,
-                full_inventory: config.full_inventory,
-                include_timestamp: options.include_timestamp,
-                godot: godot_summary.as_ref(),
-            };
-            let mut content = ctx.render();
-            if let Some(module) = &module_run {
-                content = format!("{}{}", module.header, content);
-            }
-            stats.total_tokens_estimated_prompt = estimate_tokens(&content);
-            fs::write(&context_path, content)?;
-            output_files.push(context_path.display().to_string());
+            fs::write(&context_path, prompt_content.as_deref().unwrap_or_default())?;
         }
         OutputMode::Rag => {
             let jsonl = render_jsonl(&chunks);
             fs::write(&jsonl_path, jsonl)?;
-            output_files.push(jsonl_path.display().to_string());
         }
         OutputMode::Both => {
-            let ctx = ContextPackCtx {
-                root_path: &root_path,
-                files: &included_files,
-                chunks: &chunks,
-                stats: &stats,
-                tree: &tree,
-                manifest_info: &manifest_info,
-                dispositions: &dispositions,
-                full_inventory: config.full_inventory,
-                include_timestamp: options.include_timestamp,
-                godot: godot_summary.as_ref(),
-            };
-            let mut content = ctx.render();
-            if let Some(module) = &module_run {
-                content = format!("{}{}", module.header, content);
-            }
-            stats.total_tokens_estimated_prompt = estimate_tokens(&content);
-            fs::write(&context_path, content)?;
-            output_files.push(context_path.display().to_string());
+            fs::write(&context_path, prompt_content.as_deref().unwrap_or_default())?;
 
             let jsonl = render_jsonl(&chunks);
             fs::write(&jsonl_path, jsonl)?;
-            output_files.push(jsonl_path.display().to_string());
         }
     }
 
@@ -269,6 +314,8 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
     });
 
     // Build focus metadata for the report when in focused mode.
+    let included_paths: HashSet<&str> =
+        included_files.iter().map(|file| file.relative_path.as_str()).collect();
     let focus_json = module_run.as_ref().and_then(|m| m.focus_scope.as_ref()).map(|scope| {
         let kind = match scope.kind {
             crate::module::FocusKind::File => "file",
@@ -283,6 +330,7 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
         let included_reasons: serde_json::Map<String, Value> = scope
             .files
             .iter()
+            .filter(|(file, _)| included_paths.contains(file.relative_path.as_str()))
             .map(|(f, reason)| {
                 let reason_str = match reason {
                     crate::module::InclusionReason::Selected => "selected",
@@ -318,15 +366,12 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
             godot: godot_summary.as_ref(),
         },
     )?;
-    output_files.push(report_path.display().to_string());
-
     Ok(ExportOutcome { root_path, stats, output_files })
 }
 
 struct ProcessedFile {
     chunks: Vec<Chunk>,
-    redacted: bool,
-    counts: BTreeMap<String, usize>,
+    redactions: Vec<RedactionOccurrence>,
 }
 
 fn process_file(
@@ -349,9 +394,9 @@ fn process_file(
     let file_name =
         Path::new(&file.relative_path).file_name().and_then(|name| name.to_str()).unwrap_or("");
 
-    let (content, counts) = if let Some(redactor) = redactor {
+    let (content, redactions) = if let Some(redactor) = redactor {
         if redactor.is_file_allowlisted(file_name, &file.relative_path) {
-            (raw_content, BTreeMap::new())
+            (raw_content, Vec::new())
         } else {
             let outcome = redactor.redact_with_language_report(
                 &raw_content,
@@ -360,13 +405,11 @@ fn process_file(
                 file_name,
                 &file.relative_path,
             );
-            (outcome.content, outcome.counts)
+            (outcome.content, outcome.occurrences)
         }
     } else {
-        (raw_content, BTreeMap::new())
+        (raw_content, Vec::new())
     };
-
-    let redacted = !counts.is_empty();
 
     let raw_chunks = if should_prompt_summary_only(file) {
         vec![summary_chunk(file, &content)]
@@ -386,7 +429,253 @@ fn process_file(
         chunk.token_estimate = estimate_tokens(&chunk.content);
     }
 
-    Ok(ProcessedFile { chunks, redacted, counts })
+    Ok(ProcessedFile { chunks, redactions })
+}
+
+fn render_prompt(ctx: ContextPackCtx<'_>, module_header: Option<&str>) -> String {
+    let rendered = ctx.render();
+    module_header.map(|header| format!("{header}{rendered}")).unwrap_or(rendered)
+}
+
+fn context_dispositions(
+    dispositions: &[FileDisposition],
+    included_files: &[FileInfo],
+    focused: bool,
+) -> Vec<FileDisposition> {
+    if !focused {
+        return dispositions.to_vec();
+    }
+    let paths: HashSet<&str> =
+        included_files.iter().map(|file| file.relative_path.as_str()).collect();
+    dispositions.iter().filter(|item| paths.contains(item.path.as_str())).cloned().collect()
+}
+
+fn refresh_output_accounting(
+    stats: &mut ScanStats,
+    dispositions: &mut [FileDisposition],
+    selected_files: &[FileInfo],
+    chunks: &[Chunk],
+    mode: OutputMode,
+    redactions_by_path: &HashMap<String, Vec<RedactionOccurrence>>,
+) -> Vec<FileInfo> {
+    let emitted_chunks: Vec<Chunk> = chunks
+        .iter()
+        .filter(|chunk| !matches!(mode, OutputMode::Prompt) || !chunk.tags.contains("rag-only"))
+        .cloned()
+        .collect();
+    let file_tokens = file_token_totals(&emitted_chunks);
+    let included_files = selected_files_with_tokens(selected_files.to_vec(), &file_tokens);
+
+    stats.files_included = included_files.len();
+    stats.total_bytes_included = included_chunk_bytes(&emitted_chunks);
+    stats.chunks_created = emitted_chunks.len();
+    stats.total_tokens_estimated = emitted_chunks.iter().map(|chunk| chunk.token_estimate).sum();
+    stats.source_tokens_selected = emitted_chunks
+        .iter()
+        .filter(|chunk| is_source_chunk(chunk))
+        .map(|chunk| chunk.token_estimate)
+        .sum();
+    stats.context_tokens_selected = emitted_chunks
+        .iter()
+        .filter(|chunk| !is_source_chunk(chunk))
+        .map(|chunk| chunk.token_estimate)
+        .sum();
+    stats.total_tokens_estimated_prompt = 0;
+    stats.total_tokens_estimated_rag = if matches!(mode, OutputMode::Rag | OutputMode::Both) {
+        estimate_tokens(&render_jsonl(chunks))
+    } else {
+        0
+    };
+    let prompt_chunks = chunks.iter().filter(|chunk| !chunk.tags.contains("rag-only")).count();
+    stats.rag_chunks_rendered =
+        if matches!(mode, OutputMode::Rag | OutputMode::Both) { chunks.len() } else { 0 };
+    stats.prompt_chunks_rendered =
+        if matches!(mode, OutputMode::Prompt | OutputMode::Both) { prompt_chunks } else { 0 };
+    stats.files_selected_rag = if matches!(mode, OutputMode::Rag | OutputMode::Both) {
+        unique_chunk_paths(chunks, false)
+    } else {
+        0
+    };
+    stats.files_selected_prompt = if matches!(mode, OutputMode::Prompt | OutputMode::Both) {
+        unique_chunk_paths(chunks, true)
+    } else {
+        0
+    };
+
+    update_dispositions_for_outputs(dispositions, &included_files, &emitted_chunks, mode);
+    mark_token_dropped(dispositions, selected_files, &included_files);
+    stats.files_dropped_budget = dispositions
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.reason,
+                FileDispositionReason::DroppedByteBudget
+                    | FileDispositionReason::DroppedTokenBudget
+            )
+        })
+        .count();
+    stats.dropped_files = dispositions
+        .iter()
+        .filter_map(|item| {
+            let reason = match item.reason {
+                FileDispositionReason::DroppedByteBudget => "bytes_limit",
+                FileDispositionReason::DroppedTokenBudget => "token_limit",
+                _ => return None,
+            };
+            let mut record = HashMap::from([
+                ("path".to_string(), json!(item.path)),
+                ("reason".to_string(), json!(reason)),
+            ]);
+            if let Some(priority) = item.priority {
+                record.insert("priority".to_string(), json!(priority));
+            }
+            Some(record)
+        })
+        .collect();
+    stats.dropped_files.sort_by(|left, right| {
+        left.get("path").and_then(Value::as_str).cmp(&right.get("path").and_then(Value::as_str))
+    });
+
+    let mut redacted_paths = HashSet::new();
+    let mut redacted_chunk_ids = HashSet::new();
+    let effective_spans =
+        effective_chunk_spans(&emitted_chunks, matches!(mode, OutputMode::Prompt));
+    stats.redaction_counts.clear();
+    for (path, occurrences) in redactions_by_path {
+        let path_chunks: Vec<&Chunk> =
+            emitted_chunks.iter().filter(|chunk| chunk.path == *path).collect();
+        let mut derived_occurrences: HashMap<(String, String), usize> = HashMap::new();
+        for occurrence in occurrences.iter().filter(|item| !item.replacement.is_empty()) {
+            derived_occurrences
+                .entry((occurrence.rule.clone(), occurrence.replacement.clone()))
+                .or_insert_with(|| {
+                    path_chunks
+                        .iter()
+                        .filter(|chunk| chunk.byte_start.is_none())
+                        .map(|chunk| chunk.content.matches(&occurrence.replacement).count())
+                        .sum()
+                });
+        }
+        for occurrence in occurrences {
+            let derived_match = derived_occurrences
+                .get_mut(&(occurrence.rule.clone(), occurrence.replacement.clone()))
+                .is_some_and(|remaining| {
+                    if *remaining == 0 {
+                        false
+                    } else {
+                        *remaining -= 1;
+                        true
+                    }
+                });
+            let matching_chunks: Vec<&&Chunk> = path_chunks
+                .iter()
+                .filter(|chunk| {
+                    effective_spans
+                        .get(chunk.id.as_str())
+                        .is_some_and(|span| span_contains_occurrence(*span, occurrence))
+                        || (derived_match
+                            && chunk.byte_start.is_none()
+                            && chunk.content.contains(&occurrence.replacement))
+                })
+                .collect();
+            if matching_chunks.is_empty() {
+                continue;
+            }
+            redacted_paths.insert(path.as_str());
+            *stats.redaction_counts.entry(occurrence.rule.clone()).or_insert(0) += 1;
+            for chunk in matching_chunks {
+                redacted_chunk_ids.insert(chunk.id.as_str());
+            }
+        }
+    }
+    stats.redacted_files = redacted_paths.len();
+    stats.redacted_chunks = redacted_chunk_ids.len();
+
+    included_files
+}
+
+fn span_contains_occurrence(
+    (start, end): (usize, usize),
+    occurrence: &RedactionOccurrence,
+) -> bool {
+    if start >= end {
+        return false;
+    }
+    if occurrence.start == occurrence.end {
+        start <= occurrence.start && occurrence.start <= end
+    } else {
+        start < occurrence.end && end > occurrence.start
+    }
+}
+
+fn effective_chunk_spans(
+    chunks: &[Chunk],
+    dedupe_prompt_overlap: bool,
+) -> HashMap<&str, (usize, usize)> {
+    let mut ordered: Vec<&Chunk> = chunks.iter().collect();
+    ordered.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.start_line.cmp(&right.start_line))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut next_line_by_path = HashMap::new();
+    let mut spans = HashMap::new();
+    for chunk in ordered {
+        let (Some(start), Some(end)) = (chunk.byte_start, chunk.byte_end) else { continue };
+        if !dedupe_prompt_overlap {
+            spans.insert(chunk.id.as_str(), (start, end));
+            continue;
+        }
+        let next_line = next_line_by_path.get(chunk.path.as_str()).copied().unwrap_or(1usize);
+        let skip_lines = next_line.saturating_sub(chunk.start_line);
+        let skipped_bytes: usize =
+            chunk.content.split_inclusive('\n').take(skip_lines).map(str::len).sum();
+        let effective_start = start.saturating_add(skipped_bytes).min(end);
+        let remaining = chunk.content.get(skipped_bytes..).unwrap_or_default();
+        if !remaining.trim().is_empty() {
+            next_line_by_path.insert(chunk.path.as_str(), chunk.end_line.saturating_add(1));
+            spans.insert(chunk.id.as_str(), (effective_start, end));
+        } else {
+            spans.insert(chunk.id.as_str(), (end, end));
+        }
+    }
+    spans
+}
+
+fn included_chunk_bytes(chunks: &[Chunk]) -> u64 {
+    let mut spans_by_path: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
+    let mut generated_bytes = 0u64;
+    for chunk in chunks {
+        match (chunk.byte_start, chunk.byte_end) {
+            (Some(start), Some(end)) if end > start => {
+                spans_by_path.entry(chunk.path.as_str()).or_default().push((start, end));
+            }
+            _ => generated_bytes = generated_bytes.saturating_add(chunk.content.len() as u64),
+        }
+    }
+
+    let mut total = generated_bytes;
+    for spans in spans_by_path.values_mut() {
+        spans.sort_unstable();
+        let mut current: Option<(usize, usize)> = None;
+        for &(start, end) in spans.iter() {
+            match current {
+                Some((current_start, current_end)) if start <= current_end => {
+                    current = Some((current_start, current_end.max(end)));
+                }
+                Some((current_start, current_end)) => {
+                    total = total.saturating_add((current_end - current_start) as u64);
+                    current = Some((start, end));
+                }
+                None => current = Some((start, end)),
+            }
+        }
+        if let Some((start, end)) = current {
+            total = total.saturating_add((end - start) as u64);
+        }
+    }
+    total
 }
 
 fn apply_file_byte_budget(
@@ -447,41 +736,61 @@ fn apply_chunk_token_budget(
         return chunks;
     };
 
+    let source_limit = limit.saturating_mul(40) / 100;
+    let context_limit = limit.saturating_sub(source_limit);
     let mut kept = Vec::new();
-    let mut used = 0usize;
-    let mut dropped_paths: HashSet<String> = HashSet::new();
+    let mut kept_ids = HashSet::new();
 
-    let mut deferred = Vec::new();
-    for chunk in chunks.iter().filter(|c| is_mandatory_chunk(c)) {
-        if used.saturating_add(chunk.token_estimate) > limit {
-            continue;
+    select_pool_chunks(
+        chunks.iter().filter(|chunk| is_source_chunk(chunk)),
+        source_limit,
+        &mut kept,
+        &mut kept_ids,
+    );
+    if !chunks.iter().any(|chunk| kept_ids.contains(&chunk.id) && is_source_chunk(chunk)) {
+        if let Some(chunk) =
+            chunks.iter().find(|chunk| is_source_chunk(chunk) && chunk.token_estimate <= limit)
+        {
+            kept_ids.insert(chunk.id.clone());
+            kept.push(chunk.clone());
         }
-        used += chunk.token_estimate;
-        kept.push(chunk.clone());
-    }
-
-    let kept_ids: HashSet<String> = kept.iter().map(|c| c.id.clone()).collect();
-    let mut seen_paths: HashSet<String> = kept.iter().map(|c| c.path.clone()).collect();
-    for chunk in chunks.iter().filter(|c| !kept_ids.contains(&c.id)) {
-        if !seen_paths.contains(&chunk.path) {
-            deferred.push(chunk.clone());
-        }
-    }
-    for chunk in chunks.iter().filter(|c| !kept_ids.contains(&c.id)) {
-        if seen_paths.contains(&chunk.path) {
-            deferred.push(chunk.clone());
-        }
-    }
-    for chunk in deferred {
-        if used.saturating_add(chunk.token_estimate) > limit {
-            dropped_paths.insert(chunk.path.clone());
-            continue;
-        }
-        used += chunk.token_estimate;
-        seen_paths.insert(chunk.path.clone());
-        kept.push(chunk);
     }
 
+    let source_used: usize =
+        kept.iter().filter(|chunk| is_source_chunk(chunk)).map(|chunk| chunk.token_estimate).sum();
+    let available_context = context_limit.min(limit.saturating_sub(source_used));
+    let mut reserved_context = 0usize;
+    for tag in ["readme", "config"] {
+        if let Some(chunk) = chunks.iter().find(|chunk| {
+            !is_source_chunk(chunk)
+                && chunk.tags.contains(tag)
+                && !kept_ids.contains(&chunk.id)
+                && reserved_context.saturating_add(chunk.token_estimate) <= available_context
+        }) {
+            reserved_context += chunk.token_estimate;
+            kept_ids.insert(chunk.id.clone());
+            kept.push(chunk.clone());
+        }
+    }
+    select_pool_chunks(
+        chunks.iter().filter(|chunk| !is_source_chunk(chunk)),
+        available_context.saturating_sub(reserved_context),
+        &mut kept,
+        &mut kept_ids,
+    );
+
+    let mut used: usize = kept.iter().map(|chunk| chunk.token_estimate).sum();
+    let remaining = limit.saturating_sub(used);
+    select_pool_chunks(chunks.iter(), remaining, &mut kept, &mut kept_ids);
+    used = kept.iter().map(|chunk| chunk.token_estimate).sum();
+    debug_assert!(used <= limit);
+
+    let kept_paths: HashSet<&str> = kept.iter().map(|chunk| chunk.path.as_str()).collect();
+    let dropped_paths: HashSet<&str> = chunks
+        .iter()
+        .filter(|chunk| !kept_ids.contains(&chunk.id) && !kept_paths.contains(chunk.path.as_str()))
+        .map(|chunk| chunk.path.as_str())
+        .collect();
     for path in dropped_paths {
         stats.dropped_files.push(HashMap::from([
             ("path".to_string(), json!(path)),
@@ -492,8 +801,70 @@ fn apply_chunk_token_budget(
     kept
 }
 
-fn is_mandatory_chunk(chunk: &Chunk) -> bool {
-    chunk.tags.iter().any(|t| matches!(t.as_str(), "readme" | "config" | "entrypoint"))
+fn trim_chunks_to_rag_budget(chunks: &mut Vec<Chunk>, limit: usize) {
+    let mut rendered_bytes: usize =
+        chunks.iter().map(|chunk| render_jsonl(std::slice::from_ref(chunk)).len()).sum();
+    while rendered_bytes / 4 > limit && !chunks.is_empty() {
+        let remove_at = lowest_value_chunk_index(chunks);
+        rendered_bytes = rendered_bytes
+            .saturating_sub(render_jsonl(std::slice::from_ref(&chunks[remove_at])).len());
+        chunks.remove(remove_at);
+    }
+}
+
+fn select_pool_chunks<'a>(
+    chunks: impl Iterator<Item = &'a Chunk>,
+    limit: usize,
+    kept: &mut Vec<Chunk>,
+    kept_ids: &mut HashSet<String>,
+) {
+    let chunks: Vec<&Chunk> = chunks.collect();
+    let mut used = 0usize;
+    let mut seen_paths = HashSet::new();
+    for first_per_file in [true, false] {
+        for chunk in &chunks {
+            if kept_ids.contains(&chunk.id)
+                || first_per_file == seen_paths.contains(chunk.path.as_str())
+                || used.saturating_add(chunk.token_estimate) > limit
+            {
+                continue;
+            }
+            used += chunk.token_estimate;
+            seen_paths.insert(chunk.path.as_str());
+            kept_ids.insert(chunk.id.clone());
+            kept.push((*chunk).clone());
+        }
+    }
+}
+
+fn is_source_chunk(chunk: &Chunk) -> bool {
+    is_programming_language(&chunk.language)
+}
+
+fn lowest_value_chunk_index(chunks: &[Chunk]) -> usize {
+    let mut path_counts: HashMap<&str, usize> = HashMap::new();
+    for chunk in chunks {
+        *path_counts.entry(chunk.path.as_str()).or_insert(0) += 1;
+    }
+    let source_count = chunks.iter().filter(|chunk| is_source_chunk(chunk)).count();
+    let has_context = chunks.iter().any(|chunk| !is_source_chunk(chunk));
+    chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, chunk)| !(has_context && source_count == 1 && is_source_chunk(chunk)))
+        .min_by(|(_, left), (_, right)| {
+            let left_duplicate = path_counts.get(left.path.as_str()).copied().unwrap_or(0) > 1;
+            let right_duplicate = path_counts.get(right.path.as_str()).copied().unwrap_or(0) > 1;
+            right_duplicate
+                .cmp(&left_duplicate)
+                .then_with(|| {
+                    left.priority.partial_cmp(&right.priority).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| right.start_line.cmp(&left.start_line))
+                .then_with(|| right.id.cmp(&left.id))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(0)
 }
 
 fn should_prompt_summary_only(file: &FileInfo) -> bool {
@@ -564,7 +935,11 @@ fn update_dispositions_for_outputs(
                 && rag_paths.contains(file.relative_path.as_str());
             d.reason = if should_prompt_summary_only(file) {
                 FileDispositionReason::IncludedSummaryOnly
-            } else if chunks.iter().filter(|c| c.path == file.relative_path).count() > 1 {
+            } else if chunks
+                .iter()
+                .filter(|chunk| chunk.path == file.relative_path)
+                .any(|chunk| chunk.chunks_in_file > 1)
+            {
                 FileDispositionReason::IncludedChunked
             } else {
                 FileDispositionReason::IncludedFull
@@ -607,6 +982,16 @@ fn mark_token_dropped(
                 &file.relative_path,
                 FileDispositionReason::DroppedTokenBudget,
             );
+        }
+    }
+}
+
+fn mark_focus_excluded(dispositions: &mut [FileDisposition], focus_paths: &HashSet<String>) {
+    for item in dispositions {
+        if item.reason == FileDispositionReason::IncludedFull && !focus_paths.contains(&item.path) {
+            item.reason = FileDispositionReason::ExcludedFocus;
+            item.included_in_prompt = false;
+            item.included_in_rag = false;
         }
     }
 }
@@ -694,7 +1079,7 @@ fn build_config_json(config: &Config) -> Value {
 
     let coverage_strategy = if config.max_tokens.is_some() { "budget" } else { "full" };
 
-    json!({
+    let mut value = json!({
         "path": config.path,
         "repo": config.repo_url.as_ref().map(|u| redact_url_credentials(u)),
         "ref": config.ref_,
@@ -724,7 +1109,15 @@ fn build_config_json(config: &Config) -> Value {
             "module_roots": &config.module.module_roots,
             "css_files": &config.module.css_files,
         },
-    })
+    });
+    if config.max_tokens.is_some() {
+        value["token_budget_allocation"] = json!({
+            "source_percent": 40,
+            "context_percent": 60,
+            "policy": "soft_reservation_with_borrowing",
+        });
+    }
+    value
 }
 
 /// Redact secrets from manifest info (package.json scripts, etc.) that bypass
@@ -758,4 +1151,242 @@ fn redact_manifest_info(
         redact_value(val, redactor);
     }
     info
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_chunk_token_budget, refresh_output_accounting};
+    use crate::domain::{
+        Chunk, FileDisposition, FileDispositionReason, FileInfo, OutputMode, ScanStats,
+    };
+    use crate::redact::redactor::RedactionOccurrence;
+    use std::collections::{BTreeSet, HashMap};
+    use std::path::PathBuf;
+
+    fn chunk(id: &str, path: &str, language: &str, tokens: usize) -> Chunk {
+        Chunk {
+            id: id.to_string(),
+            path: path.to_string(),
+            language: language.to_string(),
+            start_line: 1,
+            end_line: 1,
+            content: "x".repeat(tokens * 4),
+            priority: 1.0,
+            tags: BTreeSet::new(),
+            token_estimate: tokens,
+            file_id: format!("file-{id}"),
+            chunk_index: 0,
+            chunks_in_file: 1,
+            byte_start: Some(0),
+            byte_end: Some(tokens * 4),
+            content_sha256: String::new(),
+            file_sha256: String::new(),
+        }
+    }
+
+    fn file(path: &str, size_bytes: u64) -> FileInfo {
+        FileInfo {
+            path: PathBuf::from(path),
+            relative_path: path.to_string(),
+            size_bytes,
+            extension: ".rs".to_string(),
+            language: "rust".to_string(),
+            id: format!("file-{path}"),
+            priority: 1.0,
+            token_estimate: 0,
+            tags: BTreeSet::new(),
+            is_readme: false,
+            is_config: false,
+            is_doc: false,
+        }
+    }
+
+    #[test]
+    fn context_chunks_borrow_an_unused_source_reservation() {
+        let mut stats = ScanStats::default();
+        let kept = apply_chunk_token_budget(
+            vec![chunk("a", "README.md", "markdown", 55), chunk("b", "guide.md", "markdown", 40)],
+            Some(100),
+            &mut stats,
+        );
+
+        assert_eq!(kept.iter().map(|chunk| chunk.token_estimate).sum::<usize>(), 95);
+    }
+
+    #[test]
+    fn oversized_source_share_still_keeps_source_before_context() {
+        let mut stats = ScanStats::default();
+        let kept = apply_chunk_token_budget(
+            vec![
+                chunk("source", "src/lib.rs", "rust", 45),
+                chunk("context", "README.md", "markdown", 55),
+            ],
+            Some(100),
+            &mut stats,
+        );
+
+        assert!(kept.iter().any(|chunk| chunk.id == "source"));
+        assert_eq!(
+            kept.iter()
+                .filter(|chunk| chunk.language == "markdown")
+                .map(|chunk| chunk.token_estimate)
+                .sum::<usize>(),
+            55
+        );
+    }
+
+    #[test]
+    fn partial_file_accounting_uses_emitted_span_and_original_chunk_count() {
+        let selected = vec![file("src/lib.rs", 100)];
+        let mut emitted = chunk("kept", "src/lib.rs", "rust", 5);
+        emitted.chunks_in_file = 2;
+        emitted.byte_end = Some(20);
+        let mut stats = ScanStats::default();
+        let mut dispositions = vec![FileDisposition::new(
+            "src/lib.rs".to_string(),
+            FileDispositionReason::IncludedFull,
+        )];
+        let redactions = HashMap::from([(
+            "src/lib.rs".to_string(),
+            vec![RedactionOccurrence {
+                rule: "openai_key".to_string(),
+                start: 50,
+                end: 60,
+                replacement: "[REDACTED_OPENAI_KEY]".to_string(),
+            }],
+        )]);
+
+        refresh_output_accounting(
+            &mut stats,
+            &mut dispositions,
+            &selected,
+            &[emitted],
+            OutputMode::Rag,
+            &redactions,
+        );
+
+        assert_eq!(stats.total_bytes_included, 20);
+        assert_eq!(stats.redacted_files, 0);
+        assert!(stats.redaction_counts.is_empty());
+        assert_eq!(dispositions[0].reason, FileDispositionReason::IncludedChunked);
+    }
+
+    #[test]
+    fn prompt_accounting_excludes_rag_only_chunks() {
+        let selected = vec![file("scene.tscn", 20)];
+        let mut rag_only = chunk("rag", "scene.tscn", "godot_scene", 5);
+        rag_only.tags.insert("rag-only".to_string());
+        let redactions = HashMap::from([(
+            "scene.tscn".to_string(),
+            vec![RedactionOccurrence {
+                rule: "openai_key".to_string(),
+                start: 0,
+                end: 5,
+                replacement: "[REDACTED_OPENAI_KEY]".to_string(),
+            }],
+        )]);
+
+        let mut prompt_stats = ScanStats::default();
+        let mut prompt_dispositions = vec![FileDisposition::new(
+            "scene.tscn".to_string(),
+            FileDispositionReason::IncludedFull,
+        )];
+        let prompt_files = refresh_output_accounting(
+            &mut prompt_stats,
+            &mut prompt_dispositions,
+            &selected,
+            std::slice::from_ref(&rag_only),
+            OutputMode::Prompt,
+            &redactions,
+        );
+
+        assert!(prompt_files.is_empty());
+        assert_eq!(prompt_stats.total_bytes_included, 0);
+        assert_eq!(prompt_stats.redacted_chunks, 0);
+
+        let mut rag_stats = ScanStats::default();
+        let mut rag_dispositions = vec![FileDisposition::new(
+            "scene.tscn".to_string(),
+            FileDispositionReason::IncludedFull,
+        )];
+        refresh_output_accounting(
+            &mut rag_stats,
+            &mut rag_dispositions,
+            &selected,
+            &[rag_only],
+            OutputMode::Rag,
+            &redactions,
+        );
+        assert_eq!(rag_stats.total_bytes_included, 20);
+        assert_eq!(rag_stats.redacted_chunks, 1);
+    }
+
+    #[test]
+    fn overlapping_chunks_count_one_source_redaction_occurrence() {
+        let selected = vec![file("src/lib.rs", 40)];
+        let first = chunk("first", "src/lib.rs", "rust", 5);
+        let mut second = chunk("second", "src/lib.rs", "rust", 5);
+        second.chunk_index = 1;
+        second.chunks_in_file = 2;
+        let redactions = HashMap::from([(
+            "src/lib.rs".to_string(),
+            vec![RedactionOccurrence {
+                rule: "openai_key".to_string(),
+                start: 4,
+                end: 12,
+                replacement: "[REDACTED_OPENAI_KEY]".to_string(),
+            }],
+        )]);
+        let mut stats = ScanStats::default();
+        let mut dispositions = vec![FileDisposition::new(
+            "src/lib.rs".to_string(),
+            FileDispositionReason::IncludedFull,
+        )];
+
+        refresh_output_accounting(
+            &mut stats,
+            &mut dispositions,
+            &selected,
+            &[first, second],
+            OutputMode::Prompt,
+            &redactions,
+        );
+
+        assert_eq!(stats.redaction_counts["openai_key"], 1);
+        assert_eq!(stats.redacted_chunks, 1);
+    }
+
+    #[test]
+    fn one_derived_marker_does_not_count_two_source_occurrences() {
+        let selected = vec![file("data.json", 40)];
+        let mut derived = chunk("derived", "data.json", "json", 5);
+        derived.byte_start = None;
+        derived.byte_end = None;
+        derived.content = "[CUSTOM_REDACTED]".to_string();
+        let occurrence = |start| RedactionOccurrence {
+            rule: "custom".to_string(),
+            start,
+            end: start + 5,
+            replacement: "[CUSTOM_REDACTED]".to_string(),
+        };
+        let redactions =
+            HashMap::from([("data.json".to_string(), vec![occurrence(5), occurrence(25)])]);
+        let mut stats = ScanStats::default();
+        let mut dispositions = vec![FileDisposition::new(
+            "data.json".to_string(),
+            FileDispositionReason::IncludedFull,
+        )];
+
+        refresh_output_accounting(
+            &mut stats,
+            &mut dispositions,
+            &selected,
+            &[derived],
+            OutputMode::Rag,
+            &redactions,
+        );
+
+        assert_eq!(stats.redaction_counts["custom"], 1);
+        assert_eq!(stats.redacted_chunks, 1);
+    }
 }

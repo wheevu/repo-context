@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 /// Current report schema version.
-pub const REPORT_SCHEMA_VERSION: &str = "1.2.0";
+pub const REPORT_SCHEMA_VERSION: &str = "1.3.0";
 
 /// Statistics from scanning and processing.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -52,6 +52,10 @@ pub struct ScanStats {
     pub total_tokens_estimated_prompt: usize,
     #[serde(default)]
     pub total_tokens_estimated_rag: usize,
+    #[serde(default)]
+    pub source_tokens_selected: usize,
+    #[serde(default)]
+    pub context_tokens_selected: usize,
     #[serde(default)]
     pub languages_detected: HashMap<String, usize>,
     #[serde(default)]
@@ -101,6 +105,8 @@ impl ScanStats {
             "total_tokens_estimated": self.total_tokens_estimated,
             "total_tokens_estimated_prompt": self.total_tokens_estimated_prompt,
             "total_tokens_estimated_rag": self.total_tokens_estimated_rag,
+            "source_tokens_selected": self.source_tokens_selected,
+            "context_tokens_selected": self.context_tokens_selected,
             "languages_detected": languages_detected,
             "redaction_counts": self.redaction_counts,
             "processing_time_seconds": self.processing_time_seconds,

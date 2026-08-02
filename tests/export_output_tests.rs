@@ -107,7 +107,7 @@ fn export_report_contains_trustworthy_core_fields() {
             .expect("read report");
     let report: Value = serde_json::from_str(&report_raw).expect("parse report");
 
-    assert_eq!(report["schema_version"], Value::String("1.2.0".to_string()));
+    assert_eq!(report["schema_version"], Value::String("1.3.0".to_string()));
     assert!(report.get("generated_at").is_none());
     assert!(report.get("stats").is_some());
     assert!(report.get("config").is_some());
@@ -209,9 +209,173 @@ fn max_tokens_automatically_uses_budget_strategy() {
         fs::read_to_string(actual.join(output_file_name(fixture.root(), "report.json")))
             .expect("read report");
     let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+    let jsonl = fs::read_to_string(actual.join(output_file_name(fixture.root(), "chunks.jsonl")))
+        .expect("read chunks");
 
     assert_eq!(report["config"]["coverage_strategy"], "budget");
+    assert_eq!(report["config"]["token_budget_allocation"]["source_percent"], 40);
+    assert_eq!(report["config"]["token_budget_allocation"]["context_percent"], 60);
+    assert_eq!(
+        report["config"]["token_budget_allocation"]["policy"],
+        "soft_reservation_with_borrowing"
+    );
     assert!(report["stats"]["dropped_files"].as_array().is_some_and(|v| !v.is_empty()));
+    assert!(report["stats"]["total_tokens_estimated_prompt"].as_u64().unwrap() <= 20);
+    assert!(report["stats"]["total_tokens_estimated_rag"].as_u64().unwrap() <= 20);
+    assert_eq!(report["stats"]["total_tokens_estimated_rag"], jsonl.len() / 4);
+    let outputs = report["output_files"].as_array().expect("output files");
+    assert!(outputs
+        .iter()
+        .any(|path| { path.as_str().is_some_and(|path| path.ends_with("_report.json")) }));
+}
+
+#[test]
+fn one_token_rag_budget_emits_no_oversized_jsonl_record() {
+    let fixture = TestRepo::new();
+    let out = TempDir::new().expect("temp out");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        fixture.root().to_str().expect("repo str"),
+        "--mode",
+        "rag",
+        "--output-dir",
+        out.path().to_str().expect("out str"),
+        "--no-timestamp",
+        "--max-tokens",
+        "1",
+    ]);
+    cmd.env("HOME", out.path());
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(out.path(), fixture.root());
+    let jsonl = fs::read_to_string(actual.join(output_file_name(fixture.root(), "chunks.jsonl")))
+        .expect("read chunks");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(actual.join(output_file_name(fixture.root(), "report.json")))
+            .expect("read report"),
+    )
+    .expect("parse report");
+
+    assert!(jsonl.is_empty());
+    assert_eq!(report["stats"]["total_tokens_estimated_rag"], 0);
+    assert_eq!(report["stats"]["rag_chunks_rendered"], 0);
+}
+
+#[test]
+fn practical_prompt_budget_preserves_docs_manifest_and_source() {
+    let fixture = TestRepo::new();
+    let out_base = TempDir::new().expect("temp out");
+    let out = out_base.path().join("out");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        fixture.root().to_str().expect("repo str"),
+        "--mode",
+        "prompt",
+        "--output-dir",
+        out.to_str().expect("out str"),
+        "--no-timestamp",
+        "--max-tokens",
+        "500",
+    ]);
+    cmd.env("HOME", &out);
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(&out, fixture.root());
+    let report_raw =
+        fs::read_to_string(actual.join(output_file_name(fixture.root(), "report.json")))
+            .expect("read report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse report");
+    let paths: Vec<&str> = report["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .filter_map(|file| file["path"].as_str())
+        .collect();
+
+    assert!(report["stats"]["total_tokens_estimated_prompt"].as_u64().unwrap() <= 500);
+    assert!(report["stats"]["source_tokens_selected"].as_u64().unwrap() > 0);
+    assert!(report["stats"]["context_tokens_selected"].as_u64().unwrap() > 0);
+    assert_eq!(
+        report["stats"]["source_tokens_selected"].as_u64().unwrap()
+            + report["stats"]["context_tokens_selected"].as_u64().unwrap(),
+        report["stats"]["total_tokens_estimated"].as_u64().unwrap()
+    );
+    assert!(paths.contains(&"README.md"));
+    assert!(paths.contains(&"pyproject.toml"));
+    assert!(paths.iter().any(|path| path.starts_with("src/")));
+}
+
+#[test]
+fn one_token_prompt_budget_caps_the_exact_written_output() {
+    let fixture = TestRepo::new();
+    let out = TempDir::new().expect("temp out");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        fixture.root().to_str().expect("repo str"),
+        "--mode",
+        "prompt",
+        "--output-dir",
+        out.path().to_str().expect("out str"),
+        "--no-timestamp",
+        "--max-tokens",
+        "1",
+    ]);
+    cmd.env("HOME", out.path());
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(out.path(), fixture.root());
+    let context =
+        fs::read_to_string(actual.join(output_file_name(fixture.root(), "context_pack.md")))
+            .expect("read context");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(actual.join(output_file_name(fixture.root(), "report.json")))
+            .expect("read report"),
+    )
+    .expect("parse report");
+
+    assert!(context.len() / 4 <= 1);
+    assert_eq!(report["stats"]["total_tokens_estimated_prompt"], context.len() / 4);
+}
+
+#[test]
+fn large_prompt_budget_preserves_the_full_context_pack() {
+    let fixture = TestRepo::new();
+    let out = TempDir::new().expect("temp out");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        fixture.root().to_str().expect("repo str"),
+        "--mode",
+        "prompt",
+        "--output-dir",
+        out.path().to_str().expect("out str"),
+        "--no-timestamp",
+        "--max-tokens",
+        "100000",
+    ]);
+    cmd.env("HOME", out.path());
+    cmd.assert().success();
+
+    let actual = resolve_output_dir(out.path(), fixture.root());
+    let context =
+        fs::read_to_string(actual.join(output_file_name(fixture.root(), "context_pack.md")))
+            .expect("read context");
+
+    assert!(context.starts_with("# Repository Context Pack:"));
+    assert!(context.contains("## Repository Inventory"));
+    assert!(context.contains("## 📋 Repository Overview"));
+    assert!(context.contains("## 📁 Directory Structure"));
 }
 
 #[test]
@@ -325,6 +489,43 @@ fn redaction_catches_secret_spanning_small_chunks() {
         .expect("read chunks");
 
     assert!(!chunks.contains("sk-abcdefghijklmnopqrstuvwxyz12345"));
+}
+
+#[test]
+fn report_counts_redaction_propagated_into_synthetic_json_chunk() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    fs::write(
+        root.join("data.json"),
+        r#"{"items":[{"url":"https://example.com/path?sessionid=abcdefghijklmnop1234"}]}"#,
+    )
+    .expect("write json");
+
+    let out = TempDir::new().expect("temp out");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
+    cmd.args([
+        "export",
+        "--path",
+        root.to_str().expect("root"),
+        "--mode",
+        "rag",
+        "--output-dir",
+        out.path().to_str().expect("out"),
+        "--no-timestamp",
+    ]);
+    cmd.env("HOME", out.path());
+    cmd.assert().success();
+
+    let repo_name = root.file_name().and_then(|name| name.to_str()).unwrap_or("repo");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(out.path().join(repo_name).join(format!("{repo_name}_report.json")))
+            .expect("report"),
+    )
+    .expect("valid report");
+
+    assert_eq!(report["stats"]["redaction_counts"]["url_credential"], 1);
+    assert_eq!(report["stats"]["redacted_files"], 1);
+    assert_eq!(report["stats"]["redacted_chunks"], 1);
 }
 
 fn run_export(repo_root: &Path, output_dir: &Path, mode: &str, no_redact: bool) {

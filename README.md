@@ -27,7 +27,7 @@ Export complete:
   root: /private/var/.../repo-context-...
   files: 846
   chunks: 2877
-  tokens: 1508244
+  selected content tokens: 1508244
   wrote: ~/rc-output/tokio/tokio_context_pack.md
   wrote: ~/rc-output/tokio/tokio_chunks.jsonl
   wrote: ~/rc-output/tokio/tokio_report.json
@@ -44,7 +44,7 @@ Export complete:
   root: /private/var/.../repo-context-...
   files: 314
   chunks: 1400
-  tokens: 809090
+  selected content tokens: 809090
   wrote: ~/rc-output/tokio/focus_lib/tokio_focus_lib_context_pack.md
   wrote: ~/rc-output/tokio/focus_lib/tokio_focus_lib_chunks.jsonl
   wrote: ~/rc-output/tokio/focus_lib/tokio_focus_lib_report.json
@@ -148,6 +148,11 @@ Budgeted output
 ```
 repo-context export --path . --max-tokens 12000
 ```
+The token selector initially reserves 40% for source and 60% for documentation/configuration.
+Unused space may be borrowed by either pool; the report records the actual
+`source_tokens_selected` and `context_tokens_selected` totals. The cap applies separately to each
+rendered prompt and JSONL artifact, including its formatting and metadata.
+
 Prompt-only
 ```
 repo-context export --path . --mode prompt
@@ -199,7 +204,7 @@ Valid JSON is parsed before minification checks. The prompt receives a concise t
 
 Known limitations: the Godot parsers are intentionally lightweight rather than compiler-complete. Dynamic resource paths, runtime-created node hierarchies, computed input action names, and binary asset internals cannot always be resolved statically. Malformed or unusual text formats degrade to source/text chunks instead of failing an export.
 
-Godot analysis is additive in report schema `1.2.0`: reports may contain a top-level `godot` object, and file dispositions may use `inventory_only` for generated metadata and binary assets that were indexed without textual chunks.
+Godot analysis remains additive in report schema `1.3.0`: reports may contain a top-level `godot` object, and file dispositions may use `inventory_only` for generated metadata and binary assets that were indexed without textual chunks. Schema 1.3 also makes budget and emitted-output accounting authoritative.
 
 ## Development
 ```

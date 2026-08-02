@@ -60,7 +60,7 @@ pub struct ExportArgs {
     #[arg(long)]
     pub include_minified: bool,
 
-    /// Maximum tokens in output.
+    /// Maximum estimated tokens in each Markdown or JSONL context artifact (report excluded).
     #[arg(short = 't', long, value_name = "TOKENS")]
     pub max_tokens: Option<usize>,
 
@@ -176,7 +176,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
     println!("  root: {}", outcome.root_path.display());
     println!("  files: {}", outcome.stats.files_included);
     println!("  chunks: {}", outcome.stats.chunks_created);
-    println!("  tokens: {}", outcome.stats.total_tokens_estimated);
+    println!("  selected content tokens: {}", outcome.stats.total_tokens_estimated);
     for file in outcome.output_files {
         println!("  wrote: {}", file);
     }

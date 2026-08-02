@@ -17,7 +17,7 @@ pub use config::{
 };
 pub use disposition::{FileDisposition, FileDispositionReason};
 pub use file::FileInfo;
-pub use language::get_language;
+pub use language::{get_language, is_programming_language};
 pub use output::{OutputMode, RedactionMode};
 pub use ranking::RankingWeights;
 #[allow(unused_imports)]

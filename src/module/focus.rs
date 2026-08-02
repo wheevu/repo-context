@@ -9,7 +9,9 @@
 #![allow(dead_code)]
 
 use crate::domain::FileInfo;
+use crate::godot;
 use crate::module::graph::{self, ImportGraph};
+use crate::utils::read_file_safe;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -116,7 +118,9 @@ pub fn build_scope(
         return build_directory_scope(root, scanned_files, selected, presentation, source_count);
     }
 
-    if graph::is_rust_crate_root(selected, root) {
+    if graph::is_rust_crate_root(selected, root)
+        || godot_main_scene(scanned_files).is_some_and(|path| canon(&path) == canon(selected))
+    {
         build_module_scope(root, scanned_files, graph, selected, presentation, source_count)
     } else {
         build_file_scope(root, scanned_files, graph, selected, presentation, source_count)
@@ -134,7 +138,9 @@ pub fn discover_candidates(
     let source_count = count_source_files(files);
 
     if source_count <= SMALL_REPO_FILE_LIMIT {
-        discover_file_candidates(files, graph, root)
+        let mut candidates = discover_file_candidates(files, graph, root);
+        prioritize_godot_main_scene(root, files, &mut candidates);
+        candidates
     } else {
         discover_module_candidates(root, files, graph)
     }
@@ -382,6 +388,19 @@ fn discover_module_candidates(
 ) -> Vec<FocusCandidate> {
     let mut candidates = Vec::new();
 
+    // Godot's configured main scene is the runtime entry point. Its existing
+    // `res://` graph reaches attached scripts, resources, and their dependencies.
+    let main_scene = godot_main_scene(files);
+    if let Some(path) = &main_scene {
+        let reachable = graph::traverse(graph, path);
+        candidates.push(FocusCandidate {
+            path: path.clone(),
+            display: format!("Godot main scene: {}", rel(root, path)),
+            detail: format!("{} reachable files", reachable.len().saturating_sub(1)),
+            kind: FocusKind::Module,
+        });
+    }
+
     // 1. Rust crate roots.
     for root_path in graph::rust_crate_roots(root, files) {
         let reachable = graph::traverse(graph, &root_path);
@@ -445,7 +464,11 @@ fn discover_module_candidates(
         return discover_file_candidates(files, graph, root);
     }
 
-    candidates.sort_by(|a, b| a.display.cmp(&b.display));
+    candidates.sort_by(|a, b| {
+        let a_main = main_scene.as_ref().is_some_and(|path| canon(path) == canon(&a.path));
+        let b_main = main_scene.as_ref().is_some_and(|path| canon(path) == canon(&b.path));
+        b_main.cmp(&a_main).then_with(|| a.display.cmp(&b.display))
+    });
     candidates.dedup_by(|a, b| a.path == b.path);
     candidates
 }
@@ -482,6 +505,12 @@ fn is_source_file(file: &FileInfo) -> bool {
             | ".scala"
             | ".vue"
             | ".svelte"
+            | ".gd"
+            | ".tscn"
+            | ".tres"
+            | ".godot"
+            | ".gdshader"
+            | ".gdshaderinc"
             | "rs"
             | "py"
             | "js"
@@ -489,7 +518,40 @@ fn is_source_file(file: &FileInfo) -> bool {
             | "ts"
             | "tsx"
             | "go"
+            | "svelte"
+            | "gd"
+            | "tscn"
+            | "tres"
+            | "godot"
+            | "gdshader"
+            | "gdshaderinc"
     )
+}
+
+fn godot_main_scene(files: &[FileInfo]) -> Option<PathBuf> {
+    let project_file = files.iter().find(|file| file.relative_path == "project.godot")?;
+    let (content, _) = read_file_safe(&project_file.path, None, None).ok()?;
+    let configured = godot::parse_project(&content).main_scene?;
+    let relative = configured.strip_prefix("res://")?.replace('\\', "/");
+    files.iter().find(|file| file.relative_path == relative).map(|file| file.path.clone())
+}
+
+fn prioritize_godot_main_scene(
+    root: &Path,
+    files: &[FileInfo],
+    candidates: &mut Vec<FocusCandidate>,
+) {
+    let Some(main_scene) = godot_main_scene(files) else { return };
+    let Some(index) =
+        candidates.iter().position(|candidate| canon(&candidate.path) == canon(&main_scene))
+    else {
+        return;
+    };
+    let mut candidate = candidates.remove(index);
+    candidate.display = format!("Godot main scene: {}", rel(root, &candidate.path));
+    candidate.detail = format!("{}, configured entrypoint", candidate.detail);
+    candidate.kind = FocusKind::Module;
+    candidates.insert(0, candidate);
 }
 
 fn is_rust_file(file: &FileInfo) -> bool {
@@ -586,4 +648,76 @@ fn canon(path: &Path) -> PathBuf {
 
 fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn godot_main_scene_is_the_first_focus_candidate() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+        fs::create_dir_all(root.join("scripts")).expect("mkdir scripts");
+        fs::write(
+            root.join("project.godot"),
+            "config_version=5\n[application]\nrun/main_scene=\"res://main.tscn\"\n",
+        )
+        .expect("write project");
+        fs::write(
+            root.join("main.tscn"),
+            "[ext_resource path=\"res://scripts/player.gd\" type=\"Script\" id=\"1\"]\n",
+        )
+        .expect("write scene");
+        fs::write(root.join("scripts/player.gd"), "extends Node\n").expect("write script");
+        let files = vec![
+            test_file(root, "project.godot"),
+            test_file(root, "main.tscn"),
+            test_file(root, "scripts/player.gd"),
+        ];
+        let graph = graph::build(&files);
+
+        let candidates = discover_candidates(root, &files, &graph);
+
+        assert_eq!(canon(&candidates[0].path), canon(&root.join("main.tscn")));
+        assert_eq!(candidates[0].kind, FocusKind::Module);
+    }
+
+    #[test]
+    fn godot_only_repository_without_main_scene_has_file_candidates() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+        fs::write(root.join("player.gd"), "extends Node\n").expect("write script");
+        let files = vec![test_file(root, "player.gd")];
+        let graph = graph::build(&files);
+
+        let candidates = discover_candidates(root, &files, &graph);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(canon(&candidates[0].path), canon(&root.join("player.gd")));
+    }
+
+    fn test_file(root: &Path, relative_path: &str) -> FileInfo {
+        let path = root.join(relative_path);
+        FileInfo {
+            path: path.clone(),
+            relative_path: relative_path.to_string(),
+            size_bytes: 0,
+            extension: path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| format!(".{extension}"))
+                .unwrap_or_default(),
+            language: String::new(),
+            id: String::new(),
+            priority: 0.0,
+            token_estimate: 0,
+            tags: Default::default(),
+            is_readme: false,
+            is_config: false,
+            is_doc: false,
+        }
+    }
 }

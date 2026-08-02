@@ -117,8 +117,9 @@ pub fn direct_callers(graph: &ImportGraph, target: &Path) -> Vec<PathBuf> {
 
 /// Detects Rust crate-root candidates from scanned files.
 ///
-/// Returns absolute paths to `src/main.rs`, `src/lib.rs`, and `src/bin/*.rs`
-/// for the repository root and nested workspace crates.
+/// Returns absolute paths to `src/main.rs`, `src/lib.rs`, flat `src/bin/*.rs`
+/// binaries, and directory binaries at `src/bin/*/main.rs` for the repository
+/// root and nested workspace crates.
 #[must_use]
 pub fn rust_crate_roots(root: &Path, files: &[FileInfo]) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = files
@@ -167,20 +168,22 @@ fn is_rust_source(file: &FileInfo) -> bool {
 }
 
 fn crate_dir_for_rust_entry(rel: &str) -> Option<&str> {
-    if matches!(rel, "src/lib.rs" | "src/main.rs") {
-        return Some("");
-    }
-    if rel.starts_with("src/bin/") && rel.ends_with(".rs") {
-        return Some("");
-    }
-    if let Some(crate_dir) = rel.strip_suffix("/src/lib.rs") {
+    let (crate_dir, source_path) = if let Some(source_path) = rel.strip_prefix("src/") {
+        ("", source_path)
+    } else {
+        rel.split_once("/src/")?
+    };
+
+    if matches!(source_path, "lib.rs" | "main.rs") {
         return Some(crate_dir);
     }
-    if let Some(crate_dir) = rel.strip_suffix("/src/main.rs") {
-        return Some(crate_dir);
-    }
-    rel.find("/src/bin/")
-        .and_then(|idx| if rel.ends_with(".rs") { Some(&rel[..idx]) } else { None })
+
+    let binary_path = source_path.strip_prefix("bin/")?;
+    let is_flat_binary = binary_path.ends_with(".rs") && !binary_path.contains('/');
+    let is_directory_binary = binary_path
+        .strip_suffix("/main.rs")
+        .is_some_and(|directory| !directory.is_empty() && !directory.contains('/'));
+    (is_flat_binary || is_directory_binary).then_some(crate_dir)
 }
 
 /// Returns shortest import depth for each reachable file.
@@ -214,6 +217,8 @@ fn imports_for(
         ".ts" | ".tsx" | ".js" | ".jsx" | "ts" | "tsx" | "js" | "jsx" => {
             js_imports(&file.path, content, by_path)
         }
+        ".svelte" | "svelte" => svelte_imports(&file.path, content, by_path),
+        ".py" | "py" => python_imports(file, content, rel_to_abs),
         ".rs" | "rs" => rust_imports(&file.path, content, by_path),
         ".go" | "go" => go_imports(content, rel_to_abs),
         ".gd" | ".tscn" | ".tres" | ".godot" | ".gdshader" | ".gdshaderinc" => {
@@ -241,8 +246,116 @@ fn js_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>) 
     re.captures_iter(content)
         .filter_map(|cap| cap.get(1).map(|m| m.as_str()))
         .filter(|spec| spec.starts_with('.'))
-        .filter_map(|spec| resolve_relative(path, spec, &[".ts", ".tsx", ".js", ".jsx"], by_path))
+        .filter_map(|spec| {
+            resolve_relative(path, spec, &[".ts", ".tsx", ".js", ".jsx", ".svelte"], by_path)
+        })
         .collect()
+}
+
+fn svelte_imports(
+    path: &Path,
+    content: &str,
+    by_path: &HashMap<PathBuf, FileInfo>,
+) -> Vec<PathBuf> {
+    let script_re =
+        Regex::new(r#"(?s)<script(?:\s[^>]*)?>(.*?)</script>"#).expect("valid Svelte script regex");
+    dedup(
+        script_re
+            .captures_iter(content)
+            .filter_map(|captures| captures.get(1).map(|script| script.as_str()))
+            .flat_map(|script| js_imports(path, script, by_path))
+            .collect(),
+    )
+}
+
+fn python_imports(
+    file: &FileInfo,
+    content: &str,
+    rel_to_abs: &HashMap<String, PathBuf>,
+) -> Vec<PathBuf> {
+    let from_re =
+        Regex::new(r#"(?m)^\s*from\s+([.]*[A-Za-z_][A-Za-z0-9_.]*|[.]+)\s+import\s+([^\n#]+)"#)
+            .expect("valid Python from-import regex");
+    let import_re = Regex::new(r#"(?m)^\s*import\s+([^\n#]+)"#).expect("valid Python import regex");
+    let mut out = Vec::new();
+
+    for captures in from_re.captures_iter(content) {
+        let Some(module) = captures.get(1).map(|value| value.as_str()) else { continue };
+        if let Some(path) = resolve_python_module(file, module, rel_to_abs) {
+            out.push(path);
+        }
+
+        // `from . import models` names a module in the current package. For a
+        // normal `from package import Name`, only add Name when it is itself a
+        // scanned module; unresolved symbols and third-party imports disappear.
+        let imported = captures.get(2).map(|value| value.as_str()).unwrap_or("");
+        for name in imported.split(',').filter_map(python_imported_name) {
+            let child = if module.ends_with('.') {
+                format!("{module}{name}")
+            } else {
+                format!("{module}.{name}")
+            };
+            if let Some(path) = resolve_python_module(file, &child, rel_to_abs) {
+                out.push(path);
+            }
+        }
+    }
+
+    for captures in import_re.captures_iter(content) {
+        let Some(imports) = captures.get(1).map(|value| value.as_str()) else { continue };
+        for module in imports.split(',').filter_map(python_imported_name) {
+            if let Some(path) = resolve_python_module(file, module, rel_to_abs) {
+                out.push(path);
+            }
+        }
+    }
+
+    dedup(out)
+}
+
+fn python_imported_name(value: &str) -> Option<&str> {
+    let name = value.split_whitespace().next()?.trim_matches(['(', ')']);
+    (!name.is_empty()).then_some(name)
+}
+
+fn resolve_python_module(
+    importer: &FileInfo,
+    spec: &str,
+    rel_to_abs: &HashMap<String, PathBuf>,
+) -> Option<PathBuf> {
+    let importer_path = Path::new(&importer.relative_path);
+    let package_dir = importer_path.parent().unwrap_or_else(|| Path::new(""));
+    let dot_count = spec.bytes().take_while(|byte| *byte == b'.').count();
+    let module = spec[dot_count..].replace('.', "/");
+
+    if dot_count > 0 {
+        let mut base = package_dir.to_path_buf();
+        for _ in 1..dot_count {
+            base.pop();
+        }
+        return python_module_at(&base.join(module), rel_to_abs);
+    }
+
+    // Try the repository root first, then each enclosing source root. This
+    // covers both `pkg.module` and common `src/pkg` / `api/app` layouts without
+    // treating unresolved third-party imports as local dependencies.
+    if let Some(path) = python_module_at(Path::new(&module), rel_to_abs) {
+        return Some(path);
+    }
+    let ancestors: Vec<&Path> = package_dir.ancestors().collect();
+    for prefix in ancestors.iter().rev().skip(1) {
+        if let Some(path) = python_module_at(&prefix.join(&module), rel_to_abs) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn python_module_at(base: &Path, rel_to_abs: &HashMap<String, PathBuf>) -> Option<PathBuf> {
+    let base = base.to_string_lossy().replace('\\', "/");
+    let module_file = format!("{base}.py");
+    let package_file = format!("{base}/__init__.py");
+    rel_to_abs.get(&module_file).or_else(|| rel_to_abs.get(&package_file)).cloned()
 }
 
 fn rust_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>) -> Vec<PathBuf> {
@@ -301,10 +414,13 @@ fn rust_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>
                 continue;
             }
 
-            // Standard Rust module resolution: foo.rs or foo/mod.rs.
-            for candidate in
-                &[dir.join(format!("{}.rs", name_str)), dir.join(name_str).join("mod.rs")]
-            {
+            // Standard Rust module resolution. An ordinary `foo.rs` owns the
+            // `foo/` directory, while crate roots and `mod.rs` own siblings.
+            let module_dir = rust_child_module_dir(path, src_root);
+            for candidate in &[
+                module_dir.join(format!("{}.rs", name_str)),
+                module_dir.join(name_str).join("mod.rs"),
+            ] {
                 let candidate = normalize_abs(candidate);
                 if by_path.contains_key(&candidate) {
                     // If the module is a directory (foo/mod.rs), also resolve children
@@ -319,7 +435,7 @@ fn rust_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>
     }
 
     let use_re = Regex::new(r#"(?m)^\s*use\s+crate::([A-Za-z0-9_:]+)"#).expect("valid use regex");
-    if let Some(root) = src_root {
+    if let Some(root) = rust_crate_module_dir(path, src_root, by_path) {
         for cap in use_re.captures_iter(content) {
             if let Some(spec) = cap.get(1) {
                 let parts: Vec<&str> = spec.as_str().split("::").collect();
@@ -342,13 +458,13 @@ fn rust_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>
     // Also resolve use self:: and use super::
     let self_super_re = Regex::new(r#"(?m)^\s*use\s+(self|super)::([A-Za-z0-9_:]+)"#)
         .expect("valid self super regex");
-    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let module_dir = rust_child_module_dir(path, src_root);
     for cap in self_super_re.captures_iter(content) {
         if let Some(prefix_kind) = cap.get(1) {
             if let Some(spec) = cap.get(2) {
                 let base = match prefix_kind.as_str() {
-                    "self" => parent.to_path_buf(),
-                    "super" => parent.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+                    "self" => module_dir.clone(),
+                    "super" => module_dir.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
                     _ => continue,
                 };
                 let parts: Vec<&str> = spec.as_str().split("::").collect();
@@ -367,6 +483,57 @@ fn rust_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>
     }
 
     dedup(out)
+}
+
+fn rust_child_module_dir(path: &Path, src_root: Option<&Path>) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let is_crate_root = src_root.is_some_and(|root| is_rust_crate_root_file(path, root));
+    if file_name == "mod.rs" || is_crate_root {
+        parent.to_path_buf()
+    } else {
+        path.with_extension("")
+    }
+}
+
+fn is_rust_crate_root_file(path: &Path, src_root: &Path) -> bool {
+    if path == src_root.join("lib.rs") || path == src_root.join("main.rs") {
+        return true;
+    }
+
+    let Ok(binary_path) = path.strip_prefix(src_root.join("bin")) else { return false };
+    let parts: Vec<_> = binary_path.components().collect();
+    (parts.len() == 1 && path.extension().and_then(|extension| extension.to_str()) == Some("rs"))
+        || (parts.len() == 2 && path.file_name().and_then(|name| name.to_str()) == Some("main.rs"))
+}
+
+fn rust_crate_module_dir(
+    path: &Path,
+    src_root: Option<&Path>,
+    by_path: &HashMap<PathBuf, FileInfo>,
+) -> Option<PathBuf> {
+    let src_root = src_root?;
+    let bin_root = src_root.join("bin");
+    let Ok(binary_path) = path.strip_prefix(&bin_root) else {
+        return Some(src_root.to_path_buf());
+    };
+    let binary_name = binary_path.components().next()?.as_os_str();
+
+    if binary_path.components().count() == 1 {
+        return Some(bin_root);
+    }
+
+    let directory_root = bin_root.join(binary_name);
+    if by_path.contains_key(&normalize_abs(&directory_root.join("main.rs"))) {
+        return Some(directory_root);
+    }
+
+    let flat_root = bin_root.join(binary_name).with_extension("rs");
+    if by_path.contains_key(&normalize_abs(&flat_root)) {
+        return Some(bin_root);
+    }
+
+    Some(src_root.to_path_buf())
 }
 
 /// Checks whether the text immediately preceding a position contains
@@ -652,6 +819,186 @@ mod tests {
 
         assert!(roots.contains(&normalize_abs(&lib_rs)), "workspace crate lib.rs is a crate root");
         assert!(roots.contains(&normalize_abs(&bin_rs)), "workspace crate bin is a crate root");
+    }
+
+    #[test]
+    fn rust_directory_binary_owns_sibling_modules() {
+        use std::fs;
+        use tempfile::TempDir;
+        let tmp = TempDir::new().expect("tmp");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("src/bin/tool")).expect("mkdir directory binary");
+
+        let main_rs = root.join("src/bin/tool/main.rs");
+        let command_rs = root.join("src/bin/tool/command.rs");
+        let shared_rs = root.join("src/bin/tool/shared.rs");
+        fs::write(&main_rs, "mod command;\nmod shared;\nfn main() { command::run(); }\n")
+            .expect("write main");
+        fs::write(&command_rs, "use crate::shared;\npub fn run() { shared::work(); }\n")
+            .expect("write command");
+        fs::write(&shared_rs, "pub fn work() {}\n").expect("write shared");
+
+        let files =
+            vec![test_file_abs(&main_rs), test_file_abs(&command_rs), test_file_abs(&shared_rs)];
+        let roots = rust_crate_roots(root, &files);
+        let graph = build(&files);
+
+        assert_eq!(roots, vec![normalize_abs(&main_rs)]);
+        assert_eq!(
+            traverse(&graph, &main_rs),
+            vec![normalize_abs(&main_rs), normalize_abs(&command_rs), normalize_abs(&shared_rs),]
+        );
+        assert!(graph
+            .edges
+            .get(&normalize_abs(&command_rs))
+            .expect("command dependencies")
+            .contains(&normalize_abs(&shared_rs)));
+    }
+
+    #[test]
+    fn python_package_imports_resolve_local_modules_only() {
+        use std::fs;
+        use tempfile::TempDir;
+        let tmp = TempDir::new().expect("tmp");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("api/app")).expect("mkdir package");
+
+        let main_py = root.join("api/app/main.py");
+        let services_py = root.join("api/app/services.py");
+        let models_py = root.join("api/app/models.py");
+        fs::write(
+            &main_py,
+            "from app.services import run\nfrom . import models\nimport requests\n",
+        )
+        .expect("write main");
+        fs::write(&services_py, "def run(): pass\n").expect("write services");
+        fs::write(&models_py, "class Model: pass\n").expect("write models");
+
+        let files = vec![
+            test_file_rel(&main_py, "api/app/main.py"),
+            test_file_rel(&services_py, "api/app/services.py"),
+            test_file_rel(&models_py, "api/app/models.py"),
+        ];
+        let graph = build(&files);
+        let dependencies = graph.edges.get(&normalize_abs(&main_py)).expect("main dependencies");
+
+        assert_eq!(dependencies.len(), 2, "unresolved third-party imports must be ignored");
+        assert!(dependencies.contains(&normalize_abs(&services_py)));
+        assert!(dependencies.contains(&normalize_abs(&models_py)));
+    }
+
+    #[test]
+    fn svelte_imports_resolve_typescript_and_svelte_targets() {
+        use std::fs;
+        use tempfile::TempDir;
+        let tmp = TempDir::new().expect("tmp");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("src/lib")).expect("mkdir lib");
+
+        let page = root.join("src/Page.svelte");
+        let card = root.join("src/lib/Card.svelte");
+        let format = root.join("src/lib/format.ts");
+        let fake = root.join("src/lib/fake.ts");
+        fs::write(
+            &page,
+            "<script lang=\"ts\">\nimport Card from './lib/Card.svelte';\nimport { format } from './lib/format';\n</script>\n<p>import fake from './lib/fake'</p>\n",
+        )
+        .expect("write page");
+        fs::write(&card, "<div>card</div>\n").expect("write card");
+        fs::write(&format, "export const format = String;\n").expect("write format");
+        fs::write(&fake, "export default false;\n").expect("write fake");
+
+        let files = vec![
+            test_file_abs(&page),
+            test_file_abs(&card),
+            test_file_abs(&format),
+            test_file_abs(&fake),
+        ];
+        let graph = build(&files);
+        let dependencies = graph.edges.get(&normalize_abs(&page)).expect("page dependencies");
+
+        assert!(dependencies.contains(&normalize_abs(&card)));
+        assert!(dependencies.contains(&normalize_abs(&format)));
+        assert!(!dependencies.contains(&normalize_abs(&fake)));
+    }
+
+    #[test]
+    fn rust_ordinary_module_owns_a_same_named_child_directory() {
+        use std::fs;
+        use tempfile::TempDir;
+        let tmp = TempDir::new().expect("tmp");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("src/foo")).expect("mkdir module");
+
+        let lib_rs = root.join("src/lib.rs");
+        let foo_rs = root.join("src/foo.rs");
+        let child_rs = root.join("src/foo/child.rs");
+        let helper_rs = root.join("src/foo/helper.rs");
+        let nested_main_rs = root.join("src/foo/main.rs");
+        let deep_rs = root.join("src/foo/main/deep.rs");
+        fs::create_dir_all(root.join("src/foo/main")).expect("mkdir nested main module");
+        fs::write(&lib_rs, "mod foo;\n").expect("write lib");
+        fs::write(&foo_rs, "mod child;\nmod helper;\nmod main;\nuse self::helper;\n")
+            .expect("write foo");
+        fs::write(&child_rs, "use super::helper;\npub fn value() -> u8 { 1 }\n")
+            .expect("write child");
+        fs::write(&helper_rs, "pub fn help() {}\n").expect("write helper");
+        fs::write(&nested_main_rs, "mod deep;\n").expect("write nested main");
+        fs::write(&deep_rs, "pub fn deep() {}\n").expect("write deep");
+
+        let files = vec![
+            test_file_abs(&lib_rs),
+            test_file_abs(&foo_rs),
+            test_file_abs(&child_rs),
+            test_file_abs(&helper_rs),
+            test_file_abs(&nested_main_rs),
+            test_file_abs(&deep_rs),
+        ];
+        let graph = build(&files);
+        let reachable = traverse(&graph, &lib_rs);
+
+        assert_eq!(reachable.len(), 6);
+        assert!(reachable.contains(&normalize_abs(&child_rs)));
+        assert!(reachable.contains(&normalize_abs(&helper_rs)));
+        assert!(reachable.contains(&normalize_abs(&deep_rs)));
+        assert!(graph
+            .edges
+            .get(&normalize_abs(&child_rs))
+            .expect("child dependencies")
+            .contains(&normalize_abs(&helper_rs)));
+    }
+
+    #[test]
+    fn rust_legacy_and_path_attribute_modules_still_resolve() {
+        use std::fs;
+        use tempfile::TempDir;
+        let tmp = TempDir::new().expect("tmp");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("src/legacy")).expect("mkdir legacy");
+        fs::create_dir_all(root.join("src/custom")).expect("mkdir custom");
+
+        let lib_rs = root.join("src/lib.rs");
+        let legacy_rs = root.join("src/legacy/mod.rs");
+        let nested_rs = root.join("src/legacy/nested.rs");
+        let custom_rs = root.join("src/custom/runtime.rs");
+        fs::write(&lib_rs, "mod legacy;\n#[path = \"custom/runtime.rs\"]\nmod runtime;\n")
+            .expect("write lib");
+        fs::write(&legacy_rs, "mod nested;\n").expect("write legacy");
+        fs::write(&nested_rs, "pub fn nested() {}\n").expect("write nested");
+        fs::write(&custom_rs, "pub fn runtime() {}\n").expect("write custom");
+
+        let files = vec![
+            test_file_abs(&lib_rs),
+            test_file_abs(&legacy_rs),
+            test_file_abs(&nested_rs),
+            test_file_abs(&custom_rs),
+        ];
+        let graph = build(&files);
+        let reachable = traverse(&graph, &lib_rs);
+
+        assert!(reachable.contains(&normalize_abs(&legacy_rs)));
+        assert!(reachable.contains(&normalize_abs(&nested_rs)));
+        assert!(reachable.contains(&normalize_abs(&custom_rs)));
     }
 
     fn test_file(path: &Path) -> FileInfo {

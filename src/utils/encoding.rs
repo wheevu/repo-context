@@ -79,9 +79,10 @@ fn detect_encoding_impl(path: &Path, sample_size: usize) -> Result<String> {
 
 /// Detect if a file is binary (not text).
 ///
-/// Uses two heuristics:
+/// Uses three heuristics:
 /// 1. Null byte check (strong binary indicator)
-/// 2. Ratio of printable ASCII bytes (< 70% = likely binary)
+/// 2. Control-byte ratio (binary control streams can still be valid UTF-8)
+/// 3. Strict UTF-8 validation (valid Unicode text is accepted regardless of script)
 ///
 /// # Arguments
 /// * `path` - Path to the file to test
@@ -103,21 +104,26 @@ fn is_binary_file_impl(path: &Path, sample_size: usize) -> Result<bool> {
         return Ok(false);
     }
 
-    // Check for null bytes (strong indicator of binary)
+    // Null bytes remain a strong binary signal even though NUL is technically valid UTF-8.
     if sample.contains(&0) {
         return Ok(true);
     }
 
-    // Check for high ratio of non-text bytes
-    // Text files typically have >70% printable ASCII
-    let printable_count = sample
-        .iter()
-        .filter(|&&b| {
-            (32..=126).contains(&b) || b == 9 || b == 10 || b == 13 // printable + tab, LF, CR
-        })
-        .count();
+    // ASCII control bytes are valid UTF-8, so check them before accepting the UTF-8 fast path.
+    // High-bit bytes are deliberately excluded: they are common in multilingual text and
+    // legacy encodings.
+    let control_count =
+        sample.iter().filter(|&&b| (b < 32 && !matches!(b, 9 | 10 | 12 | 13)) || b == 127).count();
+    if (control_count as f64 / sample.len() as f64) >= 0.30 {
+        return Ok(true);
+    }
 
-    Ok((printable_count as f64 / sample.len() as f64) < 0.70)
+    // Valid UTF-8 is text regardless of how much of it falls outside printable ASCII.
+    if std::str::from_utf8(&sample).is_ok() {
+        return Ok(false);
+    }
+
+    Ok(false)
 }
 
 /// Read a file safely with encoding detection and error handling.
@@ -291,6 +297,33 @@ mod tests {
         file.flush().unwrap();
 
         assert!(!is_binary_file(file.path(), DEFAULT_SAMPLE_SIZE));
+    }
+
+    #[test]
+    fn valid_multilingual_utf8_is_not_binary() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all("Tiếng Việt · 한국어 · 日本語 · مرحبًا · 🚀".as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        assert!(!is_binary_file(file.path(), DEFAULT_SAMPLE_SIZE));
+    }
+
+    #[test]
+    fn valid_utf8_with_many_control_bytes_is_binary() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&[0x01; 100]).unwrap();
+        file.flush().unwrap();
+
+        assert!(is_binary_file(file.path(), DEFAULT_SAMPLE_SIZE));
+    }
+
+    #[test]
+    fn invalid_utf8_with_many_control_bytes_is_binary() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&[0xff, 0x01, 0x02, 0x03, 0x04, b'A', b'B', b'C']).unwrap();
+        file.flush().unwrap();
+
+        assert!(is_binary_file(file.path(), DEFAULT_SAMPLE_SIZE));
     }
 
     #[test]

@@ -173,7 +173,7 @@ impl FileScanner {
                         // Skip known large directories unconditionally (Python lines 880-887)
                         if matches!(
                             name,
-                            "node_modules" | "__pycache__" | ".git" | ".venv" | "venv"
+                            "node_modules" | "__pycache__" | ".git" | ".venv" | "venv" | "target"
                         ) {
                             return false;
                         }
@@ -469,15 +469,7 @@ fn collect_regular_files(root: &Path) -> Vec<(String, PathBuf)> {
                 if let Some(name) = entry.file_name().to_str() {
                     if matches!(
                         name,
-                        "node_modules"
-                            | "__pycache__"
-                            | ".git"
-                            | ".venv"
-                            | "venv"
-                            | "target"
-                            | "out"
-                            | "dist"
-                            | "build"
+                        "node_modules" | "__pycache__" | ".git" | ".venv" | "venv" | "target"
                     ) {
                         return false;
                     }
@@ -521,9 +513,7 @@ fn is_excluded_noise_path(rel_path: &str) -> bool {
                 | ".venv"
                 | "venv"
                 | "target"
-                | "out"
-                | "dist"
-                | "build"
+                | "playwright-report"
         ) || (part.starts_with('.') && part != ".github")
     })
 }
@@ -624,6 +614,70 @@ mod tests {
         for i in 1..files.len() {
             assert!(files[i - 1].relative_path <= files[i].relative_path);
         }
+    }
+
+    #[test]
+    fn scanner_includes_csv_and_jsonl_as_line_oriented_text() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        fs::write(root.join("review.csv"), "claim,status\nalpha,supported\n").unwrap();
+        fs::write(root.join("cases.jsonl"), "{\"id\":1}\n{\"id\":2}\n").unwrap();
+
+        let mut scanner = FileScanner::new(root.to_path_buf()).respect_gitignore(false);
+        let files = scanner.scan().unwrap();
+
+        assert!(files
+            .iter()
+            .any(|file| { file.relative_path == "review.csv" && file.language == "csv" }));
+        assert!(files
+            .iter()
+            .any(|file| { file.relative_path == "cases.jsonl" && file.language == "jsonl" }));
+    }
+
+    #[test]
+    fn scanner_excludes_nested_build_and_browser_artifacts() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        for directory in ["web/dist", "web/test-results", "web/playwright-report"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+            fs::write(root.join(directory).join("artifact.json"), "{}\n").unwrap();
+        }
+        fs::create_dir_all(root.join("web/src")).unwrap();
+        fs::write(root.join("web/src/app.json"), "{}\n").unwrap();
+
+        let mut scanner = FileScanner::new(root.to_path_buf()).respect_gitignore(false);
+        let files = scanner.scan().unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].relative_path, "web/src/app.json");
+    }
+
+    #[test]
+    fn configured_exclude_globs_can_include_artifact_named_directories() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        for directory in
+            ["build", "web/out", "web/dist", "web/test-results", "web/playwright-report"]
+        {
+            fs::create_dir_all(root.join(directory)).unwrap();
+            fs::write(root.join(directory).join("source.rs"), "pub fn value() {}\n").unwrap();
+        }
+
+        let mut scanner =
+            FileScanner::new(root.to_path_buf()).exclude_globs(Vec::new()).respect_gitignore(false);
+        let files = scanner.scan().unwrap();
+        let paths: Vec<&str> = files.iter().map(|file| file.relative_path.as_str()).collect();
+
+        assert_eq!(
+            paths,
+            vec![
+                "build/source.rs",
+                "web/dist/source.rs",
+                "web/out/source.rs",
+                "web/playwright-report/source.rs",
+                "web/test-results/source.rs",
+            ]
+        );
     }
 
     #[test]

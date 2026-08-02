@@ -25,6 +25,8 @@ pub fn get_language(extension: &str, filename: &str) -> String {
         ".yaml" | ".yml" => "yaml",
         ".toml" => "toml",
         ".json" => "json",
+        ".jsonl" => "jsonl",
+        ".csv" => "csv",
         ".gd" => "gdscript",
         ".tscn" => "godot_scene",
         ".tres" => "godot_resource",
@@ -66,4 +68,30 @@ pub fn get_language(extension: &str, filename: &str) -> String {
         }
     };
     lang.to_string()
+}
+
+/// Whether a language identifies source code (as opposed to docs, assets, or
+/// generated output). Shared by source-vs-context budgeting and redaction so
+/// the two never drift apart.
+pub fn is_programming_language(language: &str) -> bool {
+    matches!(
+        language,
+        "python"
+            | "javascript"
+            | "typescript"
+            | "go"
+            | "java"
+            | "kotlin"
+            | "rust"
+            | "c"
+            | "cpp"
+            | "csharp"
+            | "ruby"
+            | "php"
+            | "swift"
+            | "scala"
+            | "gdscript"
+            | "svelte"
+            | "vue"
+    )
 }

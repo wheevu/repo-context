@@ -3,6 +3,7 @@
 //! Provides functionality to render chunks as JSON Lines format for RAG pipelines.
 
 use crate::domain::Chunk;
+use crate::retrieve::RetrievalPlan;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -24,6 +25,11 @@ use std::collections::BTreeMap;
 /// # Returns
 /// JSON Lines formatted string (one JSON object per line)
 pub fn render_jsonl(chunks: &[Chunk]) -> String {
+    render_jsonl_with_evidence(chunks, None)
+}
+
+/// Renders JSONL and attaches stable task-retrieval evidence when provided.
+pub fn render_jsonl_with_evidence(chunks: &[Chunk], retrieval: Option<&RetrievalPlan>) -> String {
     let mut lines = Vec::with_capacity(chunks.len());
     for chunk in chunks {
         let mut tags: Vec<&str> = chunk.tags.iter().map(String::as_str).collect();
@@ -76,6 +82,16 @@ pub fn render_jsonl(chunks: &[Chunk]) -> String {
         );
         entry.insert("symbols", entry.get("tags").cloned().unwrap_or(Value::Array(Vec::new())));
         entry.insert("token_estimate", Value::Number(chunk.token_estimate.into()));
+        if let Some(evidence) = retrieval.and_then(|plan| plan.evidence_for(chunk)) {
+            entry.insert(
+                "retrieval",
+                serde_json::json!({
+                    "score": Value::from((evidence.score * 1_000_000.0).round() / 1_000_000.0),
+                    "depth": evidence.depth,
+                    "reasons": evidence.reasons.iter().collect::<Vec<_>>(),
+                }),
+            );
+        }
 
         if let Ok(line) = serde_json::to_string(&entry) {
             lines.push(line);

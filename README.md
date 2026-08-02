@@ -92,6 +92,7 @@ The script builds the release binary with `--locked`, runs `repo-context export 
 
 - `export` — build context artifacts
 - `info` — inspect repository composition without exporting
+- `index` — build or refresh a local redacted SQLite retrieval index
 
 ## Output
 
@@ -100,6 +101,10 @@ The script builds the release binary with `--locked`, runs `repo-context export 
 - `<repo>_context_pack.md` — prompt-friendly repository context
 - `<repo>_chunks.jsonl` — retrieval chunks for embedding/indexing
 - `<repo>_report.json` — selection stats and run metadata
+
+Task exports add an explainable `retrieval` object to the report and a
+`retrieval` object to each JSONL chunk selected by the task. The report stores
+only a SHA-256 task fingerprint, never the raw task text.
 
 By mode:
 
@@ -153,6 +158,31 @@ Unused space may be borrowed by either pool; the report records the actual
 `source_tokens_selected` and `context_tokens_selected` totals. The cap applies separately to each
 rendered prompt and JSONL artifact, including its formatting and metadata.
 
+Task-aware output (full coverage, task-ranked)
+```
+repo-context export --path . --task "trace OAuth refresh failures" --no-timestamp
+```
+Task-aware budgeted output
+```
+repo-context export --path . --task "trace OAuth refresh failures" --max-tokens 12000
+```
+Task retrieval is deterministic and local: BM25 lexical matching seeds a
+bounded traversal of the existing static import graph, related tests, and
+repository anchors. It uses no network, hosted model, embedding service, or
+runtime execution. `--no-index` keeps the same retrieval behavior in memory.
+
+Build an explicit local index
+```
+repo-context index --path . --db /tmp/repo-context.sqlite
+```
+When `--db` is omitted, the index lives in the platform user cache. On macOS
+that is `~/Library/Caches/repo-context/indexes/<root-key>/index.sqlite`; Unix
+uses `$XDG_CACHE_HOME` or `~/.cache`, and Windows uses `%LOCALAPPDATA%`.
+The database contains relative paths, metadata, static imports, symbols, and
+redacted chunks only. It is an advisory cache: exports re-scan and re-redact
+the current repository before rendering. An unavailable implicit cache falls
+back to memory; an explicit `--index-db` failure is an error.
+
 Prompt-only
 ```
 repo-context export --path . --mode prompt
@@ -202,13 +232,14 @@ Generated `.uid` and `.import` files are inventory-only, and `.godot/` editor/im
 
 Valid JSON is parsed before minification checks. The prompt receives a concise top-level schema, while logical object/array batches remain available in RAG chunks. Invalid JSON safely falls back to normal text chunking. Minified-code protection remains active for JavaScript and similar source formats.
 
-Known limitations: the Godot parsers are intentionally lightweight rather than compiler-complete. Dynamic resource paths, runtime-created node hierarchies, computed input action names, and binary asset internals cannot always be resolved statically. Malformed or unusual text formats degrade to source/text chunks instead of failing an export.
+Known limitations: the Godot parsers are intentionally lightweight rather than compiler-complete. Dynamic resource paths, runtime-created node hierarchies, computed input action names, and binary asset internals cannot always be resolved statically. Malformed or unusual text formats degrade to source/text chunks instead of failing an export. Task retrieval makes static dependency/importer claims only; it does not claim runtime call reachability, compiler semantics, or behavioral correctness. Remote task exports use ephemeral retrieval and never persist a remote repository index. `--no-redact` also bypasses persistent indexing.
 
-Godot analysis remains additive in report schema `1.3.0`: reports may contain a top-level `godot` object, and file dispositions may use `inventory_only` for generated metadata and binary assets that were indexed without textual chunks. Schema 1.3 also makes budget and emitted-output accounting authoritative.
+Godot analysis remains additive in report schema `1.4.0`: reports may contain a top-level `godot` object, and file dispositions may use `inventory_only` for generated metadata and binary assets that were indexed without textual chunks. Task reports additionally contain stable retrieval counts and relation labels; raw task text and cache paths are never emitted.
 
 ## Development
 ```
 cargo fmt
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --locked
+cargo build --release --locked
 ```

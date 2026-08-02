@@ -5,7 +5,7 @@ use clap::Args;
 use std::path::PathBuf;
 
 use super::utils::parse_csv;
-use crate::app::export::{execute, ExportExecutionOptions};
+use crate::app::export::{execute_with_task, ExportExecutionOptions, TaskExecutionOptions};
 use crate::config::{load_config, merge_cli_with_config, CliOverrides};
 use crate::domain::{OutputMode, ProjectProfile, RedactionMode};
 use crate::module::focus_picker::ScanMode;
@@ -108,11 +108,37 @@ pub struct ExportArgs {
     /// Example: --focus-file src/main.rs
     #[arg(long, value_name = "PATH")]
     pub focus_file: Option<PathBuf>,
+
+    /// Rank context around a task or change request using deterministic local retrieval.
+    #[arg(long, value_name = "TEXT")]
+    pub task: Option<String>,
+
+    /// Explicit SQLite index path used by task retrieval.
+    #[arg(long, value_name = "FILE")]
+    pub index_db: Option<PathBuf>,
+
+    /// Disable persistent index access for this task export.
+    #[arg(long)]
+    pub no_index: bool,
 }
 
 pub fn run(args: ExportArgs) -> Result<()> {
     if args.path.is_some() && args.repo.is_some() {
         anyhow::bail!("Cannot specify both --path and --repo");
+    }
+    if args.task.as_deref().is_some_and(|task| task.trim().is_empty()) {
+        anyhow::bail!("--task cannot be empty");
+    }
+    if args.task.is_none() && args.index_db.is_some() {
+        anyhow::bail!("--index-db requires --task");
+    }
+    if args.no_index && args.index_db.is_some() {
+        anyhow::bail!("Cannot combine --no-index with --index-db");
+    }
+    if args.repo.is_some() && args.index_db.is_some() {
+        anyhow::bail!(
+            "Persistent task indexes are local-only; omit --index-db for remote repositories"
+        );
     }
 
     let cwd = std::env::current_dir()?;
@@ -159,16 +185,26 @@ pub fn run(args: ExportArgs) -> Result<()> {
     if merged.path.is_none() && merged.repo_url.is_none() {
         anyhow::bail!("Either --path or --repo must be specified");
     }
+    if merged.repo_url.is_some() && args.index_db.is_some() {
+        anyhow::bail!(
+            "Persistent task indexes are local-only; omit --index-db for remote repositories"
+        );
+    }
 
     let scan_mode = parse_scan_mode(args.scan_mode.as_deref())?;
 
-    let outcome = execute(
+    let outcome = execute_with_task(
         merged,
         ExportExecutionOptions {
             include_timestamp: !args.no_timestamp,
             explicit_config_path: args.config.clone(),
             scan_mode,
             focus_path: args.focus_file.clone(),
+        },
+        TaskExecutionOptions {
+            task: args.task.clone(),
+            index_db: args.index_db.clone(),
+            no_index: args.no_index,
         },
     )?;
 

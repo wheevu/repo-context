@@ -3,8 +3,6 @@
 //! These functions are public API for downstream users. Internal usage
 //! may be added in the future.
 
-#![allow(dead_code)]
-
 use crate::domain::Chunk;
 use std::collections::{HashMap, HashSet};
 
@@ -79,22 +77,41 @@ pub fn score_query_against_chunks(chunks: &[Chunk], query: &str) -> Vec<f64> {
         .collect()
 }
 
-fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter_map(|token| {
-            let lower = token.trim().to_ascii_lowercase();
-            if lower.len() >= 2 {
-                Some(lower)
-            } else {
-                None
-            }
-        })
-        .collect()
+/// Tokenizes text for deterministic local retrieval.
+pub fn tokenize(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut previous_was_lowercase = false;
+
+    let flush = |current: &mut String, tokens: &mut Vec<String>| {
+        if current.chars().count() >= 2 {
+            tokens.push(current.clone());
+        }
+        current.clear();
+    };
+
+    for ch in text.chars() {
+        if !ch.is_alphanumeric() {
+            flush(&mut current, &mut tokens);
+            previous_was_lowercase = false;
+            continue;
+        }
+
+        if ch.is_uppercase() && previous_was_lowercase {
+            flush(&mut current, &mut tokens);
+        }
+        for lower in ch.to_lowercase() {
+            current.push(lower);
+        }
+        previous_was_lowercase = ch.is_lowercase() || ch.is_numeric();
+    }
+    flush(&mut current, &mut tokens);
+    tokens
 }
 
 #[cfg(test)]
 mod tests {
-    use super::score_query_against_chunks;
+    use super::{score_query_against_chunks, tokenize};
     use crate::domain::Chunk;
     use std::collections::BTreeSet;
 
@@ -142,5 +159,13 @@ mod tests {
         let scores = score_query_against_chunks(&chunks, "oauth token refresh");
         assert_eq!(scores.len(), 2);
         assert!(scores[0] > scores[1]);
+    }
+
+    #[test]
+    fn tokenizer_splits_paths_snake_case_kebab_case_and_camel_case() {
+        assert_eq!(
+            tokenize("OAuthRefresh/foo_bar-v2.rs"),
+            ["oauth", "refresh", "foo", "bar", "v2", "rs"]
+        );
     }
 }

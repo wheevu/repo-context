@@ -2,6 +2,7 @@
 
 use crate::domain::{FileDisposition, FileInfo, ScanStats, REPORT_SCHEMA_VERSION};
 use crate::godot::GodotSummary;
+use crate::retrieve::RetrievalPlan;
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::{json, Map, Value};
@@ -40,6 +41,30 @@ pub fn write_report(
     config: &Value,
     dispositions: &[FileDisposition],
     options: ReportOptions<'_>,
+) -> Result<()> {
+    write_report_with_retrieval(
+        report_path,
+        stats,
+        files,
+        output_files,
+        config,
+        dispositions,
+        options,
+        None,
+    )
+}
+
+/// Writes a report and optionally includes deterministic task-retrieval metadata.
+#[allow(clippy::too_many_arguments)]
+pub fn write_report_with_retrieval(
+    report_path: &Path,
+    stats: &ScanStats,
+    files: &[FileInfo],
+    output_files: &[String],
+    config: &Value,
+    dispositions: &[FileDisposition],
+    options: ReportOptions<'_>,
+    retrieval: Option<&RetrievalPlan>,
 ) -> Result<()> {
     let mut sorted_output_files = output_files.to_vec();
     sorted_output_files.sort();
@@ -82,6 +107,9 @@ pub fn write_report(
     }
     if let Some(godot) = options.godot {
         report.insert("godot".to_string(), serde_json::to_value(godot)?);
+    }
+    if let Some(retrieval) = retrieval {
+        report.insert("retrieval".to_string(), retrieval.report_value());
     }
     report.insert("output_files".to_string(), serde_json::to_value(sorted_output_files)?);
     if !file_manifest.is_empty() {

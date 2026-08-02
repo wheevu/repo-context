@@ -60,6 +60,9 @@ tree-sitter-go = "0.23"
 # Hashing and IDs
 sha2 = "0.10"
 
+# Local retrieval cache
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 rustpython-parser = { version = "0.4", optional = true }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 /// Current report schema version.
-pub const REPORT_SCHEMA_VERSION: &str = "1.3.0";
+pub const REPORT_SCHEMA_VERSION: &str = "1.4.0";
 
 /// Statistics from scanning and processing.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

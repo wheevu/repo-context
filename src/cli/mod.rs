@@ -10,6 +10,7 @@ use tracing::Level;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod export;
+mod index;
 mod info;
 mod utils;
 
@@ -34,6 +35,9 @@ enum Commands {
 
     /// Display repository information without exporting
     Info(info::InfoArgs),
+
+    /// Build or refresh the local redacted retrieval index
+    Index(index::IndexArgs),
 }
 
 /// Entry point for CLI execution.
@@ -64,5 +68,6 @@ pub fn run() -> Result<()> {
     match cli.command {
         Commands::Export(args) => export::run(*args),
         Commands::Info(args) => info::run(args),
+        Commands::Index(args) => index::run(args),
     }
 }

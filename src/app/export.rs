@@ -16,12 +16,17 @@ use crate::domain::{
 };
 use crate::fetch::fetch_repository;
 use crate::godot::{analyze as analyze_godot, resolve_profile};
+use crate::index::{default_index_path, IndexStore};
 use crate::module::focus_picker::ScanMode;
 use crate::module::FocusResult;
 use crate::rank::rank_files_with_manifest;
 use crate::redact::redactor::RedactionOccurrence;
 use crate::redact::Redactor;
-use crate::render::{render_jsonl, write_report, ContextPackCtx, ReportOptions};
+use crate::render::{
+    render_jsonl, render_jsonl_with_evidence, write_report_with_retrieval, ContextPackCtx,
+    ReportOptions,
+};
+use crate::retrieve::{self, RetrievalPlan};
 use crate::scan::scanner::FileScanner;
 use crate::scan::tree::generate_tree;
 use crate::utils::{estimate_tokens, read_file_safe, redact_url_credentials};
@@ -39,6 +44,17 @@ pub struct ExportExecutionOptions {
     pub focus_path: Option<PathBuf>,
 }
 
+/// Optional task retrieval behavior for an export.
+#[derive(Debug, Clone, Default)]
+pub struct TaskExecutionOptions {
+    /// Optional task text used to order or select context.
+    pub task: Option<String>,
+    /// Explicit persistent index path for task retrieval.
+    pub index_db: Option<PathBuf>,
+    /// Disable persistent index access.
+    pub no_index: bool,
+}
+
 /// Result summary from an export execution.
 #[derive(Debug, Clone)]
 pub struct ExportOutcome {
@@ -47,7 +63,51 @@ pub struct ExportOutcome {
     pub output_files: Vec<String>,
 }
 
-pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<ExportOutcome> {
+/// Build a local redacted index without writing export artifacts.
+pub fn build_index(mut config: Config, index_path: &Path) -> Result<crate::index::IndexRefresh> {
+    if config.repo_url.is_some() {
+        anyhow::bail!("the index command accepts local repositories only");
+    }
+    let repo_ctx = fetch_repository(config.path.as_deref(), None, None)?;
+    let root_path = repo_ctx.root_path.clone();
+    let _ = resolve_profile(&mut config, &root_path);
+    let mut scanner = FileScanner::from_config(root_path.clone(), &config);
+    let scanned_files = scanner.scan()?;
+    let (ranked_files, _) =
+        rank_files_with_manifest(&root_path, scanned_files, config.ranking_weights.clone())?;
+    let redactor = build_redactor(config.redaction_mode, &config.redaction);
+    let graph = crate::module::graph::build(&ranked_files);
+    let mut store = IndexStore::open(
+        index_path,
+        &root_path,
+        &crate::index::config_fingerprint(&config),
+        &crate::index::redaction_fingerprint(&config),
+    )?;
+    let stale_paths = store.paths_needing_refresh(&ranked_files)?;
+    let current_paths: HashSet<&str> =
+        ranked_files.iter().map(|file| file.relative_path.as_str()).collect();
+    let mut chunks: Vec<Chunk> = store
+        .load_chunks()?
+        .into_iter()
+        .filter(|chunk| {
+            current_paths.contains(chunk.path.as_str()) && !stale_paths.contains(&chunk.path)
+        })
+        .collect();
+    for file in ranked_files.iter().filter(|file| stale_paths.contains(&file.relative_path)) {
+        chunks.extend(process_file(file, Some(&redactor), &config, None)?.chunks);
+    }
+    store.refresh(&ranked_files, &chunks, &graph, &root_path)
+}
+
+pub fn execute(config: Config, options: ExportExecutionOptions) -> Result<ExportOutcome> {
+    execute_with_task(config, options, TaskExecutionOptions::default())
+}
+
+pub fn execute_with_task(
+    mut config: Config,
+    options: ExportExecutionOptions,
+    task_options: TaskExecutionOptions,
+) -> Result<ExportOutcome> {
     let started = Instant::now();
     let was_remote = config.repo_url.is_some();
     let repo_ctx = fetch_repository(
@@ -156,10 +216,60 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
         all_chunks.extend(processed.chunks);
     }
 
-    let mut chunks = apply_chunk_token_budget(all_chunks, config.max_tokens, &mut stats);
+    let mut retrieval_plan = if let Some(task) = task_options.task.as_deref() {
+        let graph = crate::module::graph::build(&selected_files);
+        let mut indexed_chunks = None;
+        if !task_options.no_index && config.redact_secrets && !was_remote {
+            let index_path =
+                task_options.index_db.clone().or_else(|| default_index_path(&root_path));
+            if let Some(index_path) = index_path {
+                let index_result = IndexStore::open(
+                    &index_path,
+                    &root_path,
+                    &crate::index::config_fingerprint(&config),
+                    &crate::index::redaction_fingerprint(&config),
+                )
+                .and_then(|mut store| {
+                    store.refresh(&selected_files, &all_chunks, &graph, &root_path)?;
+                    store.load_chunks()
+                });
+                match index_result {
+                    Ok(chunks) if !chunks.is_empty() => indexed_chunks = Some(chunks),
+                    Ok(_) => {}
+                    Err(error) if task_options.index_db.is_some() => {
+                        return Err(error.context("failed to refresh explicit task index"));
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "task index unavailable; using in-memory retrieval: {error}"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!("no user cache directory; using in-memory task retrieval");
+            }
+        }
+        let retrieval_chunks = indexed_chunks.as_deref().unwrap_or(&all_chunks);
+        Some(retrieve::build_plan(task, retrieval_chunks, &selected_files, &graph))
+    } else {
+        None
+    };
+
+    let mut chunks = if let Some(plan) = retrieval_plan.as_ref() {
+        apply_chunk_token_budget_for_task(all_chunks, config.max_tokens, &mut stats, plan)
+    } else {
+        apply_chunk_token_budget(all_chunks, config.max_tokens, &mut stats)
+    };
+    if let Some(plan) = retrieval_plan.as_ref() {
+        reorder_chunks_for_task(&mut chunks, plan);
+    }
     if matches!(config.mode, OutputMode::Rag | OutputMode::Both) {
         if let Some(limit) = config.max_tokens {
-            trim_chunks_to_rag_budget(&mut chunks, limit);
+            if let Some(plan) = retrieval_plan.as_ref() {
+                trim_chunks_to_rag_budget_for_task(&mut chunks, limit, plan);
+            } else {
+                trim_chunks_to_rag_budget(&mut chunks, limit);
+            }
         }
     }
     let accounting_stats = stats.clone();
@@ -179,6 +289,14 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
 
     let mut prompt_content = None;
     if matches!(config.mode, OutputMode::Prompt | OutputMode::Both) {
+        let mut task_header = task_options
+            .task
+            .as_deref()
+            .map(|task| task_header(task, retrieval_plan.as_ref(), redactor.as_ref()))
+            .unwrap_or_default();
+        if let Some(limit) = config.max_tokens {
+            task_header = cap_to_tokens(&task_header, limit);
+        }
         let mut compact = false;
         let full_dispositions =
             context_dispositions(&dispositions, &included_files, module_run.is_some());
@@ -200,7 +318,7 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
         );
 
         if let Some(limit) = config.max_tokens {
-            if estimate_tokens(&content) > limit {
+            if estimate_prefixed_tokens(&task_header, &content) > limit {
                 compact = true;
                 loop {
                     content = render_prompt(
@@ -219,10 +337,15 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
                         },
                         None,
                     );
-                    if estimate_tokens(&content) <= limit || chunks.is_empty() {
+                    if estimate_prefixed_tokens(&task_header, &content) <= limit
+                        || chunks.is_empty()
+                    {
                         break;
                     }
-                    let remove_at = lowest_value_chunk_index(&chunks);
+                    let remove_at = retrieval_plan
+                        .as_ref()
+                        .map(|plan| lowest_value_chunk_index_for_task(&chunks, plan))
+                        .unwrap_or_else(|| lowest_value_chunk_index(&chunks));
                     chunks.remove(remove_at);
                 }
 
@@ -255,13 +378,24 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
                     },
                     None,
                 );
-                if estimate_tokens(&content) > limit {
+                if estimate_prefixed_tokens(&task_header, &content) > limit {
                     content.clear();
                 }
             }
         }
-        stats.total_tokens_estimated_prompt = estimate_tokens(&content);
-        prompt_content = Some(content);
+        stats.total_tokens_estimated_prompt = estimate_prefixed_tokens(&task_header, &content);
+        prompt_content = Some(format!("{task_header}{content}"));
+    }
+    if let Some(plan) = retrieval_plan.as_ref() {
+        if matches!(config.mode, OutputMode::Rag | OutputMode::Both) {
+            stats.total_tokens_estimated_rag =
+                estimate_tokens(&render_jsonl_with_evidence(&chunks, Some(plan)));
+        }
+    }
+    if let Some(plan) = retrieval_plan.as_mut() {
+        plan.selected_chunks = chunks.len();
+        plan.selected_files =
+            chunks.iter().map(|chunk| chunk.path.as_str()).collect::<HashSet<_>>().len();
     }
 
     let repo_name = repo_name_for_output(&root_path, config.repo_url.as_deref());
@@ -290,13 +424,13 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
             fs::write(&context_path, prompt_content.as_deref().unwrap_or_default())?;
         }
         OutputMode::Rag => {
-            let jsonl = render_jsonl(&chunks);
+            let jsonl = render_jsonl_with_evidence(&chunks, retrieval_plan.as_ref());
             fs::write(&jsonl_path, jsonl)?;
         }
         OutputMode::Both => {
             fs::write(&context_path, prompt_content.as_deref().unwrap_or_default())?;
 
-            let jsonl = render_jsonl(&chunks);
+            let jsonl = render_jsonl_with_evidence(&chunks, retrieval_plan.as_ref());
             fs::write(&jsonl_path, jsonl)?;
         }
     }
@@ -352,7 +486,7 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
         })
     });
 
-    write_report(
+    write_report_with_retrieval(
         &report_path,
         &stats,
         &included_files,
@@ -365,6 +499,7 @@ pub fn execute(mut config: Config, options: ExportExecutionOptions) -> Result<Ex
             focus: focus_json.as_ref(),
             godot: godot_summary.as_ref(),
         },
+        retrieval_plan.as_ref(),
     )?;
     Ok(ExportOutcome { root_path, stats, output_files })
 }
@@ -723,17 +858,44 @@ fn apply_chunk_token_budget(
     max_tokens: Option<usize>,
     stats: &mut ScanStats,
 ) -> Vec<Chunk> {
+    let len = apply_chunk_token_budget_inner(&mut chunks, max_tokens, stats, None);
+    chunks.truncate(len);
+    chunks
+}
+
+fn apply_chunk_token_budget_for_task(
+    mut chunks: Vec<Chunk>,
+    max_tokens: Option<usize>,
+    stats: &mut ScanStats,
+    plan: &RetrievalPlan,
+) -> Vec<Chunk> {
+    let len = apply_chunk_token_budget_inner(&mut chunks, max_tokens, stats, Some(plan));
+    chunks.truncate(len);
+    chunks
+}
+
+fn apply_chunk_token_budget_inner(
+    chunks: &mut [Chunk],
+    max_tokens: Option<usize>,
+    stats: &mut ScanStats,
+    retrieval: Option<&RetrievalPlan>,
+) -> usize {
     chunks.sort_by(|a, b| {
-        b.priority
-            .partial_cmp(&a.priority)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let score_order = if let Some(plan) = retrieval {
+            let left = plan.score_for(a).unwrap_or(-1.0);
+            let right = plan.score_for(b).unwrap_or(-1.0);
+            right.partial_cmp(&left).unwrap_or(std::cmp::Ordering::Equal)
+        } else {
+            b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal)
+        };
+        score_order
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.start_line.cmp(&b.start_line))
             .then_with(|| a.id.cmp(&b.id))
     });
 
     let Some(limit) = max_tokens else {
-        return chunks;
+        return chunks.len();
     };
 
     let source_limit = limit.saturating_mul(40) / 100;
@@ -798,7 +960,23 @@ fn apply_chunk_token_budget(
         ]));
     }
 
-    kept
+    let kept_len = kept.len();
+    chunks[..kept_len].clone_from_slice(&kept);
+    kept_len
+}
+
+fn reorder_chunks_for_task(chunks: &mut [Chunk], plan: &RetrievalPlan) {
+    let rank: HashMap<&str, usize> =
+        plan.ordered_chunk_ids.iter().enumerate().map(|(index, id)| (id.as_str(), index)).collect();
+    chunks.sort_by(|left, right| {
+        rank.get(left.id.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+            .cmp(&rank.get(right.id.as_str()).copied().unwrap_or(usize::MAX))
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.start_line.cmp(&right.start_line))
+            .then_with(|| left.id.cmp(&right.id))
+    });
 }
 
 fn trim_chunks_to_rag_budget(chunks: &mut Vec<Chunk>, limit: usize) {
@@ -810,6 +988,72 @@ fn trim_chunks_to_rag_budget(chunks: &mut Vec<Chunk>, limit: usize) {
             .saturating_sub(render_jsonl(std::slice::from_ref(&chunks[remove_at])).len());
         chunks.remove(remove_at);
     }
+}
+
+fn trim_chunks_to_rag_budget_for_task(chunks: &mut Vec<Chunk>, limit: usize, plan: &RetrievalPlan) {
+    let mut rendered_bytes: usize = chunks
+        .iter()
+        .map(|chunk| render_jsonl_with_evidence(std::slice::from_ref(chunk), Some(plan)).len())
+        .sum();
+    while rendered_bytes / 4 > limit && !chunks.is_empty() {
+        let remove_at = chunks
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                plan.score_for(left)
+                    .unwrap_or(-1.0)
+                    .partial_cmp(&plan.score_for(right).unwrap_or(-1.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        left.priority
+                            .partial_cmp(&right.priority)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| right.path.cmp(&left.path))
+                    .then_with(|| right.id.cmp(&left.id))
+            })
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        rendered_bytes = rendered_bytes.saturating_sub(
+            render_jsonl_with_evidence(std::slice::from_ref(&chunks[remove_at]), Some(plan)).len(),
+        );
+        chunks.remove(remove_at);
+    }
+}
+
+fn redact_task_for_markdown(task: &str, redactor: Option<&Redactor>) -> String {
+    redactor
+        .map(|redactor| redactor.redact_with_language_report(task, "", "", "", "").content)
+        .unwrap_or_else(|| task.to_string())
+}
+
+fn task_header(
+    task: &str,
+    retrieval: Option<&RetrievalPlan>,
+    redactor: Option<&Redactor>,
+) -> String {
+    let task = redact_task_for_markdown(task, redactor);
+    let retrieval_note = retrieval
+        .map(|plan| {
+            format!(
+                "> Retrieval: {} seed chunks, {} candidate files, {} candidate chunks\n\n",
+                plan.seed_chunks, plan.candidate_files, plan.candidate_chunks
+            )
+        })
+        .unwrap_or_default();
+    format!("> Task: `{}`\n{}", task.replace('`', "'").replace(['\r', '\n'], " "), retrieval_note)
+}
+
+fn estimate_prefixed_tokens(prefix: &str, content: &str) -> usize {
+    estimate_tokens(&format!("{prefix}{content}"))
+}
+
+fn cap_to_tokens(text: &str, limit: usize) -> String {
+    let max_bytes = limit.saturating_mul(4);
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    text.char_indices().take_while(|(index, _)| *index < max_bytes).map(|(_, ch)| ch).collect()
 }
 
 fn select_pool_chunks<'a>(
@@ -857,6 +1101,38 @@ fn lowest_value_chunk_index(chunks: &[Chunk]) -> usize {
             let right_duplicate = path_counts.get(right.path.as_str()).copied().unwrap_or(0) > 1;
             right_duplicate
                 .cmp(&left_duplicate)
+                .then_with(|| {
+                    left.priority.partial_cmp(&right.priority).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| right.start_line.cmp(&left.start_line))
+                .then_with(|| right.id.cmp(&left.id))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn lowest_value_chunk_index_for_task(chunks: &[Chunk], plan: &RetrievalPlan) -> usize {
+    let mut path_counts: HashMap<&str, usize> = HashMap::new();
+    for chunk in chunks {
+        *path_counts.entry(chunk.path.as_str()).or_insert(0) += 1;
+    }
+    let source_count = chunks.iter().filter(|chunk| is_source_chunk(chunk)).count();
+    let has_context = chunks.iter().any(|chunk| !is_source_chunk(chunk));
+    chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, chunk)| !(has_context && source_count == 1 && is_source_chunk(chunk)))
+        .min_by(|(_, left), (_, right)| {
+            let left_duplicate = path_counts.get(left.path.as_str()).copied().unwrap_or(0) > 1;
+            let right_duplicate = path_counts.get(right.path.as_str()).copied().unwrap_or(0) > 1;
+            right_duplicate
+                .cmp(&left_duplicate)
+                .then_with(|| {
+                    plan.score_for(left)
+                        .unwrap_or(-1.0)
+                        .partial_cmp(&plan.score_for(right).unwrap_or(-1.0))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .then_with(|| {
                     left.priority.partial_cmp(&right.priority).unwrap_or(std::cmp::Ordering::Equal)
                 })

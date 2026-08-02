@@ -13,6 +13,7 @@ fn test_cli_help_lists_stable_commands() {
         .success()
         .stdout(predicate::str::contains("export"))
         .stdout(predicate::str::contains("info"))
+        .stdout(predicate::str::contains("index"))
         .stdout(predicate::str::contains("Convert repositories"));
 }
 

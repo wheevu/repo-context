@@ -20,7 +20,10 @@ TARGET_ABS="$(cd "$TARGET_REPO" && pwd)"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="$RESULTS_DIR/$TARGET_NAME/$RUN_ID"
 HYPERFINE_JSON="$RUN_DIR/hyperfine.json"
+TASK_HYPERFINE_JSON="$RUN_DIR/task-warm.json"
+NO_INDEX_HYPERFINE_JSON="$RUN_DIR/task-no-index.json"
 METADATA_JSON="$RUN_DIR/metadata.json"
+TASK_DB="$RUN_DIR/task-index.sqlite"
 
 COMMAND_ARGS=(export --path "$TARGET_ABS" --no-timestamp --mode rag --output-dir "$RUN_DIR/export")
 
@@ -32,15 +35,15 @@ echo "  Run: $RUN_ID"
 echo
 
 # Build release binary
-echo "[1/3] Building release binary..."
+echo "[1/5] Building release binary..."
 cargo build --release --locked --manifest-path "$REPO_ROOT/Cargo.toml" 2>&1 | tail -1
 BIN="$REPO_ROOT/target/release/repo-context"
 COMMAND_DISPLAY="$BIN export --path \"$TARGET_ABS\" --no-timestamp --mode rag --output-dir \"$RUN_DIR/export\""
 
-echo "[2/3] Warming up (single run)..."
+echo "[2/5] Warming up baseline (single run)..."
 "$BIN" "${COMMAND_ARGS[@]}" 2>/dev/null
 
-echo "[3/3] Running hyperfine (5 warmup, 10 timed runs)..."
+echo "[3/5] Running baseline hyperfine (5 warmup, 10 timed runs)..."
 hyperfine \
   --warmup 5 \
   --runs 10 \
@@ -48,6 +51,25 @@ hyperfine \
   --show-output \
   --command-name "repo-context export" \
   "$BIN export --path \"$TARGET_ABS\" --no-timestamp --mode rag --output-dir \"$RUN_DIR/export\""
+
+echo "[4/5] Building cold task index and timing warm task retrieval..."
+"$BIN" index --path "$TARGET_ABS" --db "$TASK_DB" 2>/dev/null
+hyperfine \
+  --warmup 2 \
+  --runs 5 \
+  --export-json "$TASK_HYPERFINE_JSON" \
+  --show-output \
+  --command-name "repo-context task export (warm index)" \
+  "$BIN export --path \"$TARGET_ABS\" --no-timestamp --mode rag --task \"trace authentication and token refresh\" --index-db \"$TASK_DB\" --output-dir \"$RUN_DIR/export-task\""
+
+echo "[5/5] Timing task export without persistence..."
+hyperfine \
+  --warmup 2 \
+  --runs 5 \
+  --export-json "$NO_INDEX_HYPERFINE_JSON" \
+  --show-output \
+  --command-name "repo-context task export (no index)" \
+  "$BIN export --path \"$TARGET_ABS\" --no-timestamp --mode rag --task \"trace authentication and token refresh\" --no-index --output-dir \"$RUN_DIR/export-no-index\""
 
 echo "[metadata] Capturing run metadata..."
 REPO_REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
@@ -86,7 +108,7 @@ for current, dirs, files in os.walk(root):
 print(f'{hasher.hexdigest()} {file_count}')
 PY
 )"
-export REPO_ROOT TARGET_ABS TARGET_NAME RUN_ID RUN_DIR HYPERFINE_JSON COMMAND_DISPLAY
+export REPO_ROOT TARGET_ABS TARGET_NAME RUN_ID RUN_DIR HYPERFINE_JSON TASK_HYPERFINE_JSON NO_INDEX_HYPERFINE_JSON COMMAND_DISPLAY TASK_DB
 export REPO_REVISION REPO_DIRTY TARGET_REVISION TARGET_DIRTY FIXTURE_SHA256
 python3 - <<'PY' > "$METADATA_JSON"
 import json
@@ -109,6 +131,14 @@ metadata = {
     'methodology': 'Release binary built with cargo build --release --locked; hyperfine runs repo-context export with --no-timestamp --mode rag against a local fixture repository.',
     'command': os.environ['COMMAND_DISPLAY'],
     'hyperfine_raw_json': os.path.relpath(os.environ['HYPERFINE_JSON'], os.environ['RUN_DIR']),
+    'task_hyperfine_raw_json': os.path.relpath(os.environ['TASK_HYPERFINE_JSON'], os.environ['RUN_DIR']),
+    'no_index_hyperfine_raw_json': os.path.relpath(os.environ['NO_INDEX_HYPERFINE_JSON'], os.environ['RUN_DIR']),
+    'workflows': {
+        'baseline': 'export --mode rag',
+        'cold_index': 'index followed by task export',
+        'warm_task': 'export --task with --index-db',
+        'task_no_index': 'export --task with --no-index',
+    },
     'repo_context': {
         'root': os.environ['REPO_ROOT'],
         'revision': os.environ['REPO_REVISION'],

@@ -22,16 +22,20 @@ pub struct ImportGraph {
 /// Builds a static import graph over scanned files.
 #[must_use]
 pub fn build(files: &[FileInfo]) -> ImportGraph {
+    let mut ordered_files = files.to_vec();
+    ordered_files
+        .sort_by_cached_key(|file| (normalize_abs(&file.path), file.relative_path.clone()));
+
     let by_path: HashMap<PathBuf, FileInfo> =
-        files.iter().map(|f| (normalize_abs(&f.path), f.clone())).collect();
-    let rel_to_abs: HashMap<String, PathBuf> = files
+        ordered_files.iter().map(|f| (normalize_abs(&f.path), f.clone())).collect();
+    let rel_to_abs: HashMap<String, PathBuf> = ordered_files
         .iter()
         .map(|f| (f.relative_path.replace('\\', "/"), normalize_abs(&f.path)))
         .collect();
 
     let mut graph = ImportGraph { files: by_path.clone(), ..ImportGraph::default() };
 
-    for file in files {
+    for file in &ordered_files {
         let source = normalize_abs(&file.path);
         let Ok((content, _)) = read_file_safe(&file.path, None, None) else { continue };
         let deps = dedup(imports_for(file, &content, &by_path, &rel_to_abs));
@@ -87,6 +91,8 @@ pub fn reverse_reachable(graph: &ImportGraph, target: &Path) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut queue = VecDeque::new();
     if let Some(callers) = graph.reverse.get(&start) {
+        let mut callers = callers.clone();
+        callers.sort();
         for caller in callers {
             queue.push_back(caller.clone());
         }
@@ -98,9 +104,11 @@ pub fn reverse_reachable(graph: &ImportGraph, target: &Path) -> Vec<PathBuf> {
         }
         out.push(path.clone());
         if let Some(callers) = graph.reverse.get(&path) {
+            let mut callers = callers.clone();
+            callers.sort();
             for caller in callers {
-                if !seen.contains(caller) {
-                    queue.push_back(caller.clone());
+                if !seen.contains(&caller) {
+                    queue.push_back(caller);
                 }
             }
         }
@@ -112,7 +120,10 @@ pub fn reverse_reachable(graph: &ImportGraph, target: &Path) -> Vec<PathBuf> {
 #[must_use]
 pub fn direct_callers(graph: &ImportGraph, target: &Path) -> Vec<PathBuf> {
     let start = normalize_abs(target);
-    graph.reverse.get(&start).cloned().unwrap_or_default()
+    let mut callers = graph.reverse.get(&start).cloned().unwrap_or_default();
+    callers.sort();
+    callers.dedup();
+    callers
 }
 
 /// Detects Rust crate-root candidates from scanned files.
@@ -220,7 +231,7 @@ fn imports_for(
         ".svelte" | "svelte" => svelte_imports(&file.path, content, by_path),
         ".py" | "py" => python_imports(file, content, rel_to_abs),
         ".rs" | "rs" => rust_imports(&file.path, content, by_path),
-        ".go" | "go" => go_imports(content, rel_to_abs),
+        ".go" | "go" => go_imports(file, content, by_path),
         ".gd" | ".tscn" | ".tres" | ".godot" | ".gdshader" | ".gdshaderinc" => {
             godot_imports(content, rel_to_abs)
         }
@@ -241,15 +252,37 @@ fn godot_imports(content: &str, rel_to_abs: &HashMap<String, PathBuf>) -> Vec<Pa
 }
 
 fn js_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>) -> Vec<PathBuf> {
-    let re = Regex::new(r#"(?m)import\s+(?:[^'\"]+?\s+from\s+)?['\"]([^'\"]+)['\"]"#)
-        .expect("valid regex");
-    re.captures_iter(content)
-        .filter_map(|cap| cap.get(1).map(|m| m.as_str()))
-        .filter(|spec| spec.starts_with('.'))
-        .filter_map(|spec| {
-            resolve_relative(path, spec, &[".ts", ".tsx", ".js", ".jsx", ".svelte"], by_path)
-        })
-        .collect()
+    let static_import_re =
+        Regex::new(r#"(?m)\bimport\s+(?:[^'\"\n]+?\s+from\s+)?['\"]([^'\"]+)['\"]"#)
+            .expect("valid JavaScript static import regex");
+    let export_re =
+        Regex::new(r#"(?m)\bexport\s+(?:\*[^;\n]*?|\{[^}\n]*\})\s+from\s+['\"]([^'\"]+)['\"]"#)
+            .expect("valid JavaScript re-export regex");
+    let require_re = Regex::new(r#"(?m)\brequire\s*\(\s*['\"]([^'\"]+)['\"]\s*\)"#)
+        .expect("valid JavaScript require regex");
+    let dynamic_import_re = Regex::new(r#"(?m)\bimport\s*\(\s*['\"]([^'\"]+)['\"]\s*\)"#)
+        .expect("valid JavaScript dynamic import regex");
+
+    let mut out = Vec::new();
+    for re in [&static_import_re, &export_re, &require_re, &dynamic_import_re] {
+        for spec in re.captures_iter(content).filter_map(|cap| cap.get(1).map(|m| m.as_str())) {
+            if let Some(path) = spec
+                .starts_with('.')
+                .then(|| {
+                    resolve_relative(
+                        path,
+                        spec,
+                        &[".ts", ".tsx", ".js", ".jsx", ".svelte"],
+                        by_path,
+                    )
+                })
+                .flatten()
+            {
+                out.push(path);
+            }
+        }
+    }
+    dedup(out)
 }
 
 fn svelte_imports(
@@ -434,55 +467,154 @@ fn rust_imports(path: &Path, content: &str, by_path: &HashMap<PathBuf, FileInfo>
         }
     }
 
-    let use_re = Regex::new(r#"(?m)^\s*use\s+crate::([A-Za-z0-9_:]+)"#).expect("valid use regex");
-    if let Some(root) = rust_crate_module_dir(path, src_root, by_path) {
-        for cap in use_re.captures_iter(content) {
-            if let Some(spec) = cap.get(1) {
-                let parts: Vec<&str> = spec.as_str().split("::").collect();
-                for len in (1..=parts.len()).rev() {
-                    let prefix = parts[..len].join("/");
-                    for candidate in
-                        &[root.join(format!("{prefix}.rs")), root.join(&prefix).join("mod.rs")]
-                    {
-                        let candidate = normalize_abs(candidate);
-                        if by_path.contains_key(&candidate) {
-                            out.push(candidate);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Also resolve use self:: and use super::
-    let self_super_re = Regex::new(r#"(?m)^\s*use\s+(self|super)::([A-Za-z0-9_:]+)"#)
-        .expect("valid self super regex");
+    // Resolve crate, self, and super imports, including grouped forms such as
+    // `use crate::{a, b::Thing};` and `pub use self::{a, b};`.
+    let use_re = Regex::new(
+        r#"(?m)^[ \t]*(?:pub(?:[ \t]*\([^)]*\))?[ \t]+)?use[ \t]+(crate|self|super)::([^;]*);"#,
+    )
+    .expect("valid Rust use regex");
     let module_dir = rust_child_module_dir(path, src_root);
-    for cap in self_super_re.captures_iter(content) {
-        if let Some(prefix_kind) = cap.get(1) {
-            if let Some(spec) = cap.get(2) {
-                let base = match prefix_kind.as_str() {
-                    "self" => module_dir.clone(),
-                    "super" => module_dir.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
-                    _ => continue,
-                };
-                let parts: Vec<&str> = spec.as_str().split("::").collect();
-                let module_name = parts[0];
-                for candidate in
-                    &[base.join(format!("{module_name}.rs")), base.join(module_name).join("mod.rs")]
-                {
-                    let candidate = normalize_abs(candidate);
-                    if by_path.contains_key(&candidate) {
-                        out.push(candidate);
-                        break;
-                    }
-                }
-            }
+    for cap in use_re.captures_iter(content) {
+        let Some(prefix_kind) = cap.get(1).map(|value| value.as_str()) else { continue };
+        let Some(body) = cap.get(2).map(|value| value.as_str()) else { continue };
+        let mut base = match prefix_kind {
+            "crate" => match rust_crate_module_dir(path, src_root, by_path) {
+                Some(root) => root,
+                None => continue,
+            },
+            "self" => module_dir.clone(),
+            "super" => module_dir.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+            _ => continue,
+        };
+        let mut spec = body.trim();
+        while let Some(rest) = spec.strip_prefix("super::") {
+            base = base.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+            spec = rest;
+        }
+        for parts in expand_rust_use_paths(&[], spec) {
+            out.extend(resolve_rust_use_path(&base, &parts, by_path));
         }
     }
 
     dedup(out)
+}
+
+fn expand_rust_use_paths(prefix: &[String], spec: &str) -> Vec<Vec<String>> {
+    let spec = strip_rust_use_alias(spec.trim());
+    if spec.is_empty() || spec == "self" {
+        return vec![prefix.to_vec()];
+    }
+
+    if spec.starts_with('{') {
+        let Some(close) = matching_brace(spec, 0) else { return Vec::new() };
+        if !spec[close + 1..].trim().is_empty() {
+            return Vec::new();
+        }
+        return split_top_level(&spec[1..close])
+            .into_iter()
+            .flat_map(|part| expand_rust_use_paths(prefix, part))
+            .collect();
+    }
+
+    if let Some(open) = find_top_level_open_brace(spec) {
+        let Some(close) = matching_brace(spec, open) else { return Vec::new() };
+        if !spec[close + 1..].trim().is_empty() {
+            return Vec::new();
+        }
+        let mut next = prefix.to_vec();
+        next.extend(rust_use_components(spec[..open].trim_end_matches(':')));
+        return split_top_level(&spec[open + 1..close])
+            .into_iter()
+            .flat_map(|part| expand_rust_use_paths(&next, part))
+            .collect();
+    }
+
+    let mut path = prefix.to_vec();
+    path.extend(rust_use_components(spec));
+    vec![path]
+}
+
+fn resolve_rust_use_path(
+    base: &Path,
+    parts: &[String],
+    by_path: &HashMap<PathBuf, FileInfo>,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for len in (1..=parts.len()).rev() {
+        let prefix = parts[..len].join("/");
+        for candidate in &[base.join(format!("{prefix}.rs")), base.join(&prefix).join("mod.rs")] {
+            let candidate = normalize_abs(candidate);
+            if by_path.contains_key(&candidate) {
+                out.push(candidate);
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn rust_use_components(value: &str) -> Vec<String> {
+    value
+        .split("::")
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && *part != "self" && *part != "*")
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn strip_rust_use_alias(value: &str) -> &str {
+    let mut brace_depth = 0usize;
+    for (index, character) in value.char_indices() {
+        match character {
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            _ if brace_depth == 0 && value[index..].starts_with(" as ") => {
+                return value[..index].trim_end()
+            }
+            _ => {}
+        }
+    }
+    value
+}
+
+fn split_top_level(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut brace_depth = 0usize;
+    for (index, character) in value.char_indices() {
+        match character {
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ',' if brace_depth == 0 => {
+                parts.push(value[start..index].trim());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(value[start..].trim());
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
+}
+
+fn find_top_level_open_brace(value: &str) -> Option<usize> {
+    value.char_indices().find_map(|(index, character)| (character == '{').then_some(index))
+}
+
+fn matching_brace(value: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, character) in value.char_indices().skip_while(|(index, _)| *index < open) {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn rust_child_module_dir(path: &Path, src_root: Option<&Path>) -> PathBuf {
@@ -582,21 +714,69 @@ fn collect_nested_children(
     }
 }
 
-fn go_imports(content: &str, rel_to_abs: &HashMap<String, PathBuf>) -> Vec<PathBuf> {
+fn go_imports(
+    file: &FileInfo,
+    content: &str,
+    by_path: &HashMap<PathBuf, FileInfo>,
+) -> Vec<PathBuf> {
     let re = Regex::new(r#"(?m)^\s*(?:import\s+)?(?:[._A-Za-z0-9-]+\s+)?\"([^\"]+)\""#)
-        .expect("valid regex");
+        .expect("valid Go import regex");
+    let Some((module_root, module_path)) = go_module(file.path.as_path()) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for spec in re.captures_iter(content).filter_map(|c| c.get(1).map(|m| m.as_str())) {
-        // Match by directory-prefix: a Go file belongs to the package if its
-        // relative path starts with the import path converted to '/' form.
-        let spec_path = spec.replace('-', "/");
-        for (rel, abs) in rel_to_abs {
-            if rel.ends_with(".go") && rel.starts_with(&spec_path) {
-                out.push(abs.clone());
+        let Some(package_path) = go_local_package_path(spec, &module_path) else { continue };
+        for candidate in by_path.values().filter(|candidate| is_go_file(candidate)) {
+            let abs = normalize_abs(&candidate.path);
+            let Ok(relative) = abs.strip_prefix(&module_root) else { continue };
+            let relative_package = relative
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_string_lossy()
+                .replace('\\', "/");
+            if relative_package == package_path {
+                out.push(abs);
             }
         }
     }
     dedup(out)
+}
+
+fn go_module(importer: &Path) -> Option<(PathBuf, String)> {
+    let mut directory = importer.parent()?;
+    loop {
+        let manifest = directory.join("go.mod");
+        if let Ok((content, _)) = read_file_safe(&manifest, None, None) {
+            let module = content.lines().find_map(|line| {
+                let line = line.trim_start();
+                let rest = line.strip_prefix("module")?;
+                if !rest.chars().next().is_some_and(char::is_whitespace) {
+                    return None;
+                }
+                rest.split_whitespace().next().map(str::to_owned)
+            });
+            if let Some(module) = module {
+                return Some((normalize_abs(directory), module));
+            }
+        }
+        let parent = directory.parent()?;
+        if parent == directory {
+            return None;
+        }
+        directory = parent;
+    }
+}
+
+fn go_local_package_path(spec: &str, module: &str) -> Option<String> {
+    if spec == module {
+        return Some(String::new());
+    }
+    spec.strip_prefix(module)?.strip_prefix('/').map(str::to_owned)
+}
+
+fn is_go_file(file: &FileInfo) -> bool {
+    matches!(file.extension.to_ascii_lowercase().as_str(), ".go" | "go")
 }
 
 fn resolve_relative(
@@ -632,7 +812,9 @@ fn resolve_relative(
 
 fn dedup(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
-    paths.into_iter().filter(|p| seen.insert(p.clone())).collect()
+    let mut paths: Vec<PathBuf> = paths.into_iter().filter(|p| seen.insert(p.clone())).collect();
+    paths.sort();
+    paths
 }
 
 fn normalize_abs(path: &Path) -> PathBuf {
@@ -899,26 +1081,34 @@ mod tests {
         let card = root.join("src/lib/Card.svelte");
         let format = root.join("src/lib/format.ts");
         let fake = root.join("src/lib/fake.ts");
+        let required = root.join("src/lib/required.ts");
+        let lazy = root.join("src/lib/lazy.ts");
         fs::write(
             &page,
-            "<script lang=\"ts\">\nimport Card from './lib/Card.svelte';\nimport { format } from './lib/format';\n</script>\n<p>import fake from './lib/fake'</p>\n",
+            "<script lang=\"ts\">\nimport Card from './lib/Card.svelte';\nimport { format } from './lib/format';\nexport { required } from './lib/required';\nconst loaded = require('./lib/required');\nconst lazy = import('./lib/lazy');\n</script>\n<p>import fake from './lib/fake'</p>\n",
         )
         .expect("write page");
         fs::write(&card, "<div>card</div>\n").expect("write card");
         fs::write(&format, "export const format = String;\n").expect("write format");
         fs::write(&fake, "export default false;\n").expect("write fake");
+        fs::write(&required, "export const required = true;\n").expect("write required");
+        fs::write(&lazy, "export const lazy = true;\n").expect("write lazy");
 
         let files = vec![
             test_file_abs(&page),
             test_file_abs(&card),
             test_file_abs(&format),
             test_file_abs(&fake),
+            test_file_abs(&required),
+            test_file_abs(&lazy),
         ];
         let graph = build(&files);
         let dependencies = graph.edges.get(&normalize_abs(&page)).expect("page dependencies");
 
         assert!(dependencies.contains(&normalize_abs(&card)));
         assert!(dependencies.contains(&normalize_abs(&format)));
+        assert!(dependencies.contains(&normalize_abs(&required)));
+        assert!(dependencies.contains(&normalize_abs(&lazy)));
         assert!(!dependencies.contains(&normalize_abs(&fake)));
     }
 
@@ -999,6 +1189,118 @@ mod tests {
         assert!(reachable.contains(&normalize_abs(&legacy_rs)));
         assert!(reachable.contains(&normalize_abs(&nested_rs)));
         assert!(reachable.contains(&normalize_abs(&custom_rs)));
+    }
+
+    #[test]
+    fn javascript_literal_import_forms_are_sorted_and_resolved() {
+        use std::fs;
+        use tempfile::TempDir;
+        let tmp = TempDir::new().expect("tmp");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+
+        let entry = root.join("src/main.ts");
+        let exported = root.join("src/exported.ts");
+        let required = root.join("src/required.ts");
+        let dynamic = root.join("src/dynamic.ts");
+        fs::write(
+            &entry,
+            "export { value } from './exported';\nconst required = require('./required');\nconst lazy = import('./dynamic');\n",
+        )
+        .expect("write entry");
+        fs::write(&exported, "export const value = 1;\n").expect("write exported");
+        fs::write(&required, "export const value = 2;\n").expect("write required");
+        fs::write(&dynamic, "export const value = 3;\n").expect("write dynamic");
+
+        // Deliberately pass files in reverse order; build order must not depend
+        // on scanner or caller iteration order.
+        let files = vec![
+            test_file_abs(&required),
+            test_file_abs(&entry),
+            test_file_abs(&dynamic),
+            test_file_abs(&exported),
+        ];
+        let graph = build(&files);
+        let dependencies = graph.edges.get(&normalize_abs(&entry)).expect("entry dependencies");
+
+        assert_eq!(
+            dependencies,
+            &vec![normalize_abs(&dynamic), normalize_abs(&exported), normalize_abs(&required)]
+        );
+    }
+
+    #[test]
+    fn rust_grouped_use_paths_resolve_nested_modules() {
+        use std::fs;
+        use tempfile::TempDir;
+        let tmp = TempDir::new().expect("tmp");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("src/baz")).expect("mkdir baz");
+
+        let lib_rs = root.join("src/lib.rs");
+        let foo_rs = root.join("src/foo.rs");
+        let bar_rs = root.join("src/bar.rs");
+        let baz_mod_rs = root.join("src/baz/mod.rs");
+        let deep_rs = root.join("src/baz/deep.rs");
+        let nested_rs = root.join("src/baz/nested.rs");
+        fs::write(&lib_rs, "mod foo;\npub use crate::{bar::Thing, foo, baz::{deep, nested}};\n")
+            .expect("write lib");
+        fs::write(&foo_rs, "pub fn foo() {}\n").expect("write foo");
+        fs::write(&bar_rs, "pub struct Thing;\n").expect("write bar");
+        fs::write(&baz_mod_rs, "pub fn root() {}\n").expect("write baz");
+        fs::write(&deep_rs, "pub fn deep() {}\n").expect("write deep");
+        fs::write(&nested_rs, "pub fn nested() {}\n").expect("write nested");
+
+        let files = vec![
+            test_file_abs(&nested_rs),
+            test_file_abs(&lib_rs),
+            test_file_abs(&deep_rs),
+            test_file_abs(&bar_rs),
+            test_file_abs(&baz_mod_rs),
+            test_file_abs(&foo_rs),
+        ];
+        let graph = build(&files);
+        let dependencies = graph.edges.get(&normalize_abs(&lib_rs)).expect("lib dependencies");
+
+        for expected in [&foo_rs, &bar_rs, &baz_mod_rs, &deep_rs, &nested_rs] {
+            assert!(dependencies.contains(&normalize_abs(expected)), "missing {expected:?}");
+        }
+    }
+
+    #[test]
+    fn go_mod_imports_resolve_only_local_package_files() {
+        use std::fs;
+        use tempfile::TempDir;
+        let tmp = TempDir::new().expect("tmp");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("cmd/app")).expect("mkdir app");
+        fs::create_dir_all(root.join("internal/auth/nested")).expect("mkdir auth");
+        fs::write(root.join("go.mod"), "module example.com/acme\n").expect("write go.mod");
+
+        let main_go = root.join("cmd/app/main.go");
+        let auth_go = root.join("internal/auth/auth.go");
+        let nested_go = root.join("internal/auth/nested/extra.go");
+        let other_go = root.join("internal/other/other.go");
+        fs::write(
+            &main_go,
+            "package main\nimport (\n\t\"example.com/acme/internal/auth\"\n\t\"fmt\"\n)\n",
+        )
+        .expect("write main");
+        fs::write(&auth_go, "package auth\n").expect("write auth");
+        fs::write(&nested_go, "package nested\n").expect("write nested");
+        fs::create_dir_all(root.join("internal/other")).expect("mkdir other");
+        fs::write(&other_go, "package other\n").expect("write other");
+
+        let files = vec![
+            test_file_rel(&nested_go, "internal/auth/nested/extra.go"),
+            test_file_rel(&main_go, "cmd/app/main.go"),
+            test_file_rel(&other_go, "internal/other/other.go"),
+            test_file_rel(&auth_go, "internal/auth/auth.go"),
+        ];
+        let graph = build(&files);
+        let dependencies = graph.edges.get(&normalize_abs(&main_go)).expect("main dependencies");
+
+        assert_eq!(dependencies, &vec![normalize_abs(&auth_go)]);
     }
 
     fn test_file(path: &Path) -> FileInfo {

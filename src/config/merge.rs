@@ -131,28 +131,32 @@ pub fn merge_repo_config(
         config.exclude_globs = repo_config.exclude_globs;
     }
     if config.max_file_bytes == defaults.max_file_bytes {
-        config.max_file_bytes = repo_config.max_file_bytes;
+        config.max_file_bytes = repo_config.max_file_bytes.min(defaults.max_file_bytes);
     }
     if config.max_total_bytes == defaults.max_total_bytes {
-        config.max_total_bytes = repo_config.max_total_bytes;
+        config.max_total_bytes = repo_config.max_total_bytes.min(defaults.max_total_bytes);
     }
     if config.max_tokens.is_none() && repo_config.max_tokens.is_some() {
         config.max_tokens = repo_config.max_tokens;
     }
     if config.chunk_tokens == defaults.chunk_tokens {
-        config.chunk_tokens = repo_config.chunk_tokens;
+        config.chunk_tokens = repo_config.chunk_tokens.min(defaults.chunk_tokens);
     }
     if config.chunk_overlap == defaults.chunk_overlap {
-        config.chunk_overlap = repo_config.chunk_overlap;
+        config.chunk_overlap = repo_config
+            .chunk_overlap
+            .min(defaults.chunk_overlap)
+            .min(config.chunk_tokens.saturating_sub(1));
     }
     if config.min_chunk_tokens == defaults.min_chunk_tokens {
-        config.min_chunk_tokens = repo_config.min_chunk_tokens;
+        config.min_chunk_tokens =
+            repo_config.min_chunk_tokens.min(defaults.min_chunk_tokens).min(config.chunk_tokens);
     }
     if config.mode == defaults.mode {
         config.mode = repo_config.mode;
     }
     if config.tree_depth == defaults.tree_depth {
-        config.tree_depth = repo_config.tree_depth;
+        config.tree_depth = repo_config.tree_depth.min(defaults.tree_depth);
     }
     if config.ranking_weights.readme == defaults.ranking_weights.readme {
         config.ranking_weights = repo_config.ranking_weights;
@@ -163,9 +167,7 @@ pub fn merge_repo_config(
     if config.module.css_files.is_empty() {
         config.module.css_files = repo_config.module.css_files;
     }
-    if config.full_inventory == defaults.full_inventory {
-        config.full_inventory = repo_config.full_inventory;
-    }
+    // A remote config cannot opt a caller into a full-inventory scan.
     if config.profile == defaults.profile {
         config.profile = repo_config.profile;
     }
@@ -185,6 +187,7 @@ mod tests {
     use crate::domain::{Config, OutputMode, RedactionMode};
     use std::collections::HashSet;
     use std::path::PathBuf;
+    use tempfile::TempDir;
 
     #[test]
     fn cli_overrides_replace_base_values() {
@@ -211,5 +214,24 @@ mod tests {
         assert_eq!(merged.redaction_mode, RedactionMode::Paranoid);
         assert_eq!(merged.max_file_bytes, 2048);
         assert!(merged.include_extensions.contains(".rs"));
+    }
+
+    #[test]
+    fn remote_config_cannot_expand_default_resource_limits() {
+        let repo = TempDir::new().expect("temporary repository");
+        std::fs::write(
+            repo.path().join("repo-context.toml"),
+            "max_file_bytes = 999999999\nmax_total_bytes = 999999999\nchunk_tokens = 5000\ntree_depth = 99\nfull_inventory = true\n",
+        )
+        .expect("write config");
+
+        let defaults = Config::default();
+        let mut config = defaults.clone();
+        super::merge_repo_config(&mut config, repo.path(), None);
+        assert_eq!(config.max_file_bytes, defaults.max_file_bytes);
+        assert_eq!(config.max_total_bytes, defaults.max_total_bytes);
+        assert_eq!(config.chunk_tokens, defaults.chunk_tokens);
+        assert_eq!(config.tree_depth, defaults.tree_depth);
+        assert!(!config.full_inventory);
     }
 }

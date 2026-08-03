@@ -69,6 +69,20 @@ pub fn load_config(repo_root: &Path, config_path: Option<&Path>) -> Result<Confi
         }
     };
 
+    if let Err(error) = parsed.validate() {
+        if config_path_provided {
+            return Err(
+                error.context(format!("Invalid config semantics: {}", config_file.display()))
+            );
+        }
+        tracing::warn!(
+            "Ignoring invalid auto-discovered config {}: {}",
+            config_file.display(),
+            error
+        );
+        return Ok(Config::default());
+    }
+
     Ok(parsed)
 }
 
@@ -218,6 +232,24 @@ mod tests {
         assert!(exts.contains(".py"), "should contain .py");
         assert!(exts.contains(".js"), "should contain .js");
         assert!(exts.contains(".ts"), "should contain .ts");
+    }
+
+    #[test]
+    fn explicit_semantically_invalid_config_returns_err() {
+        let tmp = TempDir::new().expect("tmp");
+        let path = tmp.path().join("bad.toml");
+        fs::write(&path, "chunk_tokens = 100\nchunk_overlap = 100\nmin_chunk_tokens = 50\n")
+            .expect("write");
+        let error = load_config(tmp.path(), Some(&path)).expect_err("invalid semantics");
+        assert!(format!("{error:#}").contains("chunk_overlap"));
+    }
+
+    #[test]
+    fn auto_discovered_semantically_invalid_config_falls_back_to_defaults() {
+        let tmp = TempDir::new().expect("tmp");
+        fs::write(tmp.path().join("repo-context.toml"), "max_file_bytes = 0\n").expect("write");
+        let config = load_config(tmp.path(), None).expect("soft fallback");
+        assert_eq!(config.max_file_bytes, Config::default().max_file_bytes);
     }
 
     // --- Test 7: List normalization: array with/without dots and whitespace ---

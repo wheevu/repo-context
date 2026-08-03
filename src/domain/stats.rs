@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 /// Current report schema version.
-pub const REPORT_SCHEMA_VERSION: &str = "1.4.0";
+pub const REPORT_SCHEMA_VERSION: &str = "1.5.0";
 
 /// Statistics from scanning and processing.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -26,7 +26,17 @@ pub struct ScanStats {
     #[serde(default)]
     pub files_skipped_minified: usize,
     #[serde(default)]
+    pub files_skipped_symlink: usize,
+    #[serde(default)]
     pub files_inventory_only: usize,
+    #[serde(default)]
+    pub unseen_files_examined: usize,
+    #[serde(default)]
+    pub unseen_files_reconciled: usize,
+    #[serde(default)]
+    pub unseen_inventory_truncated: bool,
+    #[serde(default)]
+    pub unseen_inventory_errors: usize,
     #[serde(default)]
     pub files_skipped: usize,
     pub files_dropped_budget: usize,
@@ -91,8 +101,16 @@ impl ScanStats {
                 "gitignore": self.files_skipped_gitignore,
                 "glob": self.files_skipped_glob,
                 "minified": self.files_skipped_minified,
+                "symlink": self.files_skipped_symlink,
                 "inventory_only": self.files_inventory_only,
                 "size": self.files_skipped_size,
+            },
+            "unseen_inventory": {
+                "files_examined": self.unseen_files_examined,
+                "files_reconciled": self.unseen_files_reconciled,
+                "truncated": self.unseen_inventory_truncated,
+                "errors": self.unseen_inventory_errors,
+                "complete": !self.unseen_inventory_truncated && self.unseen_inventory_errors == 0,
             },
             "files_dropped_budget": self.files_dropped_budget,
             "total_bytes_scanned": self.total_bytes_scanned,

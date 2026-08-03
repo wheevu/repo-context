@@ -78,7 +78,7 @@ fn task_export_is_explainable_and_persists_only_redacted_chunks() {
 
     run_export(&fixture, &output, &db, &[]);
     let (report, jsonl) = report_and_jsonl(&fixture, &output);
-    assert_eq!(report["schema_version"], "1.4.0");
+    assert_eq!(report["schema_version"], "1.5.0");
     assert_eq!(report["retrieval"]["strategy"], "bm25_static_import_graph");
     assert!(report["retrieval"]["seed_chunks"].as_u64().unwrap() > 0);
     assert!(report["retrieval"]["relation_counts"]["static_dependency"].as_u64().unwrap() > 0);
@@ -236,6 +236,64 @@ fn task_and_focus_intersect_without_leaking_unrelated_files() {
     .expect("focused jsonl");
     assert!(jsonl.contains("src/auth.rs"));
     assert!(!jsonl.contains("src/unrelated.rs"));
+}
+
+#[test]
+fn focused_task_export_does_not_prune_full_persistent_index() {
+    let fixture = Fixture::new();
+    let output = TempDir::new().expect("output");
+    let db = output.path().join("full.sqlite");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("repo-context"))
+        .args([
+            "index",
+            "--path",
+            fixture.root.to_str().expect("root"),
+            "--db",
+            db.to_str().expect("db"),
+        ])
+        .assert()
+        .success();
+
+    let connection = Connection::open(&db).expect("open index");
+    let before: usize = connection
+        .query_row("SELECT COUNT(*) FROM chunks WHERE file_path = 'src/unrelated.rs'", [], |row| {
+            row.get(0)
+        })
+        .expect("count before");
+    assert!(before > 0);
+    drop(connection);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("repo-context"))
+        .args([
+            "export",
+            "--path",
+            fixture.root.to_str().expect("root"),
+            "--mode",
+            "rag",
+            "--scan-mode",
+            "focused",
+            "--focus-file",
+            "src/auth.rs",
+            "--task",
+            "refresh token",
+            "--index-db",
+            db.to_str().expect("db"),
+            "--output-dir",
+            output.path().to_str().expect("output"),
+            "--no-timestamp",
+        ])
+        .env("HOME", output.path())
+        .assert()
+        .success();
+
+    let connection = Connection::open(&db).expect("reopen index");
+    let after: usize = connection
+        .query_row("SELECT COUNT(*) FROM chunks WHERE file_path = 'src/unrelated.rs'", [], |row| {
+            row.get(0)
+        })
+        .expect("count after");
+    assert_eq!(after, before);
 }
 
 #[test]

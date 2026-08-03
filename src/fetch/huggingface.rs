@@ -1,6 +1,6 @@
 //! HuggingFace repository cloning (Spaces, models, datasets)
 
-use crate::fetch::RepoContext;
+use crate::fetch::{classify_remote_url, https_host_and_path, RemoteKind, RepoContext};
 use anyhow::{Context, Result};
 use git2::{ObjectType, Repository};
 use std::env;
@@ -32,8 +32,7 @@ pub struct HfParsed {
 
 /// Returns `true` if `url` looks like a HuggingFace URL.
 pub fn is_huggingface_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    lower.contains("huggingface.co") || lower.contains("hf.co")
+    matches!(classify_remote_url(url), Ok(RemoteKind::HuggingFace))
 }
 
 /// Parse a HuggingFace URL into its components.
@@ -44,18 +43,11 @@ pub fn is_huggingface_url(url: &str) -> bool {
 /// - `https://huggingface.co/owner/repo[/tree/<ref>]`  (model)
 /// - `https://hf.co/…` (same rules)
 pub fn parse_huggingface_url(url: &str) -> Result<HfParsed> {
-    // Strip scheme / host to get path segments.
-    let path = if let Some(pos) = url.find("://") {
-        let after_scheme = &url[pos + 3..];
-        // skip the host component
-        if let Some(slash) = after_scheme.find('/') {
-            &after_scheme[slash..]
-        } else {
-            anyhow::bail!("Invalid HuggingFace URL (no path): {url}");
-        }
-    } else {
-        anyhow::bail!("Invalid HuggingFace URL (no scheme): {url}");
-    };
+    anyhow::ensure!(
+        classify_remote_url(url)? == RemoteKind::HuggingFace,
+        "unsupported HuggingFace URL"
+    );
+    let (_, path) = https_host_and_path(url)?;
 
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
@@ -84,11 +76,12 @@ pub fn parse_huggingface_url(url: &str) -> Result<HfParsed> {
         }
     };
 
-    // Look for `/tree/<ref>` after the owner/repo segments.
-    let ref_ = if parts.len() >= ref_offset + 2 && parts[ref_offset] == "tree" {
-        Some(parts[ref_offset + 1].to_string())
-    } else {
-        None
+    let ref_ = match parts.len() {
+        len if len == ref_offset => None,
+        len if len == ref_offset + 2 && parts[ref_offset] == "tree" => {
+            Some(parts[ref_offset + 1].to_string())
+        }
+        _ => anyhow::bail!("Invalid HuggingFace URL path; expected an optional /tree/<ref>"),
     };
 
     Ok(HfParsed { owner: owner.to_string(), repo_name: repo_name.to_string(), repo_type, ref_ })

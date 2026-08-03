@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 use crate::domain::{FileDisposition, FileInfo};
-use crate::utils::read_file_safe;
+use crate::utils::{normalize_path, read_file_safe};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,12 @@ pub struct GodotRelationship {
     pub source: String,
     pub kind: String,
     pub target: String,
+    #[serde(default = "default_relationship_resolved")]
+    pub resolved: bool,
+}
+
+fn default_relationship_resolved() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -349,6 +355,7 @@ pub fn analyze(
     let mut summary = GodotSummary { detected: true, signals, ..GodotSummary::default() };
     let mut relationships = BTreeSet::new();
     let mut named_inheritance = Vec::new();
+    let known_paths = known_godot_paths(files, dispositions);
     if let Ok((content, _)) = read_file_safe(&root.join("project.godot"), None, None) {
         summary.project = parse_project(&content);
     }
@@ -373,6 +380,7 @@ pub fn analyze(
                             relationships.insert(GodotRelationship {
                                 source: file.relative_path.clone(),
                                 kind: "script_extends_script".to_string(),
+                                resolved: is_known_godot_target(&parent, &known_paths),
                                 target: parent,
                             });
                         } else {
@@ -387,6 +395,7 @@ pub fn analyze(
                             } else {
                                 "script_loads".to_string()
                             },
+                            resolved: is_known_godot_target(&target, &known_paths),
                             target,
                         });
                     }
@@ -397,6 +406,7 @@ pub fn analyze(
                             relationships.insert(GodotRelationship {
                                 source: file.relative_path.clone(),
                                 kind: "script_uses_autoload".to_string(),
+                                resolved: is_known_godot_target(autoload, &known_paths),
                                 target: autoload.clone(),
                             });
                         }
@@ -416,6 +426,7 @@ pub fn analyze(
                             relationships.insert(GodotRelationship {
                                 source: file.relative_path.clone(),
                                 kind: "scene_attaches_script".to_string(),
+                                resolved: is_known_godot_target(&target, &known_paths),
                                 target,
                             });
                         }
@@ -423,6 +434,7 @@ pub fn analyze(
                             relationships.insert(GodotRelationship {
                                 source: file.relative_path.clone(),
                                 kind: "scene_instantiates_scene".to_string(),
+                                resolved: is_known_godot_target(&target, &known_paths),
                                 target,
                             });
                         }
@@ -431,6 +443,7 @@ pub fn analyze(
                         relationships.insert(GodotRelationship {
                             source: file.relative_path.clone(),
                             kind: "scene_references_resource".to_string(),
+                            resolved: is_known_godot_target(target, &known_paths),
                             target: target.clone(),
                         });
                     }
@@ -443,6 +456,7 @@ pub fn analyze(
                         relationships.insert(GodotRelationship {
                             source: file.relative_path.clone(),
                             kind: "shader_includes".to_string(),
+                            resolved: is_known_godot_target(&target, &known_paths),
                             target,
                         });
                     }
@@ -456,6 +470,7 @@ pub fn analyze(
         relationships.insert(GodotRelationship {
             source: "project.godot".to_string(),
             kind: "project_main_scene".to_string(),
+            resolved: is_known_godot_target(main_scene, &known_paths),
             target: main_scene.clone(),
         });
     }
@@ -464,6 +479,7 @@ pub fn analyze(
             relationships.insert(GodotRelationship {
                 source,
                 kind: "script_extends_script".to_string(),
+                resolved: is_known_godot_target(target, &known_paths),
                 target: target.clone(),
             });
         }
@@ -472,6 +488,7 @@ pub fn analyze(
         relationships.insert(GodotRelationship {
             source: "project.godot".to_string(),
             kind: format!("project_autoload:{name}"),
+            resolved: is_known_godot_target(target, &known_paths),
             target: target.clone(),
         });
     }
@@ -493,6 +510,32 @@ pub fn analyze(
     }
     summary.relationships = relationships.into_iter().collect();
     summary
+}
+
+fn known_godot_paths(files: &[FileInfo], dispositions: &[FileDisposition]) -> BTreeSet<String> {
+    let mut paths =
+        files.iter().map(|file| normalize_godot_path(&file.relative_path)).collect::<BTreeSet<_>>();
+    paths.extend(
+        dispositions
+            .iter()
+            .filter(|disposition| disposition.reason.as_str() == "inventory_only")
+            .map(|disposition| normalize_godot_path(&disposition.path)),
+    );
+    paths
+}
+
+fn normalize_godot_path(path: &str) -> String {
+    normalize_path(path).trim_start_matches('/').to_string()
+}
+
+fn is_known_godot_target(target: &str, known_paths: &BTreeSet<String>) -> bool {
+    target
+        .strip_prefix("res://")
+        .map(|path| {
+            let path = normalize_godot_path(path);
+            !path.is_empty() && known_paths.contains(&path)
+        })
+        .unwrap_or(true)
 }
 
 fn discover_test_commands(root: &Path, files: &[FileInfo]) -> Vec<String> {

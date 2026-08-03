@@ -29,7 +29,7 @@ use crate::render::{
 use crate::retrieve::{self, RetrievalPlan};
 use crate::scan::scanner::FileScanner;
 use crate::scan::tree::generate_tree;
-use crate::utils::{estimate_tokens, read_file_safe, redact_url_credentials};
+use crate::utils::{estimate_tokens, read_file_safe, redact_url_credentials, write_atomic};
 
 /// Options controlling export runtime behavior.
 #[derive(Debug, Clone)]
@@ -65,6 +65,7 @@ pub struct ExportOutcome {
 
 /// Build a local redacted index without writing export artifacts.
 pub fn build_index(mut config: Config, index_path: &Path) -> Result<crate::index::IndexRefresh> {
+    config.validate()?;
     if config.repo_url.is_some() {
         anyhow::bail!("the index command accepts local repositories only");
     }
@@ -108,6 +109,7 @@ pub fn execute_with_task(
     options: ExportExecutionOptions,
     task_options: TaskExecutionOptions,
 ) -> Result<ExportOutcome> {
+    config.validate()?;
     let started = Instant::now();
     let was_remote = config.repo_url.is_some();
     let repo_ctx = fetch_repository(
@@ -127,6 +129,8 @@ pub fn execute_with_task(
             options.explicit_config_path.as_deref(),
         );
     }
+
+    config.validate()?;
 
     let godot_detection = resolve_profile(&mut config, &root_path);
 
@@ -149,6 +153,8 @@ pub fn execute_with_task(
 
     let (ranked_files, manifest_info) =
         rank_files_with_manifest(&root_path, scanned_files, config.ranking_weights.clone())?;
+    let full_scan_paths =
+        ranked_files.iter().map(|file| file.relative_path.clone()).collect::<HashSet<_>>();
     let module_run = if matches!(scan_mode, ScanMode::Focused) {
         if let Some(ref focus_path) = options.focus_path {
             // Non-interactive: use the provided focus path.
@@ -190,6 +196,9 @@ pub fn execute_with_task(
         &mut stats,
         &mut dispositions,
     );
+    let index_scope_is_full = module_run.is_none()
+        && selected_files.len() == full_scan_paths.len()
+        && selected_files.iter().all(|file| full_scan_paths.contains(&file.relative_path));
 
     let redactor = if config.redact_secrets {
         Some(build_redactor(config.redaction_mode, &config.redaction))
@@ -219,7 +228,7 @@ pub fn execute_with_task(
     let mut retrieval_plan = if let Some(task) = task_options.task.as_deref() {
         let graph = crate::module::graph::build(&selected_files);
         let mut indexed_chunks = None;
-        if !task_options.no_index && config.redact_secrets && !was_remote {
+        if !task_options.no_index && config.redact_secrets && !was_remote && index_scope_is_full {
             let index_path =
                 task_options.index_db.clone().or_else(|| default_index_path(&root_path));
             if let Some(index_path) = index_path {
@@ -248,6 +257,10 @@ pub fn execute_with_task(
             } else {
                 tracing::warn!("no user cache directory; using in-memory task retrieval");
             }
+        } else if task_options.index_db.is_some() && !index_scope_is_full {
+            tracing::info!(
+                "focused or byte-budgeted export uses in-memory retrieval; persistent index was left unchanged"
+            );
         }
         let retrieval_chunks = indexed_chunks.as_deref().unwrap_or(&all_chunks);
         Some(retrieve::build_plan(task, retrieval_chunks, &selected_files, &graph))
@@ -399,11 +412,14 @@ pub fn execute_with_task(
     }
 
     let repo_name = repo_name_for_output(&root_path, config.repo_url.as_deref());
-    let module_basename = module_run.as_ref().map(|module| module.entry_basename.as_str());
-    let output_dir = resolve_output_dir(&config.output_dir, &repo_name, module_basename);
+    let module_basename = module_run
+        .as_ref()
+        .map(|module| sanitize_output_component(&module.entry_basename, "module"));
+    let output_dir = resolve_output_dir(&config.output_dir, &repo_name, module_basename.as_deref());
     fs::create_dir_all(&output_dir)?;
 
     let output_prefix = module_basename
+        .as_deref()
         .map(|entry| format!("{repo_name}_focus_{entry}"))
         .unwrap_or_else(|| repo_name.clone());
     let context_path = output_dir.join(format!("{}_context_pack.md", output_prefix));
@@ -421,17 +437,17 @@ pub fn execute_with_task(
 
     match config.mode {
         OutputMode::Prompt => {
-            fs::write(&context_path, prompt_content.as_deref().unwrap_or_default())?;
+            write_atomic(&context_path, prompt_content.as_deref().unwrap_or_default().as_bytes())?;
         }
         OutputMode::Rag => {
             let jsonl = render_jsonl_with_evidence(&chunks, retrieval_plan.as_ref());
-            fs::write(&jsonl_path, jsonl)?;
+            write_atomic(&jsonl_path, jsonl.as_bytes())?;
         }
         OutputMode::Both => {
-            fs::write(&context_path, prompt_content.as_deref().unwrap_or_default())?;
+            write_atomic(&context_path, prompt_content.as_deref().unwrap_or_default().as_bytes())?;
 
             let jsonl = render_jsonl_with_evidence(&chunks, retrieval_plan.as_ref());
-            fs::write(&jsonl_path, jsonl)?;
+            write_atomic(&jsonl_path, jsonl.as_bytes())?;
         }
     }
 
@@ -1310,8 +1326,10 @@ fn build_redactor(mode: RedactionMode, cfg: &crate::domain::RedactionConfig) -> 
 }
 
 fn resolve_output_dir(base_dir: &Path, repo_name: &str, module_basename: Option<&str>) -> PathBuf {
-    let repo_dir = base_dir.join(repo_name);
-    module_basename.map(|entry| repo_dir.join(format!("focus_{entry}"))).unwrap_or(repo_dir)
+    let repo_dir = base_dir.join(sanitize_output_component(repo_name, "repo"));
+    module_basename
+        .map(|entry| repo_dir.join(format!("focus_{}", sanitize_output_component(entry, "module"))))
+        .unwrap_or(repo_dir)
 }
 
 fn repo_name_for_output(root_path: &Path, repo_url: Option<&str>) -> String {
@@ -1320,17 +1338,39 @@ fn repo_name_for_output(root_path: &Path, repo_url: Option<&str>) -> String {
             return name;
         }
     }
-    root_path.file_name().and_then(|n| n.to_str()).unwrap_or("repo").to_string()
+    sanitize_output_component(
+        root_path.file_name().and_then(|n| n.to_str()).unwrap_or("repo"),
+        "repo",
+    )
 }
 
 fn repo_name_from_remote_url(url: &str) -> Option<String> {
-    let trimmed = url.trim().trim_end_matches('/');
-    let last = trimmed.rsplit('/').next()?;
+    let trimmed = url.trim().split(['?', '#']).next().unwrap_or_default().trim_end_matches('/');
+    let path = trimmed
+        .strip_prefix("git@github.com:")
+        .or_else(|| trimmed.rsplit_once('/').map(|(_, path)| path))?;
+    let last = path.rsplit('/').next()?;
     let cleaned = last.strip_suffix(".git").unwrap_or(last);
     if cleaned.is_empty() {
         None
     } else {
-        Some(cleaned.to_string())
+        Some(sanitize_output_component(cleaned, "repo"))
+    }
+}
+
+fn sanitize_output_component(value: &str, fallback: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+            sanitized.push(character);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        fallback.to_string()
+    } else {
+        sanitized.to_string()
     }
 }
 

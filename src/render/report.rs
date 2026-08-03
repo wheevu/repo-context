@@ -3,6 +3,7 @@
 use crate::domain::{FileDisposition, FileInfo, ScanStats, REPORT_SCHEMA_VERSION};
 use crate::godot::GodotSummary;
 use crate::retrieve::RetrievalPlan;
+use crate::utils::write_atomic;
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::{json, Map, Value};
@@ -122,7 +123,7 @@ pub fn write_report_with_retrieval(
     if let Some(parent) = report_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(report_path, serde_json::to_string_pretty(&Value::Object(report))?)?;
+    write_atomic(report_path, serde_json::to_string_pretty(&Value::Object(report))?.as_bytes())?;
     Ok(())
 }
 

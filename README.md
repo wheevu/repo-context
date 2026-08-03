@@ -234,7 +234,7 @@ Valid JSON is parsed before minification checks. The prompt receives a concise t
 
 Known limitations: the Godot parsers are intentionally lightweight rather than compiler-complete. Dynamic resource paths, runtime-created node hierarchies, computed input action names, and binary asset internals cannot always be resolved statically. Malformed or unusual text formats degrade to source/text chunks instead of failing an export. Task retrieval makes static dependency/importer claims only; it does not claim runtime call reachability, compiler semantics, or behavioral correctness. Remote task exports use ephemeral retrieval and never persist a remote repository index. `--no-redact` also bypasses persistent indexing.
 
-Godot analysis remains additive in report schema `1.4.0`: reports may contain a top-level `godot` object, and file dispositions may use `inventory_only` for generated metadata and binary assets that were indexed without textual chunks. Task reports additionally contain stable retrieval counts and relation labels; raw task text and cache paths are never emitted.
+Godot analysis remains additive in report schema `1.5.0`: reports may contain a top-level `godot` object with resolved relationship metadata, and file dispositions may use `inventory_only` for generated metadata and binary assets that were indexed without textual chunks. Task reports additionally contain stable retrieval counts and relation labels; raw task text and cache paths are never emitted.
 
 ## Development
 ```

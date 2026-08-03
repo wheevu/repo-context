@@ -73,6 +73,7 @@ pub fn run(args: InfoArgs) -> Result<()> {
             ..CliOverrides::default()
         },
     );
+    config.validate()?;
     let detection = resolve_profile(&mut config, &root);
 
     let mut scanner = FileScanner::from_config(root.clone(), &config);

@@ -219,10 +219,11 @@ fn build_file_scope(
     }
 
     // Build the ordered file list.
-    let files: Vec<(FileInfo, InclusionReason)> = included
+    let mut files: Vec<(FileInfo, InclusionReason)> = included
         .iter()
         .filter_map(|(p, reason)| by_path.get(p).map(|f| ((*f).clone(), reason.clone())))
         .collect();
+    sort_scope_files(&mut files);
 
     FocusScope {
         selected: selected_abs,
@@ -257,13 +258,15 @@ fn build_module_scope(
         reachable.len() <= 1 && graph::is_rust_crate_root(entry, root) && !scanned_files.is_empty();
 
     if used_fallback {
-        // Fallback: include all Rust source files from the crate's src tree.
+        // Fallback: include all Rust source files from the selected crate's
+        // actual `src` tree, not every `src/` directory in the repository.
+        let crate_src = rust_crate_source_root(entry);
         for file in scanned_files {
             let abs = canon(&file.path);
             if included.contains_key(&abs) {
                 continue;
             }
-            if file.relative_path.starts_with("src/") && is_rust_file(file) {
+            if crate_src.as_ref().is_some_and(|src| abs.starts_with(src)) && is_rust_file(file) {
                 // Skip obvious test-only files.
                 if is_likely_test_file(file) {
                     continue;
@@ -330,6 +333,7 @@ fn build_directory_scope(
         .cloned()
         .map(|f| (f, InclusionReason::RuntimeModule))
         .collect();
+    files.sort_by(|a, b| a.0.relative_path.cmp(&b.0.relative_path));
 
     // Tag likely entrypoints (index.*, main.*) with higher priority.
     for (file, _) in &mut files {
@@ -358,7 +362,7 @@ fn discover_file_candidates(
 ) -> Vec<FocusCandidate> {
     let source_files: Vec<&FileInfo> = files.iter().filter(|f| is_source_file(f)).collect();
 
-    source_files
+    let mut candidates: Vec<FocusCandidate> = source_files
         .iter()
         .map(|f| {
             let abs = canon(&f.path);
@@ -378,7 +382,9 @@ fn discover_file_candidates(
                 kind: FocusKind::File,
             }
         })
-        .collect()
+        .collect();
+    candidates.sort_by_key(candidate_path_key);
+    candidates
 }
 
 fn discover_module_candidates(
@@ -413,30 +419,31 @@ fn discover_module_candidates(
         });
     }
 
-    // 2. JS/TS route/page directories.
+    // 2. JS/TS route/page directories. Group by the actual parent path so
+    // nested applications and repeated directory names remain distinct.
     let entry_dirs: &[&str] =
         &["pages", "routes", "views", "screens", "cmd", "handlers", "controllers"];
-    for dir_name in entry_dirs {
-        let dir_files: Vec<&FileInfo> = files
-            .iter()
-            .filter(|f| {
-                let path = Path::new(&f.relative_path);
-                path.parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.eq_ignore_ascii_case(dir_name))
-                    .unwrap_or(false)
-            })
-            .collect();
-        if dir_files.len() >= 2 {
-            let total = dir_files.len();
-            candidates.push(FocusCandidate {
-                path: root.join(format!("src/{dir_name}")),
-                display: format!("{dir_name}/ ({total} files)"),
-                detail: format!("{total} route/page files"),
-                kind: FocusKind::Module,
-            });
+    let mut route_dirs: HashMap<PathBuf, usize> = HashMap::new();
+    for file in files {
+        let path = Path::new(&file.relative_path);
+        let Some(parent) = path.parent() else { continue };
+        let Some(name) = parent.file_name().and_then(|name| name.to_str()) else { continue };
+        if entry_dirs.iter().any(|entry| name.eq_ignore_ascii_case(entry)) {
+            *route_dirs.entry(canon(&root.join(parent))).or_insert(0) += 1;
         }
+    }
+    let mut route_dirs: Vec<(PathBuf, usize)> = route_dirs.into_iter().collect();
+    route_dirs.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (path, total) in route_dirs {
+        if total < 2 {
+            continue;
+        }
+        candidates.push(FocusCandidate {
+            display: format!("{}/ ({} files)", rel(root, &path), total),
+            detail: format!("{total} route/page files"),
+            path,
+            kind: FocusKind::Module,
+        });
     }
 
     // 3. Topology-based entries (files with no incoming edges).
@@ -467,9 +474,13 @@ fn discover_module_candidates(
     candidates.sort_by(|a, b| {
         let a_main = main_scene.as_ref().is_some_and(|path| canon(path) == canon(&a.path));
         let b_main = main_scene.as_ref().is_some_and(|path| canon(path) == canon(&b.path));
-        b_main.cmp(&a_main).then_with(|| a.display.cmp(&b.display))
+        b_main
+            .cmp(&a_main)
+            .then_with(|| candidate_path_key(a).cmp(&candidate_path_key(b)))
+            .then_with(|| a.display.cmp(&b.display))
+            .then_with(|| a.detail.cmp(&b.detail))
     });
-    candidates.dedup_by(|a, b| a.path == b.path);
+    candidates.dedup_by(|a, b| canon(&a.path) == canon(&b.path));
     candidates
 }
 
@@ -583,29 +594,33 @@ fn find_entry_path(
     visited: &HashMap<PathBuf, InclusionReason>,
 ) -> Option<PathBuf> {
     // First check direct callers, skipping obvious test files.
-    let callers: Vec<PathBuf> = graph::direct_callers(graph, target)
+    let mut callers: Vec<PathBuf> = graph::direct_callers(graph, target)
         .into_iter()
         .filter(|c| !path_looks_like_test(c))
         .collect();
+    callers.sort();
+    callers.dedup();
     if callers.is_empty() {
         // target IS the entry (no non-test callers).
         return Some(target.to_path_buf());
     }
 
     // Walk up (BFS limited) to find the highest caller.
-    let mut current_set: HashSet<PathBuf> = callers.iter().cloned().collect();
+    let mut current_set = callers;
     let mut seen: HashSet<PathBuf> = visited.keys().cloned().collect();
     seen.insert(target.to_path_buf());
-    let mut best = callers.first().cloned();
+    let mut best = current_set.first().cloned();
 
     // Try up to 5 levels.
     for _ in 0..5 {
         let mut next_set = HashSet::new();
         for caller in &current_set {
-            let higher: Vec<PathBuf> = graph::direct_callers(graph, caller)
+            let mut higher: Vec<PathBuf> = graph::direct_callers(graph, caller)
                 .into_iter()
                 .filter(|c| !path_looks_like_test(c))
                 .collect();
+            higher.sort();
+            higher.dedup();
             if higher.is_empty() {
                 // This caller has no non-test callers → it's an entry.
                 return Some(caller.clone());
@@ -621,7 +636,8 @@ fn find_entry_path(
         if next_set.is_empty() {
             break;
         }
-        current_set = next_set;
+        current_set = next_set.into_iter().collect();
+        current_set.sort();
     }
 
     best
@@ -642,12 +658,47 @@ fn calls_is_crate_root(file: &FileInfo, graph: &ImportGraph) -> bool {
     callers.is_empty()
 }
 
+fn sort_scope_files(files: &mut [(FileInfo, InclusionReason)]) {
+    files.sort_by(|(a_file, a_reason), (b_file, b_reason)| {
+        inclusion_reason_order(a_reason)
+            .cmp(&inclusion_reason_order(b_reason))
+            .then_with(|| a_file.relative_path.cmp(&b_file.relative_path))
+            .then_with(|| a_file.path.cmp(&b_file.path))
+    });
+}
+
+fn inclusion_reason_order(reason: &InclusionReason) -> u8 {
+    match reason {
+        InclusionReason::Selected => 0,
+        InclusionReason::EntryPath => 1,
+        InclusionReason::OutboundDependency => 2,
+        InclusionReason::Caller => 3,
+        InclusionReason::RelatedTest => 4,
+        InclusionReason::CrateFallback => 5,
+        InclusionReason::RuntimeModule => 6,
+        InclusionReason::CssScope => 7,
+    }
+}
+
+fn candidate_path_key(candidate: &FocusCandidate) -> PathBuf {
+    canon(&candidate.path)
+}
+
+fn rust_crate_source_root(entry: &Path) -> Option<PathBuf> {
+    entry
+        .ancestors()
+        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some("src"))
+        .map(canon)
+}
+
 fn canon(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn rel(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
+    let root = canon(root);
+    let path = canon(path);
+    path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().replace('\\', "/")
 }
 
 #[cfg(test)]
@@ -697,6 +748,108 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(canon(&candidates[0].path), canon(&root.join("player.gd")));
+    }
+
+    #[test]
+    fn nested_rust_fallback_stays_within_selected_crate() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+        fs::create_dir_all(root.join("crates/alpha/src")).expect("mkdir alpha");
+        fs::create_dir_all(root.join("crates/beta/src")).expect("mkdir beta");
+
+        let alpha_main = root.join("crates/alpha/src/main.rs");
+        let alpha_feature = root.join("crates/alpha/src/feature.rs");
+        let beta_main = root.join("crates/beta/src/main.rs");
+        fs::write(&alpha_main, "fn main() {}\n").expect("write alpha main");
+        fs::write(&alpha_feature, "pub fn feature() {}\n").expect("write alpha feature");
+        fs::write(&beta_main, "fn main() {}\n").expect("write beta main");
+
+        let files = vec![
+            test_file(root, "crates/beta/src/main.rs"),
+            test_file(root, "crates/alpha/src/feature.rs"),
+            test_file(root, "crates/alpha/src/main.rs"),
+        ];
+        let graph = graph::build(&files);
+        let scope = build_scope(root, &files, &graph, &alpha_main);
+
+        let included: Vec<PathBuf> =
+            scope.files.iter().map(|(file, _)| canon(&file.path)).collect();
+        assert!(included.contains(&canon(&alpha_main)));
+        assert!(included.contains(&canon(&alpha_feature)));
+        assert!(!included.contains(&canon(&beta_main)));
+    }
+
+    #[test]
+    fn route_candidates_use_real_nested_directories_and_stable_order() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+        for directory in ["apps/web/pages", "packages/site/pages"] {
+            fs::create_dir_all(root.join(directory)).expect("mkdir route directory");
+        }
+        let relative_paths = [
+            "packages/site/pages/Home.ts",
+            "apps/web/pages/About.ts",
+            "packages/site/pages/About.ts",
+            "apps/web/pages/Home.ts",
+        ];
+        for relative in relative_paths {
+            fs::write(root.join(relative), "export const page = true;\n").expect("write page");
+        }
+        let files: Vec<FileInfo> =
+            relative_paths.iter().map(|path| test_file(root, path)).collect();
+        let reversed: Vec<FileInfo> = files.iter().cloned().rev().collect();
+        let graph = graph::build(&files);
+        let reversed_graph = graph::build(&reversed);
+
+        let candidates = discover_module_candidates(root, &files, &graph);
+        let reversed_candidates = discover_module_candidates(root, &reversed, &reversed_graph);
+        let paths: Vec<PathBuf> =
+            candidates.iter().map(|candidate| canon(&candidate.path)).collect();
+        let reversed_paths: Vec<PathBuf> =
+            reversed_candidates.iter().map(|candidate| canon(&candidate.path)).collect();
+
+        assert_eq!(paths, reversed_paths);
+        assert_eq!(
+            paths,
+            vec![canon(&root.join("apps/web/pages")), canon(&root.join("packages/site/pages"))]
+        );
+        assert_eq!(candidates[0].display, "apps/web/pages/ (2 files)");
+        assert_eq!(candidates[1].display, "packages/site/pages/ (2 files)");
+    }
+
+    #[test]
+    fn file_scope_order_is_stable_across_input_order() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::create_dir_all(root.join("tests")).expect("mkdir tests");
+        fs::write(root.join("src/main.ts"), "import './selected';\n").expect("write main");
+        fs::write(root.join("src/selected.ts"), "import './dependency';\n")
+            .expect("write selected");
+        fs::write(root.join("src/dependency.ts"), "export const value = 1;\n")
+            .expect("write dependency");
+        fs::write(root.join("tests/selected.test.ts"), "import '../src/selected';\n")
+            .expect("write test");
+
+        let files = vec![
+            test_file(root, "tests/selected.test.ts"),
+            test_file(root, "src/dependency.ts"),
+            test_file(root, "src/main.ts"),
+            test_file(root, "src/selected.ts"),
+        ];
+        let reversed: Vec<FileInfo> = files.iter().cloned().rev().collect();
+        let graph = graph::build(&files);
+        let reversed_graph = graph::build(&reversed);
+        let selected = root.join("src/selected.ts");
+
+        let scope = build_scope(root, &files, &graph, &selected);
+        let reversed_scope = build_scope(root, &reversed, &reversed_graph, &selected);
+        let paths: Vec<PathBuf> = scope.files.iter().map(|(file, _)| file.path.clone()).collect();
+        let reversed_paths: Vec<PathBuf> =
+            reversed_scope.files.iter().map(|(file, _)| file.path.clone()).collect();
+
+        assert_eq!(paths, reversed_paths);
+        assert_eq!(scope.files[0].0.path, selected);
     }
 
     fn test_file(root: &Path, relative_path: &str) -> FileInfo {

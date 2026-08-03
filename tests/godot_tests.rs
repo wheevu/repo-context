@@ -123,6 +123,61 @@ fn godot_export_is_structural_complete_and_deterministic() {
 }
 
 #[test]
+fn godot_relationships_mark_missing_resources_and_keep_original_targets() {
+    let fixture = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    fs::create_dir_all(fixture.path().join("scripts")).unwrap();
+    fs::create_dir_all(fixture.path().join("assets")).unwrap();
+    fs::write(
+        fixture.path().join("project.godot"),
+        "config_version=5\n[application]\nrun/main_scene=\"res://main.tscn\"\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.path().join("main.tscn"),
+        "[gd_scene format=3]\n[node name=\"Main\" type=\"Node\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.path().join("scripts/player.gd"),
+        "extends Node\nfunc load_assets():\n\tload(\"res://assets/inventory.png\")\n\tload(\"res://assets/missing.png\")\n",
+    )
+    .unwrap();
+    fs::write(fixture.path().join("assets/inventory.png"), [0_u8, 1, 2]).unwrap();
+
+    let report = export_fixture(fixture.path(), output.path());
+    let relationships = report["godot"]["relationships"].as_array().unwrap();
+    let relationship = |target: &str| {
+        relationships
+            .iter()
+            .find(|item| item["target"] == target)
+            .unwrap_or_else(|| panic!("missing relationship for {target}"))
+    };
+
+    let inventory_relationship = relationship("res://assets/inventory.png");
+    assert_eq!(inventory_relationship["resolved"], true);
+    assert_eq!(inventory_relationship["target"], "res://assets/inventory.png");
+
+    let missing_relationship = relationship("res://assets/missing.png");
+    assert_eq!(missing_relationship["resolved"], false);
+    assert_eq!(missing_relationship["target"], "res://assets/missing.png");
+
+    let context_path = report["output_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|path| {
+            let path = path.as_str()?;
+            path.ends_with("_context_pack.md").then_some(path)
+        })
+        .expect("context pack output");
+    let context = fs::read_to_string(context_path).unwrap();
+    assert!(context.contains("- `scripts/player.gd` —script_loads→ `res://assets/inventory.png`\n"));
+    assert!(context
+        .contains("- `scripts/player.gd` —script_loads→ `res://assets/missing.png` [missing]\n"));
+}
+
+#[test]
 fn malformed_godot_and_json_files_fall_back_without_panicking() {
     let gd = FileInfo {
         path: PathBuf::from("broken.gd"),

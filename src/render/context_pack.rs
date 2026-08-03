@@ -443,8 +443,11 @@ fn render_godot_overview(out: &mut String, godot: &GodotSummary) {
         out.push_str("\n### Godot Relationships\n\n");
         for relationship in godot.relationships.iter().take(100) {
             out.push_str(&format!(
-                "- `{}` —{}→ `{}`\n",
-                relationship.source, relationship.kind, relationship.target
+                "- `{}` —{}→ `{}`{}\n",
+                relationship.source,
+                relationship.kind,
+                relationship.target,
+                if relationship.resolved { "" } else { " [missing]" }
             ));
         }
         if godot.relationships.len() > 100 {

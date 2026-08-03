@@ -2,7 +2,7 @@
 //!
 //! Provides functionality to clone GitHub repositories to temporary directories.
 
-use crate::fetch::RepoContext;
+use crate::fetch::{classify_remote_url, RemoteKind, RepoContext};
 use crate::utils::redact_url_credentials;
 use anyhow::{Context, Result};
 use git2::{FetchOptions, ObjectType, Repository};
@@ -22,6 +22,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// # Errors
 /// Returns an error if cloning fails or temp directory cannot be created
 pub fn clone_repository(url: &str, ref_: Option<&str>) -> Result<RepoContext> {
+    anyhow::ensure!(
+        classify_remote_url(url)? == RemoteKind::Github,
+        "repository URL is not a supported GitHub URL"
+    );
     let temp_dir = build_temp_repo_dir();
     std::fs::create_dir_all(&temp_dir)
         .with_context(|| format!("Failed creating temp directory: {}", temp_dir.display()))?;
@@ -62,7 +66,7 @@ pub fn clone_repository(url: &str, ref_: Option<&str>) -> Result<RepoContext> {
 /// - non-GitHub URLs                    → unchanged
 fn normalize_github_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
-    if trimmed.contains("github.com") && !trimmed.ends_with(".git") {
+    if !trimmed.ends_with(".git") {
         format!("{}.git", trimmed)
     } else {
         trimmed.to_string()

@@ -10,8 +10,10 @@ use ignore::WalkBuilder;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 const DEFAULT_SAMPLE_SIZE: usize = 8192;
+const MAX_UNSEEN_FILES: usize = 50_000;
 
 /// File scanner that discovers files in a repository while respecting gitignore rules.
 pub struct FileScanner {
@@ -164,9 +166,28 @@ impl FileScanner {
         // Pre-allocate with reasonable capacity to avoid reallocations during growth
         let mut files: Vec<(PathBuf, String)> = Vec::with_capacity(1024);
         let exclude_globset = self.build_exclude_globset()?;
+        let canonical_root =
+            self.follow_symlinks.then(|| self.root_path.canonicalize()).transpose()?;
+        let rejected_symlink_dirs = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
 
         // Directory filter function matching Python's _walk_files behavior
-        let dir_filter = |entry: &ignore::DirEntry| -> bool {
+        let canonical_root_for_filter = canonical_root.clone();
+        let rejected_symlink_dirs_for_filter = Arc::clone(&rejected_symlink_dirs);
+        let dir_filter = move |entry: &ignore::DirEntry| -> bool {
+            // `ignore` follows a directory symlink before invoking this filter.
+            // Reject an escaping target here so its children are never visited.
+            if let Some(canonical_root) = canonical_root_for_filter.as_deref() {
+                if entry.path_is_symlink()
+                    && entry.path().is_dir()
+                    && !is_path_within_root(entry.path(), canonical_root)
+                {
+                    if let Ok(mut rejected) = rejected_symlink_dirs_for_filter.lock() {
+                        rejected.push(entry.path().to_path_buf());
+                    }
+                    return false;
+                }
+            }
+
             if let Some(file_type) = entry.file_type() {
                 if file_type.is_dir() {
                     if let Some(name) = entry.file_name().to_str() {
@@ -224,6 +245,16 @@ impl FileScanner {
                 Err(_) => continue,
             };
 
+            // Validate the fully resolved path, not only the final path
+            // component. This catches regular files reached through a safe
+            // looking directory entry that escaped through an ancestor link.
+            if let Some(canonical_root) = canonical_root.as_deref() {
+                if !is_path_within_root(path, canonical_root) {
+                    self.record_symlink_skip(path, rel_path, false);
+                    continue;
+                }
+            }
+
             let metadata = match path.metadata() {
                 Ok(m) => m,
                 Err(_) => {
@@ -240,15 +271,6 @@ impl FileScanner {
             let size = metadata.len();
             self.stats.total_bytes_scanned += size;
             self.stats.total_bytes_discovered += size;
-
-            // When symlinks are followed, verify the resolved target stays
-            // within the repository root so a malicious repo can't reach
-            // outside through symlinks.
-            if self.follow_symlinks && !is_symlink_target_safe(path, &self.root_path) {
-                self.stats.files_skipped += 1;
-                self.record_path(path, rel_path, FileDispositionReason::SkippedGlob, Some(size));
-                continue;
-            }
 
             // Check explicit exclude globs
             if exclude_globset.is_match(&rel_path) {
@@ -301,6 +323,23 @@ impl FileScanner {
             }
 
             files.push((path.to_path_buf(), rel_path));
+        }
+
+        // Directory symlinks are filtered before the walker descends into them,
+        // so record those skipped entries after iteration has completed.
+        let mut rejected_symlink_dirs =
+            rejected_symlink_dirs.lock().map(|paths| paths.clone()).unwrap_or_default();
+        rejected_symlink_dirs.sort();
+        rejected_symlink_dirs.dedup();
+        for path in rejected_symlink_dirs {
+            let rel_path = match path.strip_prefix(&self.root_path) {
+                Ok(path) => normalize_path(path.to_str().unwrap_or("")),
+                Err(_) => continue,
+            };
+            if rel_path.is_empty() {
+                continue;
+            }
+            self.record_symlink_skip(&path, rel_path, true);
         }
 
         // Sort by relative path for deterministic ordering
@@ -366,6 +405,7 @@ impl FileScanner {
             + self.stats.files_skipped_gitignore
             + self.stats.files_skipped_glob
             + self.stats.files_skipped_minified
+            + self.stats.files_skipped_symlink
             + self.stats.files_inventory_only;
 
         Ok(result)
@@ -407,28 +447,37 @@ impl FileScanner {
         self.dispositions.push(disposition);
     }
 
-    fn record_unseen_files(&mut self) {
-        let mut seen: BTreeSet<String> = self.dispositions.iter().map(|d| d.path.clone()).collect();
-        let mut unseen = collect_regular_files(&self.root_path);
-        unseen.sort_by(|a, b| a.0.cmp(&b.0));
+    fn record_symlink_skip(&mut self, path: &Path, rel_path: String, count_discovered: bool) {
+        if count_discovered {
+            self.stats.files_discovered += 1;
+        }
+        self.stats.files_skipped_symlink += 1;
+        let size = std::fs::symlink_metadata(path).map(|metadata| metadata.len()).ok();
+        self.record_path(path, rel_path, FileDispositionReason::SkippedSymlink, size);
+    }
 
-        // Guard against excessive work on large repos. The second walk is
-        // exhaustive by design to reconcile the inventory, but we cap the
-        // number of entries processed to avoid long stalls.
-        const MAX_UNSEEN: usize = 50_000;
-        if unseen.len() > MAX_UNSEEN {
+    fn record_unseen_files(&mut self) {
+        let seen: BTreeSet<String> = self.dispositions.iter().map(|d| d.path.clone()).collect();
+        let inventory = collect_regular_files(&self.root_path, &seen, MAX_UNSEEN_FILES);
+        self.stats.unseen_files_examined = inventory.examined;
+        self.stats.unseen_files_reconciled = inventory.files.len();
+        self.stats.unseen_inventory_truncated = inventory.truncated;
+        self.stats.unseen_inventory_errors = inventory.errors;
+
+        if inventory.truncated {
             tracing::warn!(
-                "Too many unseen files ({}), capping disposition inventory at {}",
-                unseen.len(),
-                MAX_UNSEEN
+                "Unseen-file disposition inventory reached its cap of {} entries",
+                MAX_UNSEEN_FILES
             );
-            unseen.truncate(MAX_UNSEEN);
+        }
+        if inventory.errors > 0 {
+            tracing::warn!(
+                "Unseen-file disposition inventory encountered {} traversal errors",
+                inventory.errors
+            );
         }
 
-        for (rel_path, path) in unseen {
-            if seen.contains(&rel_path) {
-                continue;
-            }
+        for (rel_path, path) in inventory.files {
             let size = path.metadata().map(|m| m.len()).ok();
             self.stats.files_discovered += 1;
             if let Some(size) = size {
@@ -457,12 +506,22 @@ impl FileScanner {
                     size,
                 );
             }
-            seen.insert(rel_path);
         }
     }
 }
 
-fn collect_regular_files(root: &Path) -> Vec<(String, PathBuf)> {
+struct UnseenFileInventory {
+    files: Vec<(String, PathBuf)>,
+    examined: usize,
+    truncated: bool,
+    errors: usize,
+}
+
+fn collect_regular_files(
+    root: &Path,
+    already_seen: &BTreeSet<String>,
+    max_files: usize,
+) -> UnseenFileInventory {
     let dir_filter = |entry: &ignore::DirEntry| -> bool {
         if let Some(file_type) = entry.file_type() {
             if file_type.is_dir() {
@@ -482,25 +541,54 @@ fn collect_regular_files(root: &Path) -> Vec<(String, PathBuf)> {
         true
     };
 
-    let walker = WalkBuilder::new(root)
+    let mut builder = WalkBuilder::new(root);
+    builder
         .git_ignore(false)
         .git_global(false)
         .git_exclude(false)
         .hidden(false)
         .parents(false)
         .filter_entry(dir_filter)
-        .build();
+        .sort_by_file_path(|a, b| a.cmp(b));
+    let walker = builder.build();
 
-    let mut files = Vec::new();
-    for entry in walker.flatten() {
-        let path = entry.path();
-        if entry.file_type().is_some_and(|ft| ft.is_file()) {
-            if let Ok(rel) = path.strip_prefix(root) {
-                files.push((normalize_path(rel.to_str().unwrap_or("")), path.to_path_buf()));
+    let mut seen = already_seen.clone();
+    let mut files = Vec::with_capacity(max_files.min(1024));
+    let mut examined = 0;
+    let mut truncated = false;
+    let mut errors = 0;
+    for entry_result in walker {
+        let entry = match entry_result {
+            Ok(entry) => entry,
+            Err(_) => {
+                errors += 1;
+                continue;
             }
+        };
+        let path = entry.path();
+        if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
+            continue;
         }
+        if examined >= max_files {
+            truncated = true;
+            break;
+        }
+        examined += 1;
+        let rel_path = match path.strip_prefix(root) {
+            Ok(rel_path) => normalize_path(rel_path.to_str().unwrap_or("")),
+            Err(_) => {
+                errors += 1;
+                continue;
+            }
+        };
+        if !seen.insert(rel_path.clone()) {
+            continue;
+        }
+        files.push((rel_path, path.to_path_buf()));
     }
-    files
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    UnseenFileInventory { files, examined, truncated, errors }
 }
 
 fn is_excluded_noise_path(rel_path: &str) -> bool {
@@ -527,19 +615,12 @@ fn extension_with_dot(path: &Path) -> String {
     }
 }
 
-/// Returns `true` when a symlink target resolves within the repository root.
-/// Returns `true` for non-symlinks (they are safe by definition).
-fn is_symlink_target_safe(path: &Path, repo_root: &Path) -> bool {
-    match std::fs::read_link(path) {
-        Ok(target) => {
-            let resolved = path.parent().unwrap_or_else(|| Path::new(".")).join(&target);
-            match resolved.canonicalize() {
-                Ok(canon) => canon.starts_with(repo_root),
-                Err(_) => false,
-            }
-        }
-        Err(_) => true, // Not a symlink, safe
-    }
+/// Returns `true` when the fully resolved path stays within the canonical root.
+/// Resolution failures are rejected closed because the target cannot be proven safe.
+fn is_path_within_root(path: &Path, canonical_root: &Path) -> bool {
+    path.canonicalize()
+        .map(|canonical_path| canonical_path.starts_with(canonical_root))
+        .unwrap_or(false)
 }
 
 /// Returns true when a repository metadata/config file should bypass extension filtering.
@@ -590,6 +671,7 @@ pub fn is_special_repo_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::fs;
     use tempfile::TempDir;
 
@@ -839,6 +921,135 @@ mod tests {
         assert_eq!(stats.files_scanned, 4, "files_scanned should count all visited files");
         // files_included = only the .rs ones
         assert_eq!(stats.files_included, 3, "files_included should be 3");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn follow_symlinks_rejects_outside_directory_targets_with_distinct_accounting() {
+        let root_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+        fs::write(outside_dir.path().join("secret.rs"), "password=12345\n").unwrap();
+        std::os::unix::fs::symlink(outside_dir.path(), root_dir.path().join("linked")).unwrap();
+
+        let mut scanner = FileScanner::new(root_dir.path().to_path_buf())
+            .include_extensions(vec![".rs".to_string()])
+            .exclude_globs(Vec::new())
+            .respect_gitignore(false)
+            .follow_symlinks(true);
+        let files = scanner.scan().unwrap();
+
+        assert!(files.is_empty(), "outside directory contents must not be scanned");
+        assert_eq!(scanner.stats().files_skipped_symlink, 1);
+        assert_eq!(scanner.stats().files_skipped, 1);
+        assert_eq!(scanner.stats().files_discovered, 1);
+        assert!(scanner.dispositions().iter().any(|disposition| {
+            disposition.path == "linked"
+                && disposition.reason == FileDispositionReason::SkippedSymlink
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn follow_symlinks_rejects_outside_file_targets_with_distinct_disposition() {
+        let root_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+        let outside_file = outside_dir.path().join("secret.rs");
+        fs::write(&outside_file, "password=12345\n").unwrap();
+        std::os::unix::fs::symlink(&outside_file, root_dir.path().join("secret.rs")).unwrap();
+
+        let mut scanner = FileScanner::new(root_dir.path().to_path_buf())
+            .include_extensions(vec![".rs".to_string()])
+            .exclude_globs(Vec::new())
+            .respect_gitignore(false)
+            .follow_symlinks(true);
+        let files = scanner.scan().unwrap();
+
+        assert!(files.is_empty(), "outside file contents must not be scanned");
+        assert_eq!(scanner.stats().files_skipped_symlink, 1);
+        assert!(scanner.dispositions().iter().any(|disposition| {
+            disposition.path == "secret.rs"
+                && disposition.reason == FileDispositionReason::SkippedSymlink
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn follow_symlinks_allows_directory_targets_inside_repository() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        fs::create_dir_all(root.join("real")).unwrap();
+        fs::write(root.join("real/inside.rs"), "fn inside() {}\n").unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("linked")).unwrap();
+
+        let mut scanner = FileScanner::new(root.to_path_buf())
+            .include_extensions(vec![".rs".to_string()])
+            .exclude_globs(Vec::new())
+            .respect_gitignore(false)
+            .follow_symlinks(true);
+        let files = scanner.scan().unwrap();
+
+        assert!(files.iter().any(|file| file.relative_path == "linked/inside.rs"));
+        assert_eq!(scanner.stats().files_skipped_symlink, 0);
+    }
+
+    #[test]
+    fn unseen_inventory_stops_at_cap_and_reports_truncation() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            fs::write(root.join(name), "fn value() {}\n").unwrap();
+        }
+
+        let inventory = collect_regular_files(root, &BTreeSet::new(), 2);
+
+        assert_eq!(inventory.files.len(), 2);
+        assert_eq!(
+            inventory.files.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+            vec!["a.rs", "b.rs"]
+        );
+        assert_eq!(inventory.examined, 2);
+        assert!(inventory.truncated);
+        assert_eq!(inventory.errors, 0);
+    }
+
+    #[test]
+    fn unseen_inventory_stats_expose_reconciliation_status() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let git_init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(git_init.success(), "git init should create the temporary repository");
+        fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+        fs::create_dir_all(root.join("ignored")).unwrap();
+        fs::write(root.join("ignored/hidden.rs"), "fn hidden() {}\n").unwrap();
+        fs::write(root.join("visible.rs"), "fn visible() {}\n").unwrap();
+
+        let mut scanner = FileScanner::new(root.to_path_buf())
+            .include_extensions(vec![".rs".to_string()])
+            .exclude_globs(Vec::new());
+        let files = scanner.scan().unwrap();
+        let stats = scanner.stats();
+
+        assert!(files.iter().any(|file| file.relative_path == "visible.rs"));
+        assert!(stats.unseen_files_examined >= stats.unseen_files_reconciled);
+        assert_eq!(stats.unseen_files_reconciled, 1);
+        assert!(!stats.unseen_inventory_truncated);
+        assert_eq!(stats.unseen_inventory_errors, 0);
+        assert_eq!(
+            stats.to_report_value()["unseen_inventory"]["files_reconciled"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            stats.to_report_value()["unseen_inventory"]["complete"],
+            serde_json::json!(true)
+        );
+        assert!(scanner.dispositions().iter().any(|disposition| {
+            disposition.path == "ignored/hidden.rs"
+                && disposition.reason == FileDispositionReason::SkippedGitignore
+        }));
     }
 
     #[test]

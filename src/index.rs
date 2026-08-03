@@ -24,6 +24,8 @@ pub struct IndexStore {
     path: PathBuf,
     connection: Connection,
     config_changed: bool,
+    config_fingerprint: String,
+    redaction_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -72,14 +74,13 @@ impl IndexStore {
                 anyhow::bail!("index database is not marked as redacted");
             }
         }
-        set_metadata(&connection, "schema_version", INDEX_SCHEMA_VERSION)?;
-        set_metadata(&connection, "root_key", &root_key)?;
-        set_metadata(&connection, "config_fingerprint", config_fingerprint)?;
-        set_metadata(&connection, "redaction_fingerprint", redaction_fingerprint)?;
-        set_metadata(&connection, "chunk_fingerprint", CHUNK_SCHEMA_FINGERPRINT)?;
-        set_metadata(&connection, "redacted", "true")?;
-
-        Ok(Self { path: path.to_path_buf(), connection, config_changed })
+        Ok(Self {
+            path: path.to_path_buf(),
+            connection,
+            config_changed,
+            config_fingerprint: config_fingerprint.to_string(),
+            redaction_fingerprint: redaction_fingerprint.to_string(),
+        })
     }
 
     #[must_use]
@@ -220,7 +221,12 @@ impl IndexStore {
             )?;
         }
 
+        set_metadata_tx(&tx, "schema_version", INDEX_SCHEMA_VERSION)?;
         set_metadata_tx(&tx, "root_key", &root_fingerprint(root_path))?;
+        set_metadata_tx(&tx, "config_fingerprint", &self.config_fingerprint)?;
+        set_metadata_tx(&tx, "redaction_fingerprint", &self.redaction_fingerprint)?;
+        set_metadata_tx(&tx, "chunk_fingerprint", CHUNK_SCHEMA_FINGERPRINT)?;
+        set_metadata_tx(&tx, "redacted", "true")?;
         refresh.indexed_chunks =
             tx.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
         tx.commit()?;
@@ -435,15 +441,6 @@ fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
         params![table],
         |row| row.get(0),
     )?)
-}
-
-fn set_metadata(connection: &Connection, key: &str, value: &str) -> Result<()> {
-    connection.execute(
-        "INSERT INTO metadata (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![key, value],
-    )?;
-    Ok(())
 }
 
 fn set_metadata_tx(transaction: &rusqlite::Transaction<'_>, key: &str, value: &str) -> Result<()> {
@@ -679,6 +676,42 @@ mod tests {
             .expect("second refresh");
         assert_eq!(refresh.updated_files, 1);
         assert_eq!(second.load_chunks().expect("load")[0].content, "redaction-b");
+    }
+
+    #[test]
+    fn failed_refresh_does_not_commit_new_configuration_metadata() {
+        let root = TempDir::new().expect("root");
+        fs::write(root.path().join("a.rs"), "fn a() {}\n").expect("write");
+        let file = file(&root, "a.rs");
+        let db = root.path().join("index.sqlite");
+        let mut first =
+            IndexStore::open(&db, root.path(), "config-a", "redaction-a").expect("open");
+        first
+            .refresh(
+                std::slice::from_ref(&file),
+                &[chunk("a.rs", "safe-a")],
+                &graph::build(std::slice::from_ref(&file)),
+                root.path(),
+            )
+            .expect("first refresh");
+        drop(first);
+
+        let missing = FileInfo {
+            path: root.path().join("missing.rs"),
+            relative_path: "missing.rs".to_string(),
+            ..file.clone()
+        };
+        let mut second =
+            IndexStore::open(&db, root.path(), "config-b", "redaction-b").expect("reopen");
+        assert!(second.refresh(&[missing], &[], &graph::build(&[]), root.path()).is_err());
+        drop(second);
+
+        let reopened =
+            IndexStore::open(&db, root.path(), "config-b", "redaction-b").expect("reopen");
+        assert!(reopened
+            .paths_needing_refresh(std::slice::from_ref(&file))
+            .expect("stale paths")
+            .contains("a.rs"));
     }
 
     #[allow(dead_code)]

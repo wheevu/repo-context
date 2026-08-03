@@ -120,6 +120,24 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Validate cross-field resource and chunking invariants.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.max_file_bytes > 0, "max_file_bytes must be greater than zero");
+        anyhow::ensure!(self.max_total_bytes > 0, "max_total_bytes must be greater than zero");
+        anyhow::ensure!(self.chunk_tokens > 0, "chunk_tokens must be greater than zero");
+        anyhow::ensure!(
+            self.chunk_overlap < self.chunk_tokens,
+            "chunk_overlap must be smaller than chunk_tokens"
+        );
+        anyhow::ensure!(self.min_chunk_tokens > 0, "min_chunk_tokens must be greater than zero");
+        if let Some(max_tokens) = self.max_tokens {
+            anyhow::ensure!(max_tokens > 0, "max_tokens must be greater than zero when set");
+        }
+        Ok(())
+    }
+}
+
 /// Text extensions added when the Godot profile is active.
 pub fn godot_text_extensions() -> HashSet<String> {
     [".gd", ".tscn", ".tres", ".gdshader", ".gdshaderinc", ".godot", ".cfg"]

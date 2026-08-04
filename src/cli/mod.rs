@@ -12,6 +12,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 mod export;
 mod index;
 mod info;
+mod review;
 mod utils;
 
 /// Convert repositories into LLM-friendly context packs
@@ -38,6 +39,9 @@ enum Commands {
 
     /// Build or refresh the local redacted retrieval index
     Index(index::IndexArgs),
+
+    /// Review a Git change and build a deterministic impact pack
+    Review(review::ReviewArgs),
 }
 
 /// Entry point for CLI execution.
@@ -69,5 +73,6 @@ pub fn run() -> Result<()> {
         Commands::Export(args) => export::run(*args),
         Commands::Info(args) => info::run(args),
         Commands::Index(args) => index::run(args),
+        Commands::Review(args) => review::run(args),
     }
 }

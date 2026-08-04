@@ -93,6 +93,7 @@ The script builds the release binary with `--locked`, runs `repo-context export 
 - `export` — build context artifacts
 - `info` — inspect repository composition without exporting
 - `index` — build or refresh a local redacted SQLite retrieval index
+- `review` — build a deterministic change-aware ImpactPackV1
 
 ## Output
 
@@ -182,6 +183,34 @@ The database contains relative paths, metadata, static imports, symbols, and
 redacted chunks only. It is an advisory cache: exports re-scan and re-redact
 the current repository before rendering. An unavailable implicit cache falls
 back to memory; an explicit `--index-db` failure is an error.
+
+Review the current working tree
+`
+repo-context review --path . --working-tree --format both --output /tmp/impact-pack.json
+`
+Review two Git refs
+`
+repo-context review --path . --base main --head HEAD --format json
+`
+Ref-to-ref review scans the checked-out repository to build its static import
+graph and related-file set. For deterministic output, the worktree must be
+clean and the checked-out `HEAD` commit must exactly match the commit resolved
+by `--head`. Otherwise the command exits with an actionable error: check out
+the requested head commit, or use `--working-tree` to review local changes.
+
+Impact packs are versioned as `ImpactPackV1`. They contain changed
+files, syntax-aware changed symbols, direct static imports and conservative
+caller relationships, relevant tests/configuration/documentation, bounded
+redacted changed-line snippets, and stable content hashes. The default
+comparison is `HEAD` to the working tree; `--base` and
+`--head` select two refs instead.
+
+Review is intentionally static: import edges are not runtime call graphs, and
+caller relationships are import-based approximations. Binary or unreadable
+files produce metadata without source excerpts. Traversal is bounded per
+changed-file seed, changed files and snippets are capped, and
+`--max-related-files` bounds the emitted related-file set; the JSON
+`limits` object records those bounds and whether output was truncated.
 
 Prompt-only
 ```

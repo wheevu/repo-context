@@ -44,5 +44,6 @@ pub mod rank;
 pub mod redact;
 pub mod render;
 pub mod retrieve;
+pub mod review;
 pub mod scan;
 pub mod utils;

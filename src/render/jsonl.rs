@@ -80,7 +80,20 @@ pub fn render_jsonl_with_evidence(chunks: &[Chunk], retrieval: Option<&Retrieval
             "tags",
             Value::Array(tags.iter().map(|t| Value::String((*t).to_string())).collect()),
         );
-        entry.insert("symbols", entry.get("tags").cloned().unwrap_or(Value::Array(Vec::new())));
+        // Symbol names derived from symbol tags (def:/type:/impl:/...), the
+        // same derivation used by the retrieval index `symbols` table.
+        let symbols: Vec<&str> = tags
+            .iter()
+            .filter_map(|tag| tag.split_once(':'))
+            .filter(|(kind, _)| {
+                matches!(*kind, "def" | "type" | "impl" | "class" | "method" | "function")
+            })
+            .map(|(_, name)| name)
+            .collect();
+        entry.insert(
+            "symbols",
+            Value::Array(symbols.iter().map(|s| Value::String((*s).to_string())).collect()),
+        );
         entry.insert("token_estimate", Value::Number(chunk.token_estimate.into()));
         if let Some(evidence) = retrieval.and_then(|plan| plan.evidence_for(chunk)) {
             entry.insert(
@@ -140,6 +153,41 @@ mod tests {
         assert_eq!(value["chunks_in_file"], 1);
         assert_eq!(value["byte_start"], 0);
         assert_eq!(value["content_sha256"], "abc");
+    }
+
+    #[test]
+    fn jsonl_symbols_contain_only_derived_symbol_names() {
+        let chunk = Chunk {
+            id: "c1".to_string(),
+            path: "src/lib.rs".to_string(),
+            language: "rust".to_string(),
+            start_line: 1,
+            end_line: 2,
+            content: "fn main() {}\n".to_string(),
+            priority: 0.9,
+            tags: BTreeSet::from([
+                "entrypoint".to_string(),
+                "def:main".to_string(),
+                "type:Config".to_string(),
+                "readme".to_string(),
+                "section:Overview".to_string(),
+            ]),
+            token_estimate: 4,
+            file_id: "file1".to_string(),
+            chunk_index: 0,
+            chunks_in_file: 1,
+            byte_start: Some(0),
+            byte_end: Some(13),
+            content_sha256: "abc".to_string(),
+            file_sha256: "def".to_string(),
+        };
+
+        let jsonl = render_jsonl(&[chunk]);
+        let value: serde_json::Value = serde_json::from_str(jsonl.trim()).unwrap();
+
+        // Tags sort as def:main, type:Config, so derived symbols keep tag order.
+        assert_eq!(value["symbols"], serde_json::json!(["main", "Config"]));
+        assert_ne!(value["symbols"], value["tags"]);
     }
 
     #[test]

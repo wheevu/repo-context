@@ -898,7 +898,10 @@ fn collect_reference_related(
             .unwrap_or_default();
         let mentions_change = changed_files.iter().any(|changed| {
             content.contains(&changed.path.to_ascii_lowercase())
-                || changed.symbols.iter().any(|symbol| content.contains(symbol.name.as_str()))
+                || changed
+                    .symbols
+                    .iter()
+                    .any(|symbol| content.contains(&symbol.name.to_ascii_lowercase()))
         });
         let stem_match = changed_stems.iter().any(|stem| path.contains(stem));
         let symbol_match = changed_symbols.iter().any(|symbol| content.contains(symbol.as_str()));
@@ -1446,6 +1449,39 @@ mod tests {
         let symbols = changed_symbols(&old, &new, &lines, &lines);
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].name, "changed");
+    }
+
+    #[test]
+    fn reference_related_matches_symbol_mentions_case_insensitively() {
+        use crate::review::ChangedSymbol;
+        use std::fs;
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().expect("temp");
+        let doc = temp.path().join("docs/guide.md");
+        fs::create_dir_all(temp.path().join("docs")).expect("mkdir docs");
+        // The document mentions the changed symbol in mixed case.
+        fs::write(&doc, "# Guide\n\nUses RefreshTokenProvider in this flow.\n").expect("write doc");
+        let mut file = file_info(&doc.to_string_lossy());
+        file.is_doc = true;
+        let mut changed = changed_file();
+        changed.symbols = vec![ChangedSymbol {
+            kind: "type".to_string(),
+            name: "RefreshTokenProvider".to_string(),
+            status: "added".to_string(),
+            old_start_line: None,
+            old_end_line: None,
+            new_start_line: Some(1),
+            new_end_line: Some(10),
+        }];
+        let mut candidates = BTreeMap::new();
+
+        collect_reference_related(&[file], &[changed], &mut candidates);
+
+        assert!(
+            candidates.values().any(|related| related.relation == "documentation"),
+            "mixed-case symbol mention in a doc must be detected, got: {candidates:?}"
+        );
     }
 
     #[test]

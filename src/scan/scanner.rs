@@ -241,9 +241,23 @@ impl FileScanner {
 
             // Get relative path
             let rel_path = match path.strip_prefix(&self.root_path) {
-                Ok(p) => normalize_path(p.to_str().unwrap_or("")),
+                Ok(p) => p.to_str(),
                 Err(_) => continue,
             };
+            // Paths that are not valid UTF-8 cannot be represented in output
+            // artifacts; recording an empty string would collide with other
+            // files and corrupt IDs and dispositions.
+            let Some(rel_path) = rel_path else {
+                self.stats.files_skipped_encoding += 1;
+                self.record_path(
+                    path,
+                    normalize_path(&path.to_string_lossy()),
+                    FileDispositionReason::SkippedEncoding,
+                    None,
+                );
+                continue;
+            };
+            let rel_path = normalize_path(rel_path);
 
             // Validate the fully resolved path, not only the final path
             // component. This catches regular files reached through a safe
@@ -333,7 +347,7 @@ impl FileScanner {
         rejected_symlink_dirs.dedup();
         for path in rejected_symlink_dirs {
             let rel_path = match path.strip_prefix(&self.root_path) {
-                Ok(path) => normalize_path(path.to_str().unwrap_or("")),
+                Ok(path) => normalize_path(&path.to_string_lossy()),
                 Err(_) => continue,
             };
             if rel_path.is_empty() {
@@ -406,6 +420,7 @@ impl FileScanner {
             + self.stats.files_skipped_glob
             + self.stats.files_skipped_minified
             + self.stats.files_skipped_symlink
+            + self.stats.files_skipped_encoding
             + self.stats.files_inventory_only;
 
         Ok(result)
@@ -575,7 +590,12 @@ fn collect_regular_files(
         }
         examined += 1;
         let rel_path = match path.strip_prefix(root) {
-            Ok(rel_path) => normalize_path(rel_path.to_str().unwrap_or("")),
+            Ok(rel_path) => match rel_path.to_str() {
+                Some(rel_path) => normalize_path(rel_path),
+                // Non-UTF-8 names cannot be represented in the disposition
+                // inventory; skip them rather than emitting an empty path.
+                None => continue,
+            },
             Err(_) => {
                 errors += 1;
                 continue;
@@ -1050,6 +1070,38 @@ mod tests {
             disposition.path == "ignored/hidden.rs"
                 && disposition.reason == FileDispositionReason::SkippedGitignore
         }));
+    }
+
+    // macOS kernels reject non-UTF-8 file names outright, so the fixture can
+    // only be created on platforms that accept arbitrary bytes in names.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn non_utf8_file_names_are_skipped_with_a_disposition() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        fs::write(root.join("plain.rs"), "fn plain() {}\n").unwrap();
+        let weird = root.join(OsString::from_vec(b"caf\xe9.rs".to_vec()));
+        fs::write(&weird, "fn weird() {}\n").unwrap();
+
+        let mut scanner = FileScanner::new(root.to_path_buf())
+            .include_extensions(vec![".rs".to_string()])
+            .respect_gitignore(false);
+        let files = scanner.scan().unwrap();
+        let stats = scanner.stats();
+
+        // Only the representable file is included; the non-UTF-8 file must
+        // not silently become an empty relative path.
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].relative_path, "plain.rs");
+        assert_eq!(stats.files_skipped_encoding, 1);
+        assert!(scanner.dispositions().iter().any(|disposition| {
+            disposition.path.contains('�')
+                && disposition.reason == FileDispositionReason::SkippedEncoding
+        }));
+        assert!(!scanner.dispositions().iter().any(|disposition| disposition.path.is_empty()));
     }
 
     #[test]

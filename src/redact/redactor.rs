@@ -516,7 +516,7 @@ mod tests {
         let redactor = Redactor::new();
         let input = "token = \"sk-abcdefghijklmnopqrstuvwxyz12345\"";
         let output = redactor.redact(input);
-        assert!(output.contains("[REDACTED_OPENAI_KEY]") || output.contains("[REDACTED_SECRET]"));
+        assert_eq!(output, "token = \"[REDACTED_OPENAI_KEY]\"");
     }
 
     #[test]
@@ -645,15 +645,19 @@ mod tests {
 
     #[test]
     fn paranoid_mode_redacts_more_entropy_tokens() {
-        let token = "abcDEF123ghiJKL456mnoPQR789";
+        // 24 chars, 12 distinct symbols -> entropy ~3.58: above the paranoid
+        // threshold (3.5) but below the standard threshold (4.5).
+        let token = "AABBCCDDEEFFGGHHIIJJKKLL";
+        assert_eq!(token.len(), 24);
         let input = format!("x = \"{}\"", token);
         let standard =
             Redactor::new().with_entropy_detection(true).with_paranoid_mode(false).redact(&input);
         let paranoid =
             Redactor::new().with_entropy_detection(true).with_paranoid_mode(true).redact(&input);
+        assert_eq!(standard, input, "standard threshold 4.5 must not redact this token");
         assert!(
-            paranoid.contains("[HIGH_ENTROPY_REDACTED]")
-                && (standard.is_empty() || standard.contains("[HIGH_ENTROPY_REDACTED]"))
+            paranoid.contains("[HIGH_ENTROPY_REDACTED]"),
+            "paranoid threshold 3.5 must redact this token, got: {paranoid}"
         );
     }
 

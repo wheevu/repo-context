@@ -410,7 +410,8 @@ fn lockfile_is_summary_only_by_default() {
     let report: Value = serde_json::from_str(&report_raw).expect("parse report");
 
     assert!(context.contains("Summary only: Cargo.lock"));
-    assert!(!context.contains("package = \"x\"\npackage = \"x\""));
+    // No raw lockfile line may leak; the summary replaces the whole file.
+    assert!(!context.contains("package = \"x\""));
     assert!(report["file_dispositions"]
         .as_array()
         .unwrap()

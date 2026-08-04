@@ -28,6 +28,8 @@ pub struct ScanStats {
     #[serde(default)]
     pub files_skipped_symlink: usize,
     #[serde(default)]
+    pub files_skipped_encoding: usize,
+    #[serde(default)]
     pub files_inventory_only: usize,
     #[serde(default)]
     pub unseen_files_examined: usize,
@@ -102,6 +104,7 @@ impl ScanStats {
                 "glob": self.files_skipped_glob,
                 "minified": self.files_skipped_minified,
                 "symlink": self.files_skipped_symlink,
+                "encoding": self.files_skipped_encoding,
                 "inventory_only": self.files_inventory_only,
                 "size": self.files_skipped_size,
             },

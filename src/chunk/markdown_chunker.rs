@@ -117,9 +117,22 @@ mod tests {
         let content = "# A\n\nIntro\n\n# B\n".to_string() + &"line\n".repeat(200);
         let chunks = chunk_markdown(&info, &content, 80, 10);
         assert!(!chunks.is_empty());
-        for chunk in chunks {
+        for chunk in &chunks {
             assert!(chunk.start_line >= 1);
             assert!(chunk.end_line >= chunk.start_line);
         }
+        // Section 2 (lines 6..=205) is oversize and must be split with line
+        // numbers offset to absolute positions: chunks must extend past the
+        // first section and cover the final line of the file.
+        assert!(
+            chunks.iter().any(|chunk| chunk.start_line > 5),
+            "nested chunks must carry absolute line numbers, got: {:?}",
+            chunks.iter().map(|c| (c.start_line, c.end_line)).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            chunks.iter().map(|chunk| chunk.end_line).max(),
+            Some(205),
+            "last chunk must end at the final line of the file"
+        );
     }
 }

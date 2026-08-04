@@ -848,36 +848,24 @@ fn context_pack_escapes_markdown_table_safely() {
 // ── SECURITY REGRESSION TESTS ────────────────────────────────────────────
 
 #[test]
-fn report_does_not_leak_credentialed_repo_url() {
+fn report_never_contains_credential_like_patterns() {
     let fixture = TestRepo::new();
     let out_base = TempDir::new().expect("temp out");
     let out = out_base.path().join("out");
 
-    // This would happen if a user passed `--repo https://user:token@...`
-    // The report should sanitize the credential.
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));
-    cmd.args([
-        "export",
-        "--path",
-        fixture.root().to_str().expect("path"),
-        "--mode",
-        "both",
-        "--output-dir",
-        out.to_str().expect("out"),
-        "--no-timestamp",
-    ]);
-    cmd.env("HOME", &out);
-    cmd.assert().success();
+    run_export(fixture.root(), &out, "both", false);
 
     let actual = resolve_output_dir(&out, fixture.root());
     let report_raw =
         fs::read_to_string(actual.join(output_file_name(fixture.root(), "report.json")))
             .expect("read report");
 
-    // No credential-like patterns should appear in the report.
-    // (This is mainly checking that the sanitizer doesn't crash on normal URLs.)
+    // A local export has no repo URL, so provenance must not invent one, and
+    // nothing in the report may embed userinfo-style credential patterns.
     let report: Value = serde_json::from_str(&report_raw).expect("parse report");
     assert!(report.get("provenance").is_some());
+    assert!(report["provenance"]["repo"].is_null(), "local exports must not fabricate a repo URL");
+    assert!(!report_raw.contains('@'), "report must not contain credential patterns");
 }
 
 #[test]
@@ -915,11 +903,21 @@ fn manifest_scripts_are_redacted_in_context_pack() {
         .expect("read context");
 
     // The secret should NOT appear in the context pack.
-    assert!(!ctx.contains("sk-abc123"), "secret in manifest scripts must be redacted");
+    assert!(
+        !ctx.contains("sk-abcdefghijklmnopqrstuvwxyz12345"),
+        "secret in manifest scripts must be redacted"
+    );
 }
 
 #[test]
 fn symlink_escaping_repo_root_is_rejected() {
+    // Symlink creation is unix-only, so on other platforms this test is skipped.
+    #[cfg(unix)]
+    assert_symlink_rejected();
+}
+
+#[cfg(unix)]
+fn assert_symlink_rejected() {
     let temp = TempDir::new().expect("temp dir");
     let root = temp.path();
     let outside = TempDir::new().expect("outside");
@@ -928,19 +926,8 @@ fn symlink_escaping_repo_root_is_rejected() {
     fs::write(outside.path().join("secrets.txt"), "password=12345\n").expect("write secrets");
 
     // Create a symlink from repo -> outside file.
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(
-            outside.path().join("secrets.txt"),
-            root.join("src/secrets.txt"),
-        )
+    std::os::unix::fs::symlink(outside.path().join("secrets.txt"), root.join("src/secrets.txt"))
         .expect("symlink");
-    }
-    // On non-unix, skip symlink test.
-    #[cfg(not(unix))]
-    {
-        return;
-    }
 
     let out = TempDir::new().expect("temp out");
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("repo-context"));

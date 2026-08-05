@@ -1,7 +1,6 @@
 //! Configuration loading and merging
 //!
-//! Handles loading from config files, environment variables, and CLI arguments
-//! with proper precedence (CLI > Env > File > Defaults).
+//! Handles loading TOML config files and merging CLI and repository settings with defaults.
 
 pub mod loader;
 pub mod merge;

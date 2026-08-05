@@ -12,7 +12,7 @@
 
 `repo-context` is a Rust CLI that turns repositories into high-signal context artifacts for LLM workflows.
 
-It exports clean, predictable prompt and retrieval inputs from local or remote codebases.
+It exports clean, predictable prompt and retrieval inputs from local directories, GitHub repositories, and Hugging Face repositories.
 
 ## Demo
 
@@ -95,6 +95,12 @@ The script builds the release binary with `--locked`, runs `repo-context export 
 - `index` — build or refresh a local redacted SQLite retrieval index
 - `review` — build a deterministic change-aware ImpactPackV1
 
+## Configuration
+
+Configuration is TOML-only.
+Auto-discovery checks `repo-context.toml`, `.repo-context.toml`, `r2p.toml`, and `.r2p.toml` in the repository root.
+Use `--config <FILE>` to load an explicit TOML file.
+
 ## Output
 
 `export` writes artifacts under `~/rc-output/<repo>/`:
@@ -103,9 +109,8 @@ The script builds the release binary with `--locked`, runs `repo-context export 
 - `<repo>_chunks.jsonl` — retrieval chunks for embedding/indexing
 - `<repo>_report.json` — selection stats and run metadata
 
-Task exports add an explainable `retrieval` object to the report and a
-`retrieval` object to each JSONL chunk selected by the task. The report stores
-only a SHA-256 task fingerprint, never the raw task text.
+Task exports add an explainable `retrieval` object to the report and to JSONL chunks with task evidence.
+The report stores only a SHA-256 task fingerprint, never the raw task text.
 
 By mode:
 
@@ -185,13 +190,15 @@ the current repository before rendering. An unavailable implicit cache falls
 back to memory; an explicit `--index-db` failure is an error.
 
 Review the current working tree
-`
+
+```bash
 repo-context review --path . --working-tree --format both --output /tmp/impact-pack.json
-`
+```
 Review two Git refs
-`
+
+```bash
 repo-context review --path . --base main --head HEAD --format json
-`
+```
 Ref-to-ref review scans the checked-out repository to build its static import
 graph and related-file set. For deterministic output, the worktree must be
 clean and the checked-out `HEAD` commit must exactly match the commit resolved
@@ -238,7 +245,7 @@ Disable secret redaction
 repo-context export --path . --no-redact
 ```
 
-Index a Godot 4 project (auto-detected)
+Export a Godot 4 project (auto-detected)
 ```
 repo-context export --path /path/to/game --no-timestamp
 ```
@@ -253,7 +260,10 @@ repo-context export --path /path/to/repo --profile generic
 
 ## Godot 4 repositories
 
-Godot support is auto-selected when `project.godot`, `.godot/`, or a Godot source format is found. `project.godot` is the strongest signal. Set `profile = "godot"` or `profile = "generic"` in `repo-context.toml`, or use `--profile`, to override detection. The Godot profile is layered onto the normal extension and ignore configuration.
+Godot support is auto-selected when the repository contains `project.godot`, a `.godot/` directory, or a `.gd`, `.tscn`, `.tres`, or `.gdshader` file.
+`project.godot` is the strongest signal.
+Set `profile = "godot"` or `profile = "generic"` in `repo-context.toml`, or use `--profile`, to override detection.
+The Godot profile is layered onto the normal extension and ignore configuration.
 
 The scanner understands GDScript (`.gd`), text scenes (`.tscn`), text resources (`.tres`), shaders (`.gdshader`, `.gdshaderinc`), Godot configuration (`.godot`, including `project.godot`), and `.cfg` files. It extracts GDScript declarations and resource paths, scene hierarchy and connections, project settings, shader declarations, standalone Godot test scripts, and the main scene/autoload/load relationships used by the context pack and JSON report.
 

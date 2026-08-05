@@ -15,8 +15,8 @@
 //! 1. **Fetch** - Get repository from local path, GitHub, or HuggingFace
 //! 2. **Scan** - Discover files respecting .gitignore patterns
 //! 3. **Rank** - Prioritize important files (READMEs, configs, entrypoints)
-//! 4. **Chunk** - Split content into model-friendly sizes
-//! 5. **Redact** - Remove secrets safely
+//! 4. **Redact** - Remove secrets safely
+//! 5. **Chunk** - Split content into model-friendly sizes
 //! 6. **Render** - Generate outputs (Markdown, JSONL, JSON report)
 //!
 //! # Example Usage

@@ -28,7 +28,7 @@ pub struct ExportArgs {
     #[arg(long, value_name = "PROFILE")]
     pub profile: Option<String>,
 
-    /// Path to config file (repo-context.toml or .r2p.yml).
+    /// Path to an explicit TOML config file.
     #[arg(short = 'c', long, value_name = "FILE")]
     pub config: Option<PathBuf>,
 

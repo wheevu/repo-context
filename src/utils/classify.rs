@@ -18,6 +18,13 @@ static GENERATED_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
 
 const MINIFIED_INDICATORS: &[&str] = &[".min.", ".bundle.", ".packed."];
 
+/// Bytes read when deciding whether a JSON file is structured data.
+///
+/// Parsing the whole file here would duplicate the later export read for
+/// every JSON file in the repository; a bounded prefix is enough to tell
+/// structured data apart from minified code in practice.
+const JSON_SAMPLE_SIZE: usize = 64 * 1024;
+
 /// Check if a file appears to be minified based on filename or line length.
 ///
 /// # Arguments
@@ -39,9 +46,19 @@ pub fn is_likely_minified(path: &Path, max_line_length: usize) -> bool {
     // One-line JSON is common structured data, not minified executable code.
     if path.extension().and_then(|value| value.to_str()).is_some_and(|ext| {
         ext.eq_ignore_ascii_case("json")
-            && std::fs::read_to_string(path)
+            && std::fs::File::open(path)
                 .ok()
-                .is_some_and(|content| serde_json::from_str::<serde_json::Value>(&content).is_ok())
+                .and_then(|mut file| {
+                    let mut sample = vec![0u8; JSON_SAMPLE_SIZE];
+                    let bytes_read = file.read(&mut sample).ok()?;
+                    sample.truncate(bytes_read);
+                    Some(sample)
+                })
+                .is_some_and(|sample| {
+                    std::str::from_utf8(&sample).ok().is_some_and(|content| {
+                        serde_json::from_str::<serde_json::Value>(content).is_ok()
+                    })
+                })
     }) {
         return false;
     }

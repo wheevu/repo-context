@@ -8,7 +8,7 @@ use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -166,8 +166,20 @@ impl FileScanner {
         // Pre-allocate with reasonable capacity to avoid reallocations during growth
         let mut files: Vec<(PathBuf, String)> = Vec::with_capacity(1024);
         let exclude_globset = self.build_exclude_globset()?;
-        let canonical_root =
-            self.follow_symlinks.then(|| self.root_path.canonicalize()).transpose()?;
+        // Resolve the root once; containment checks require it. When
+        // resolution fails, degrade to rejecting every symlink entry in the
+        // walk below rather than scanning unguarded.
+        let canonical_root = match self.root_path.canonicalize() {
+            Ok(path) => Some(path),
+            Err(error) => {
+                tracing::warn!(
+                    "cannot canonicalize scan root {}: {}; symlink entries will be rejected closed",
+                    self.root_path.display(),
+                    error
+                );
+                None
+            }
+        };
         let rejected_symlink_dirs = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
 
         // Directory filter function matching Python's _walk_files behavior
@@ -221,6 +233,10 @@ impl FileScanner {
 
         let walker = builder.build();
 
+        // Set when any symlink entry was observed; used to decide whether the
+        // canonical-path dedup pass below can be skipped entirely.
+        let mut observed_symlink = false;
+
         // Collect all files
         for entry_result in walker {
             let entry = match entry_result {
@@ -229,9 +245,27 @@ impl FileScanner {
             };
 
             let path = entry.path();
+            if entry.path_is_symlink() {
+                observed_symlink = true;
+            }
 
-            // Skip directories
+            // Skip directories.
             if path.is_dir() {
+                // A directory symlink that is not followed would otherwise
+                // vanish silently from the inventory. Record it so the report
+                // can reconcile what it skipped. Followed links (follow=true)
+                // are walked, so their children are accounted for normally.
+                if entry.path_is_symlink() && !self.follow_symlinks {
+                    let rel_path = path
+                        .strip_prefix(&self.root_path)
+                        .ok()
+                        .and_then(|p| p.to_str())
+                        .map(normalize_path)
+                        .unwrap_or_default();
+                    if !rel_path.is_empty() {
+                        self.record_symlink_skip(path, rel_path, true);
+                    }
+                }
                 continue;
             }
 
@@ -259,11 +293,22 @@ impl FileScanner {
             };
             let rel_path = normalize_path(rel_path);
 
-            // Validate the fully resolved path, not only the final path
-            // component. This catches regular files reached through a safe
-            // looking directory entry that escaped through an ancestor link.
-            if let Some(canonical_root) = canonical_root.as_deref() {
-                if !is_path_within_root(path, canonical_root) {
+            // Walkdir yields symlink entries even when links are not followed
+            // (it only refuses to descend into them), and metadata() below
+            // follows the link to read the target. Reject any symlink whose
+            // fully resolved target escapes the canonical root. This runs
+            // unconditionally so an external file cannot leak into the pack
+            // under the default follow_symlinks=false configuration. When the
+            // root could not be canonicalized, every symlink is rejected
+            // closed. Entries under a followed link report themselves as
+            // symlinks too, so this check also catches a file reached through
+            // an ancestor link whose directory entry looked safe.
+            if entry.path_is_symlink() {
+                let within_root = canonical_root
+                    .as_deref()
+                    .map(|root| is_path_within_root(path, root))
+                    .unwrap_or(false);
+                if !within_root {
                     self.record_symlink_skip(path, rel_path, false);
                     continue;
                 }
@@ -362,6 +407,11 @@ impl FileScanner {
         // Convert to FileInfo objects
         // Pre-allocate result with known capacity to avoid reallocations
         let mut result = Vec::with_capacity(files.len());
+        // Canonical paths claimed by each included file. When the walk
+        // observed symlinks, the same content can be reachable through two
+        // paths (a real directory and a symlinked alias); it must be included
+        // exactly once or tokens, chunks, and stats are inflated.
+        let mut canonical_paths: HashMap<PathBuf, String> = HashMap::new();
         for (path, rel_path) in files {
             let metadata = match path.metadata() {
                 Ok(m) => m,
@@ -375,6 +425,25 @@ impl FileScanner {
 
             let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let language = crate::domain::get_language(&ext_with_dot, filename);
+
+            if observed_symlink {
+                let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+                if let Some(original) = canonical_paths.get(&canonical) {
+                    self.stats.files_skipped_symlink += 1;
+                    let mut disposition = FileDisposition::new(
+                        rel_path.clone(),
+                        FileDispositionReason::SkippedSymlink,
+                    );
+                    disposition.size_bytes = Some(size);
+                    disposition.extension = ext_with_dot.clone();
+                    disposition.language = language.clone();
+                    disposition.notes =
+                        Some(format!("duplicate content, already included via {original}"));
+                    self.dispositions.push(disposition);
+                    continue;
+                }
+                canonical_paths.insert(canonical, rel_path.clone());
+            }
 
             // Generate stable ID: SHA-256 of relative path, first 16 hex chars (matches Python)
             let id = {
@@ -409,9 +478,14 @@ impl FileScanner {
             result.push(file_info);
         }
 
-        // Add disposition records for files hidden from the ignore walker by gitignore or
-        // directory filters so report inventory can reconcile with discovered files.
-        self.record_unseen_files();
+        // Add disposition records for files hidden from the ignore walker by
+        // gitignore so report inventory can reconcile with discovered files.
+        // With gitignore disabled the walker yields every regular file, and
+        // the reconciliation traversal applies the same directory filter, so
+        // it could never discover anything; skip it entirely.
+        if self.respect_gitignore {
+            self.record_unseen_files();
+        }
 
         self.stats.files_skipped = self.stats.files_skipped_size
             + self.stats.files_skipped_binary
@@ -471,6 +545,12 @@ impl FileScanner {
         self.record_path(path, rel_path, FileDispositionReason::SkippedSymlink, size);
     }
 
+    /// Record dispositions for files the gitignore-filtered walker never
+    /// yielded, so the report inventory can reconcile with the tree contents.
+    ///
+    /// The reconciliation traversal applies the same hidden/noise directory
+    /// filter as the main walker, so every file it finds was hidden
+    /// exclusively by gitignore rules and is classified accordingly.
     fn record_unseen_files(&mut self) {
         let seen: BTreeSet<String> = self.dispositions.iter().map(|d| d.path.clone()).collect();
         let inventory = collect_regular_files(&self.root_path, &seen, MAX_UNSEEN_FILES);
@@ -498,29 +578,13 @@ impl FileScanner {
             if let Some(size) = size {
                 self.stats.total_bytes_discovered += size;
             }
-            if is_excluded_noise_path(&rel_path) {
-                self.record_path(
-                    &path,
-                    rel_path.clone(),
-                    FileDispositionReason::ExcludedNoiseDir,
-                    size,
-                );
-            } else if self.respect_gitignore {
-                self.stats.files_skipped_gitignore += 1;
-                self.record_path(
-                    &path,
-                    rel_path.clone(),
-                    FileDispositionReason::SkippedGitignore,
-                    size,
-                );
-            } else {
-                self.record_path(
-                    &path,
-                    rel_path.clone(),
-                    FileDispositionReason::ExcludedNoiseDir,
-                    size,
-                );
-            }
+            self.stats.files_skipped_gitignore += 1;
+            self.record_path(
+                &path,
+                rel_path.clone(),
+                FileDispositionReason::SkippedGitignore,
+                size,
+            );
         }
     }
 }
@@ -584,10 +648,6 @@ fn collect_regular_files(
         if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
             continue;
         }
-        if examined >= max_files {
-            truncated = true;
-            break;
-        }
         examined += 1;
         let rel_path = match path.strip_prefix(root) {
             Ok(rel_path) => match rel_path.to_str() {
@@ -605,25 +665,17 @@ fn collect_regular_files(
             continue;
         }
         files.push((rel_path, path.to_path_buf()));
+        // The cap bounds the inventory size (unseen files found), not the
+        // number of files walked: a repository with nothing unseen must not
+        // report a truncated inventory.
+        if files.len() >= max_files {
+            truncated = true;
+            break;
+        }
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
     UnseenFileInventory { files, examined, truncated, errors }
-}
-
-fn is_excluded_noise_path(rel_path: &str) -> bool {
-    rel_path.split('/').any(|part| {
-        matches!(
-            part,
-            "node_modules"
-                | "__pycache__"
-                | ".git"
-                | ".venv"
-                | "venv"
-                | "target"
-                | "playwright-report"
-        ) || (part.starts_with('.') && part != ".github")
-    })
 }
 
 fn extension_with_dot(path: &Path) -> String {
@@ -1008,8 +1060,129 @@ mod tests {
             .follow_symlinks(true);
         let files = scanner.scan().unwrap();
 
+        // The inside directory symlink is followed, but the content is
+        // reachable through both real/ and linked/; it is included exactly
+        // once and the duplicate path is recorded as skipped.
+        assert_eq!(files.len(), 1, "content reachable through two paths must be included once");
         assert!(files.iter().any(|file| file.relative_path == "linked/inside.rs"));
-        assert_eq!(scanner.stats().files_skipped_symlink, 0);
+        assert_eq!(scanner.stats().files_skipped_symlink, 1);
+        assert!(scanner.dispositions().iter().any(|disposition| {
+            disposition.path == "real/inside.rs"
+                && disposition.reason == FileDispositionReason::SkippedSymlink
+                && disposition
+                    .notes
+                    .as_deref()
+                    .is_some_and(|notes| notes.contains("linked/inside.rs"))
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_scanner_rejects_external_file_symlinks() {
+        let root_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+        fs::write(outside_dir.path().join("secret.rs"), "password=12345\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside_dir.path().join("secret.rs"),
+            root_dir.path().join("linked.rs"),
+        )
+        .unwrap();
+
+        // follow_symlinks stays at its default (false): the default
+        // configuration must not read the target of a symlink that escapes
+        // the repository, even though walkdir yields the symlink entry.
+        let mut scanner = FileScanner::new(root_dir.path().to_path_buf())
+            .include_extensions(vec![".rs".to_string()])
+            .exclude_globs(Vec::new())
+            .respect_gitignore(false);
+        let files = scanner.scan().unwrap();
+
+        assert!(files.is_empty(), "external file contents must not be scanned");
+        assert_eq!(scanner.stats().files_skipped_symlink, 1);
+        assert_eq!(scanner.stats().files_discovered, 1);
+        assert!(scanner.dispositions().iter().any(|disposition| {
+            disposition.path == "linked.rs"
+                && disposition.reason == FileDispositionReason::SkippedSymlink
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_scanner_records_unfollowed_directory_symlinks() {
+        let root_dir = TempDir::new().unwrap();
+        fs::create_dir_all(root_dir.path().join("real")).unwrap();
+        fs::write(root_dir.path().join("real/inside.rs"), "fn inside() {}\n").unwrap();
+        std::os::unix::fs::symlink(root_dir.path().join("real"), root_dir.path().join("linked"))
+            .unwrap();
+
+        let mut scanner = FileScanner::new(root_dir.path().to_path_buf())
+            .include_extensions(vec![".rs".to_string()])
+            .exclude_globs(Vec::new())
+            .respect_gitignore(false);
+        let files = scanner.scan().unwrap();
+
+        // Only the real file is scanned; the unfollowed alias directory is
+        // recorded instead of dropping silently out of the inventory.
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].relative_path, "real/inside.rs");
+        assert_eq!(scanner.stats().files_skipped_symlink, 1);
+        assert_eq!(scanner.stats().files_discovered, 2);
+        assert!(scanner.dispositions().iter().any(|disposition| {
+            disposition.path == "linked"
+                && disposition.reason == FileDispositionReason::SkippedSymlink
+        }));
+    }
+
+    #[test]
+    fn unseen_inventory_is_complete_when_nothing_is_unseen() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let mut seen = BTreeSet::new();
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            fs::write(root.join(name), "fn value() {}\n").unwrap();
+            seen.insert(name.to_string());
+        }
+
+        // Cap (2) is below the file count (3), yet everything was already
+        // seen: the inventory must not claim truncation.
+        let inventory = collect_regular_files(root, &seen, 2);
+
+        assert!(inventory.files.is_empty());
+        assert_eq!(inventory.examined, 3);
+        assert!(!inventory.truncated);
+        assert_eq!(inventory.errors, 0);
+    }
+
+    #[test]
+    fn gitignore_disabled_skips_unseen_reconciliation_walk() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let git_init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(git_init.success(), "git init should create the temporary repository");
+        fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+        fs::create_dir_all(root.join("ignored")).unwrap();
+        fs::write(root.join("ignored/hidden.rs"), "fn hidden() {}\n").unwrap();
+        fs::write(root.join("visible.rs"), "fn visible() {}\n").unwrap();
+
+        let mut scanner = FileScanner::new(root.to_path_buf())
+            .include_extensions(vec![".rs".to_string()])
+            .exclude_globs(Vec::new())
+            .respect_gitignore(false);
+        let files = scanner.scan().unwrap();
+        let stats = scanner.stats();
+
+        // With gitignore disabled the main walker yields every file, so the
+        // unseen reconciliation traversal has nothing to find and must not
+        // run at all.
+        assert!(files.iter().any(|file| file.relative_path == "ignored/hidden.rs"));
+        assert_eq!(stats.files_skipped_gitignore, 0);
+        assert_eq!(stats.unseen_files_examined, 0);
+        assert_eq!(stats.unseen_files_reconciled, 0);
+        assert!(!stats.unseen_inventory_truncated);
     }
 
     #[test]
